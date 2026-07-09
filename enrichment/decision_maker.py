@@ -42,17 +42,16 @@ class DecisionMaker:
         """
         Search DuckDuckGo for the company's Instagram profile.
         """
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 with DDGS() as ddgs:
                     results = list(ddgs.text(f"{company_name} instagram", max_results=5))
                     break
             except Exception as e:
-                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
-                    time.sleep(15 * (2 ** attempt))
-                else:
-                    print(f"Error searching DDG for {company_name}: {e}")
-                    return ""
+                print(f"DDG Error for {company_name}: {e}")
+                return ""
+        else:
+            return ""
 
         for item in results:
             link = item.get("href", "")
@@ -192,7 +191,7 @@ class DecisionMaker:
 
     def _find_ceo_name(self, company_name: str) -> str:
         """Search LinkedIn via DDG for the CEO/Founder's name."""
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 with DDGS() as ddgs:
                     query = f'site:linkedin.com/in "Founder" OR "CEO" "{company_name}"'
@@ -201,35 +200,30 @@ class DecisionMaker:
                         return ""
                         
                     title = results[0].get("title", "")
-                    # Titles usually look like "John Doe - Founder - Company | LinkedIn"
                     parts = re.split(r'[-|]', title)
                     if parts:
                         name = parts[0].strip()
-                        # Filter out generic things
                         if len(name.split()) <= 3 and "LinkedIn" not in name:
                             return name
-                    break # Success
-            except Exception as e:
-                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
-                    time.sleep(15 * (2 ** attempt))
-                else:
-                    print(f"Error finding CEO for {company_name}: {e}")
                     break
+            except Exception as e:
+                print(f"DDG Error finding CEO for {company_name}: {e}")
+                return ""
         return ""
 
     def _find_email_via_osint(self, company_name: str, domain: str) -> str:
         """Fallback OSINT search to scrape emails directly off Google/DDG."""
         query = f'"{company_name}" "@gmail.com" OR "@{domain}" email'
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 with DDGS() as ddgs:
                     results = list(ddgs.text(query, max_results=5))
                     break
             except Exception as e:
-                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
-                    time.sleep(15 * (2 ** attempt))
-                else:
-                    return ""
+                print(f"DDG Error OSINT email for {company_name}: {e}")
+                return ""
+        else:
+            return ""
                     
         for res in results:
             text = res.get("body", "") + " " + res.get("title", "")
