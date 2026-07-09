@@ -9,6 +9,7 @@ const API_BASE = ""; // Use relative paths so it works on same domain
 function App() {
   const [niche, setNiche] = useState('Digital Marketing Agency');
   const [city, setCity] = useState('Mumbai');
+  const [limit, setLimit] = useState(10);
   const [leads, setLeads] = useState([]);
   const [loadingSearch, setLoadingSearch] = useState(false);
 
@@ -17,7 +18,7 @@ function App() {
     setLoadingSearch(true);
     setLeads([]);
     try {
-      const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: 10 });
+      const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10 });
       setLeads(res.data.leads.map(lead => ({ ...lead, auditState: 'none' })));
     } catch (err) {
       alert("Error searching leads.");
@@ -125,6 +126,17 @@ function App() {
               value={city} 
               onChange={e => setCity(e.target.value)} 
               placeholder="e.g. Mumbai"
+              required 
+            />
+          </div>
+          <div className="input-group" style={{maxWidth: '100px'}}>
+            <label>Leads</label>
+            <input 
+              type="number" 
+              value={limit} 
+              onChange={e => setLimit(e.target.value)} 
+              min="1"
+              max="100"
               required 
             />
           </div>
