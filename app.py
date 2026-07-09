@@ -53,8 +53,8 @@ sheets = SheetsStorage()
 def save_leads_to_sheets_bg(leads: list):
     for lead in leads:
         sheet_data = {
-            "Company": lead.get("name", ""),
-            "Website": lead.get("website", ""),
+            "Company": lead.get("Company", ""),
+            "Website": lead.get("Website", ""),
             "Source": "web_search",
             "Status": "pending"
         }
