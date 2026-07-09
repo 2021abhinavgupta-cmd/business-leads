@@ -3,6 +3,7 @@ Storage module — manages the CRM data in Google Sheets.
 """
 
 import os
+import json
 from datetime import datetime, timezone
 
 import gspread
@@ -43,10 +44,21 @@ class SheetsStorage:
     def __init__(self):
         if not config.GOOGLE_SHEETS_ID:
             raise ValueError("GOOGLE_SHEETS_ID is not set in config / environment.")
-        if not os.path.exists(_CREDENTIALS_FILE):
-            raise FileNotFoundError(f"Missing Google Sheets credentials at {_CREDENTIALS_FILE}")
 
-        self.gc = gspread.service_account(filename=_CREDENTIALS_FILE)
+        # Try to load from Environment Variable first (for Railway/Production)
+        creds_json_str = os.getenv("GOOGLE_CREDENTIALS_JSON")
+        if creds_json_str:
+            try:
+                creds_dict = json.loads(creds_json_str)
+                self.gc = gspread.service_account_from_dict(creds_dict)
+            except Exception as e:
+                raise ValueError(f"Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
+        # Fallback to local credentials.json file
+        else:
+            if not os.path.exists(_CREDENTIALS_FILE):
+                raise FileNotFoundError(f"Missing Google Sheets credentials at {_CREDENTIALS_FILE} and GOOGLE_CREDENTIALS_JSON is empty.")
+            self.gc = gspread.service_account(filename=_CREDENTIALS_FILE)
+
         self.sheet = self.gc.open_by_key(config.GOOGLE_SHEETS_ID).sheet1
 
     # ------------------------------------------------------------------
