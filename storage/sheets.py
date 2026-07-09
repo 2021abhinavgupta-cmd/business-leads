@@ -210,3 +210,20 @@ class SheetsStorage:
         """
         # Column O = 15
         self.sheet.update_cell(row_number, 15, "replied")
+
+    def find_row_by_website(self, website: str) -> int:
+        """
+        Find the row number for a given website URL.
+        Returns the row number (1-indexed) or None if not found.
+        """
+        try:
+            # Website is in Column D (index 4)
+            websites = self.sheet.col_values(4)
+            target = website.lower().strip().rstrip('/')
+            
+            for i, w in enumerate(websites):
+                if w.lower().strip().rstrip('/') == target:
+                    return i + 1  # +1 because gspread is 1-indexed
+            return None
+        except Exception:
+            return None

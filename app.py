@@ -1,7 +1,7 @@
 import asyncio
 import os
 import random
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
 from emailer.ses_sender import SESSender
 from analyzer.visuals import generate_audit_screenshot
+from storage.sheets import SheetsStorage
 
 app = FastAPI(title="Lead Audit Bot Web App")
 
@@ -47,17 +48,32 @@ web_scraper = WebsiteScraper()
 ig_scraper = InstagramScraper()
 auditor = AIAuditor()
 ses = SESSender()
+sheets = SheetsStorage()
+
+def save_leads_to_sheets_bg(leads: list):
+    for lead in leads:
+        sheet_data = {
+            "Company": lead.get("name", ""),
+            "Website": lead.get("website", ""),
+            "Source": "web_search",
+            "Status": "pending"
+        }
+        try:
+            sheets.add_lead(sheet_data)
+        except Exception as e:
+            print(f"Error saving to sheets: {e}")
 
 @app.post("/api/search")
-async def search_leads(req: SearchRequest):
+async def search_leads(req: SearchRequest, background_tasks: BackgroundTasks):
     try:
         leads = maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/audit")
-async def audit_lead(req: AuditRequest):
+async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
     try:
         # Check SES quota (optional but good for safety)
         quota = ses.check_ses_quota()
@@ -88,6 +104,18 @@ async def audit_lead(req: AuditRequest):
         YOUR_NAME = os.getenv("YOUR_NAME", "Admin")
         subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME)
 
+        # Update Sheets in background
+        def save_audit_to_sheets():
+            try:
+                row = sheets.find_row_by_website(req.website)
+                if row:
+                    sheets.save_draft(row, subject, body)
+                    sheets.update_status(row, "drafted")
+            except Exception as e:
+                print(f"Error updating audit in sheets: {e}")
+
+        background_tasks.add_task(save_audit_to_sheets)
+
         return {
             "email": email,
             "subject": subject,
@@ -101,7 +129,7 @@ async def audit_lead(req: AuditRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send")
-async def send_email(req: SendRequest):
+async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
     try:
         # Generate Screenshot (takes time, optional)
         image_path = None
@@ -117,6 +145,14 @@ async def send_email(req: SendRequest):
                 pass
                 
         if success:
+            def save_send_to_sheets():
+                try:
+                    row = sheets.find_row_by_website(req.website)
+                    if row:
+                        sheets.update_status(row, "emailed")
+                except Exception as e:
+                    print(f"Error updating send status in sheets: {e}")
+            background_tasks.add_task(save_send_to_sheets)
             return {"status": "success"}
         else:
             raise HTTPException(status_code=500, detail="Failed to send via SES")
