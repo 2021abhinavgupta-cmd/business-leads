@@ -411,15 +411,8 @@ class WebsiteScraper:
     @staticmethod
     def _detect_technologies(url: str) -> list[str]:
         """Detect the tech stack of the website using Wappalyzer."""
-        try:
-            wappalyzer = Wappalyzer.latest()
-            webpage = WebPage.new_from_url(url)
-            techs = wappalyzer.analyze(webpage)
-            # Return list of tech names
-            return list(techs)[:10] if techs else []
-        except Exception as e:
-            print(f"Error detecting tech stack for {url}: {e}")
-            return []
+        # DISABLED: Wappalyzer is synchronous and takes 10-20 seconds, causing Railway 502 timeouts.
+        return []
 
     # ------------------------------------------------------------------
     # Helpers

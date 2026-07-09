@@ -28,8 +28,8 @@ class DecisionMaker:
 
     def __init__(self, min_score: int = 50):
         self.min_score = min_score
-        # Relaxed httpx client for scraping random websites
-        self.client = httpx.Client(timeout=15, verify=False)
+        # Relaxed httpx client for scraping random websites (fast timeout to prevent 502)
+        self.client = httpx.Client(timeout=5, verify=False)
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -132,7 +132,7 @@ class DecisionMaker:
         """
         Crawl homepage, /contact, and /about pages looking for emails.
         """
-        paths_to_check = ["", "/contact", "/about", "/contact-us", "/about-us"]
+        paths_to_check = ["", "/contact"]
         found_emails = set()
 
         for path in paths_to_check:
