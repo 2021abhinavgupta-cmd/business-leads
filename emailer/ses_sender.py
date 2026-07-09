@@ -1,0 +1,183 @@
+"""
+SES Sender — delivers plain-text cold emails through Amazon SES.
+"""
+
+import time
+import os
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
+
+import boto3
+from botocore.exceptions import ClientError
+
+import config
+
+
+class SESSender:
+    """Send plain-text cold emails via AWS Simple Email Service."""
+
+    def __init__(self):
+        self.client = boto3.client(
+            "ses",
+            region_name=config.AWS_REGION,
+            aws_access_key_id=config.AWS_ACCESS_KEY,
+            aws_secret_access_key=config.AWS_SECRET_KEY,
+        )
+        self.from_email = config.FROM_EMAIL
+
+    def generate_email(
+        self, company: str, contact_name: str, analysis: dict, your_name: str
+    ) -> tuple[str, str]:
+        """
+        Generate the subject and body for the cold email.
+
+        Args:
+            company: The target company's name.
+            contact_name: The first name of the decision maker.
+            analysis: The AI audit dict containing flaws and email copy.
+            your_name: The sender's name to sign off with.
+
+        Returns:
+            (subject, body) as plain text strings.
+        """
+        subject = analysis.get("email_subject", f"Quick question about {company}")
+        opening_line = analysis.get("opening_line", "Came across your brand and wanted to reach out.")
+        
+        flaws = analysis.get("flaws", [])
+        
+        body_lines = [
+            f"Hi {contact_name},\n",
+            f"{opening_line}\n"
+        ]
+        
+        if len(flaws) >= 1:
+            flaw1 = flaws[0]
+            body_lines.append(f"{flaw1.get('headline', '')}")
+            body_lines.append(f"{flaw1.get('detail', '')} This is {flaw1.get('impact', '')}.\n")
+            
+        if len(flaws) >= 2:
+            flaw2 = flaws[1]
+            body_lines.append(f"{flaw2.get('headline', '')}")
+            body_lines.append(f"{flaw2.get('detail', '')} Which means {flaw2.get('impact', '')}.\n")
+            
+        body_lines.extend([
+            "I've been helping brands fix exactly these things.",
+            "Worth a quick 10-minute call this week?\n",
+            f"{your_name}"
+        ])
+        
+        body = "\n".join(body_lines)
+        # Convert plain text body to simple HTML for inline images
+        html_body = body.replace('\n', '<br>')
+        return subject, html_body
+
+    def send_email(self, to_email: str, subject: str, body: str, image_path: str = None) -> bool:
+        """
+        Send an email using AWS SES. If image_path is provided, sends as a MIME multipart
+        raw email with the image embedded inline.
+
+        Args:
+            to_email: The recipient's email address.
+            subject: The email subject.
+            body: The HTML email body.
+            image_path: Optional path to an image to embed.
+
+        Returns:
+            True if the email was successfully accepted by SES, False otherwise.
+        """
+        retries = 1
+        
+        for attempt in range(retries + 1):
+            try:
+                if image_path and os.path.exists(image_path):
+                    msg = MIMEMultipart('related')
+                    msg['Subject'] = subject
+                    msg['From'] = self.from_email
+                    msg['To'] = to_email
+                    
+                    # Embed the image in the HTML body
+                    html_with_img = f"{body}<br><br><img src='cid:audit_img' style='max-width:100%; border:2px solid red;'><br>"
+                    msg_alternative = MIMEMultipart('alternative')
+                    msg.attach(msg_alternative)
+                    msg_alternative.attach(MIMEText(html_with_img, 'html'))
+                    
+                    with open(image_path, 'rb') as f:
+                        img_data = f.read()
+                    
+                    img = MIMEImage(img_data)
+                    img.add_header('Content-ID', '<audit_img>')
+                    img.add_header('Content-Disposition', 'inline')
+                    msg.attach(img)
+                    
+                    self.client.send_raw_email(
+                        Source=self.from_email,
+                        Destinations=[to_email],
+                        RawMessage={'Data': msg.as_string()}
+                    )
+                else:
+                    # Fallback to standard plain text / basic HTML
+                    self.client.send_email(
+                        Source=self.from_email,
+                        Destination={"ToAddresses": [to_email]},
+                        Message={
+                            "Subject": {"Data": subject, "Charset": "UTF-8"},
+                            "Body": {
+                                "Html": {"Data": body, "Charset": "UTF-8"},
+                            },
+                        },
+                    )
+                return True
+                
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                error_message = e.response.get("Error", {}).get("Message", "")
+                
+                if "Daily message quota exceeded" in error_message or "LimitExceeded" in error_code:
+                    raise Exception(f"SES Daily sending quota exceeded: {error_message}") from e
+                
+                if error_code == "MessageRejected":
+                    print(f"Message rejected by SES: {error_message}")
+                    return False
+                    
+                if error_code == "Throttling":
+                    if attempt < retries:
+                        time.sleep(5)
+                        continue
+                    else:
+                        print(f"Throttling error after retry: {error_message}")
+                        return False
+                        
+                print(f"SES ClientError ({error_code}): {error_message}")
+                return False
+                
+            except Exception as e:
+                print(f"Unexpected error sending email: {e}")
+                return False
+
+    def check_ses_quota(self) -> dict:
+        """
+        Get the remaining SES daily sending quota.
+
+        Returns:
+            A dict containing 'Max24HourSend', 'SentLast24Hours', and 'Remaining'.
+        """
+        try:
+            response = self.client.get_send_quota()
+            max_send = response.get("Max24HourSend", 0.0)
+            sent = response.get("SentLast24Hours", 0.0)
+            remaining = max(0.0, max_send - sent)
+            
+            return {
+                "Max24HourSend": max_send,
+                "SentLast24Hours": sent,
+                "Remaining": remaining
+            }
+        except Exception as e:
+            print(f"Error getting SES quota: {e}")
+            return {
+                "Max24HourSend": 0.0,
+                "SentLast24Hours": 0.0,
+                "Remaining": 0.0
+            }

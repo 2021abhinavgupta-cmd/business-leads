@@ -1,0 +1,299 @@
+"""
+Decision Maker — enriches leads with Instagram handles and decision-maker
+contacts, then scores and qualifies them.
+
+Uses free external services:
+    - duckduckgo-search (Google alternative for Instagram handle discovery)
+    - Custom Website Scraper (Regex on /contact, /about for emails)
+    - Fallback generic email patterns
+"""
+
+import re
+import time
+from urllib.parse import urlparse, urljoin
+
+import httpx
+from duckduckgo_search import DDGS
+from email_validator import validate_email, EmailNotValidError
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+_MARKETING_KEYWORDS = {"marketing", "brand", "digital"}
+_EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+
+
+class DecisionMaker:
+    """Enrich, score, and qualify leads."""
+
+    def __init__(self, min_score: int = 50):
+        self.min_score = min_score
+        # Relaxed httpx client for scraping random websites
+        self.client = httpx.Client(timeout=15, verify=False)
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
+    # ------------------------------------------------------------------
+    # 1. Instagram handle discovery
+    # ------------------------------------------------------------------
+
+    def find_instagram_handle(self, company_name: str, website: str) -> str:
+        """
+        Search DuckDuckGo for the company's Instagram profile.
+        """
+        for attempt in range(3):
+            try:
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(f"{company_name} instagram", max_results=5))
+                    break
+            except Exception as e:
+                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
+                    time.sleep(15 * (2 ** attempt))
+                else:
+                    print(f"Error searching DDG for {company_name}: {e}")
+                    return ""
+
+        for item in results:
+            link = item.get("href", "")
+            if "instagram.com/" not in link:
+                continue
+
+            match = re.search(r"instagram\.com/([a-zA-Z0-9_.]+)", link)
+            if match:
+                handle = match.group(1)
+                # Skip generic Instagram pages
+                if handle.lower() not in {"p", "explore", "accounts", "reel", "stories"}:
+                    return handle
+
+        return ""
+
+    # ------------------------------------------------------------------
+    # 2. Decision-maker contact discovery
+    # ------------------------------------------------------------------
+
+    def find_decision_maker(self, company_name: str, website: str) -> dict:
+        """
+        Find the best marketing contact for a company.
+
+        Strategy order:
+            1. Custom website scraper looking for public emails.
+            2. Fallback to generic email patterns.
+
+        Args:
+            company_name: Business name.
+            website:      Business website URL.
+
+        Returns:
+            ``{"name": str, "email": str, "title": str}``
+        """
+        domain = self._extract_domain(website)
+        if not domain:
+            return {"name": "", "email": "", "title": ""}
+
+        if not website.startswith(("http://", "https://")):
+            website = f"https://{website}"
+
+        # Strategy 1 — Internal Scraper
+        scraped_email = self._scrape_website_for_email(website)
+        if scraped_email:
+            return {
+                "name": "Marketing Team", # Hard to infer exact names from raw emails
+                "email": scraped_email,
+                "title": ""
+            }
+
+        # Strategy 2 — LinkedIn OSINT (CEO Discovery)
+        ceo_name = self._find_ceo_name(company_name)
+        if ceo_name:
+            first_name = ceo_name.split()[0].lower()
+            return {
+                "name": ceo_name,
+                "email": f"{first_name}@{domain}",
+                "title": "Founder / CEO"
+            }
+
+        # Strategy 3 — OSINT Email Dork
+        osint_email = self._find_email_via_osint(company_name, domain)
+        if osint_email:
+            return {
+                "name": "Team",
+                "email": osint_email,
+                "title": ""
+            }
+
+        # Strategy 4 — generic email patterns
+        return self._fallback_patterns(domain)
+
+    # ------------------------------------------------------------------
+    # Custom Website Scraper for Emails
+    # ------------------------------------------------------------------
+
+    def _scrape_website_for_email(self, base_url: str) -> str:
+        """
+        Crawl homepage, /contact, and /about pages looking for emails.
+        """
+        paths_to_check = ["", "/contact", "/about", "/contact-us", "/about-us"]
+        found_emails = set()
+
+        for path in paths_to_check:
+            url = urljoin(base_url, path)
+            try:
+                response = self.client.get(url, headers=self.headers, follow_redirects=True)
+                if response.status_code == 200:
+                    # Extract emails using regex
+                    emails = set(re.findall(_EMAIL_REGEX, response.text))
+                    found_emails.update(emails)
+                    
+                    # If we found emails, stop checking more paths to save time
+                    if found_emails:
+                        break
+            except Exception:
+                continue
+                
+        # Filter out common false positives (e.g. image files matching regex)
+        valid_emails = []
+        junk_extensions = (".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".svg", ".webp", ".mp4", "sentry.io", "example.com")
+        
+        for email in found_emails:
+            email_lower = email.lower()
+            if not email_lower.endswith(junk_extensions):
+                valid_emails.append(email_lower)
+                
+        if not valid_emails:
+            return ""
+            
+        # Score emails to prioritize high-value contacts
+        def score_email(e: str) -> int:
+            if any(kw in e for kw in ["founder", "ceo", "director", "owner"]):
+                return 100
+            if any(kw in e for kw in ["marketing", "growth", "sales"]):
+                return 80
+            if any(kw in e for kw in ["hello", "hi", "contact", "info"]):
+                return 50
+            return 10  # obscure/personal emails
+            
+        valid_emails.sort(key=score_email, reverse=True)
+        
+        # Verify via SMTP before accepting
+        for candidate in valid_emails:
+            try:
+                # check_deliverability=True performs SMTP checks
+                valid = validate_email(candidate, check_deliverability=True)
+                return valid.normalized
+            except EmailNotValidError:
+                continue
+                
+        return ""
+
+    # ------------------------------------------------------------------
+    # LinkedIn OSINT
+    # ------------------------------------------------------------------
+
+    def _find_ceo_name(self, company_name: str) -> str:
+        """Search LinkedIn via DDG for the CEO/Founder's name."""
+        for attempt in range(3):
+            try:
+                with DDGS() as ddgs:
+                    query = f'site:linkedin.com/in "Founder" OR "CEO" "{company_name}"'
+                    results = list(ddgs.text(query, max_results=3))
+                    if not results:
+                        return ""
+                        
+                    title = results[0].get("title", "")
+                    # Titles usually look like "John Doe - Founder - Company | LinkedIn"
+                    parts = re.split(r'[-|]', title)
+                    if parts:
+                        name = parts[0].strip()
+                        # Filter out generic things
+                        if len(name.split()) <= 3 and "LinkedIn" not in name:
+                            return name
+                    break # Success
+            except Exception as e:
+                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
+                    time.sleep(15 * (2 ** attempt))
+                else:
+                    print(f"Error finding CEO for {company_name}: {e}")
+                    break
+        return ""
+
+    def _find_email_via_osint(self, company_name: str, domain: str) -> str:
+        """Fallback OSINT search to scrape emails directly off Google/DDG."""
+        query = f'"{company_name}" "@gmail.com" OR "@{domain}" email'
+        for attempt in range(3):
+            try:
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=5))
+                    break
+            except Exception as e:
+                if "Ratelimit" in str(e) or "rate limit" in str(e).lower() or attempt < 2:
+                    time.sleep(15 * (2 ** attempt))
+                else:
+                    return ""
+                    
+        for res in results:
+            text = res.get("body", "") + " " + res.get("title", "")
+            emails = re.findall(_EMAIL_REGEX, text)
+            for email in emails:
+                if email.lower().endswith(domain) or email.lower().endswith("@gmail.com"):
+                    try:
+                        valid = validate_email(email, check_deliverability=False)
+                        return valid.normalized
+                    except:
+                        pass
+        return ""
+
+    # ------------------------------------------------------------------
+    # Fallback generic patterns
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fallback_patterns(domain: str) -> dict:
+        """
+        Return a generic marketing email for *domain* when all
+        external lookups fail.
+        """
+        patterns = [
+            f"marketing@{domain}",
+            f"info@{domain}",
+            f"hello@{domain}",
+        ]
+        return {
+            "name": "Marketing Team",
+            "email": patterns[0],
+            "title": "",
+        }
+
+    # ------------------------------------------------------------------
+    # Lead scoring (kept from original stub)
+    # ------------------------------------------------------------------
+
+    def score_lead(self, lead_data: dict) -> int:
+        """
+        Assign a quality score (0-100) to *lead_data*.
+        """
+        raise NotImplementedError
+
+    def is_qualified(self, lead_data: dict) -> bool:
+        """Return True if the lead's score meets the minimum threshold."""
+        return self.score_lead(lead_data) >= self.min_score
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_domain(website: str) -> str:
+        """
+        Pull the bare domain from a URL.
+        """
+        if not website:
+            return ""
+
+        if not website.startswith(("http://", "https://")):
+            website = f"https://{website}"
+
+        netloc = urlparse(website).netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc
