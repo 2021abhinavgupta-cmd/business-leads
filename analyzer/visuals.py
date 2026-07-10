@@ -148,9 +148,18 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
                 try:
                     if isinstance(selector, list):
                         selector = selector[0]
+                    
+                    # Skip root level elements as they don't make for good visual highlights
+                    if selector.lower() in ["html", "body", "head"]:
+                        continue
+                        
                     # Get exact coordinates of the flawed element
                     box = await page.locator(selector).first.bounding_box(timeout=1000)
                     if box and box["width"] > 0 and box["height"] > 0:
+                        # Skip if the element covers > 90% of the screen (e.g. wrapper divs, html, body)
+                        if box["width"] > 1150 and box["height"] > 720:
+                            continue
+                            
                         visual_flaw = {
                             "box": [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
                             "description": v["help"]
