@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import './App.css';
 
 const API_BASE = ""; // Use relative paths so it works on same domain
 
 function App() {
+  const [currentView, setCurrentView] = useState('home');
   const [niche, setNiche] = useState('Digital Marketing Agency');
   const [city, setCity] = useState('Mumbai');
   const [limit, setLimit] = useState(10);
@@ -18,32 +19,23 @@ function App() {
   const [manualCompany, setManualCompany] = useState('');
   const [manualWebsite, setManualWebsite] = useState('');
   const [isAutopilot, setIsAutopilot] = useState(false);
-  const isAutopilotRef = useRef(false);
-  const leadsRef = useRef([]); // To keep track of latest leads in async loops
+  
+  const [historyLogs, setHistoryLogs] = useState([]);
+  const [costLogs, setCostLogs] = useState([]);
+  const [expandedEmail, setExpandedEmail] = useState(null);
 
-  // Calculate dynamic exact cost based on backend tracking
-  const totalCost = leads.reduce((acc, lead) => {
+  const isAutopilotRef = useRef(false);
+  const leadsRef = useRef([]);
+
+  // Calculate dynamic exact cost based on backend tracking for local session
+  const sessionTotalCost = leads.reduce((acc, lead) => {
     let cost = 0;
-    
-    // Add exact Google Maps search cost
-    if (lead.search_cost) {
-      cost += parseFloat(lead.search_cost);
-    }
-    
-    // Add exact AI Audit cost (Penny-perfect tracking from API tokens)
+    if (lead.search_cost) cost += parseFloat(lead.search_cost);
     if (lead.auditState === 'done' || lead.auditState === 'sent' || lead.auditState === 'sending') {
-      if (lead.auditData && lead.auditData.ai_cost) {
-        cost += parseFloat(lead.auditData.ai_cost);
-      } else {
-        cost += 0.0001; // fallback if missing
-      }
+      if (lead.auditData && lead.auditData.ai_cost) cost += parseFloat(lead.auditData.ai_cost);
+      else cost += 0.0001; 
     }
-    
-    // SES Email cost (Flat $0.10 per 1000 sends)
-    if (lead.auditState === 'sent') {
-      cost += 0.0001;
-    }
-    
+    if (lead.auditState === 'sent') cost += 0.0001;
     return acc + cost;
   }, 0);
 
@@ -55,6 +47,16 @@ function App() {
     leadsRef.current = leads;
     localStorage.setItem('leadAuditLeads', JSON.stringify(leads));
   }, [leads]);
+
+  // Fetch DB data when view changes
+  useEffect(() => {
+    if (currentView === 'history') {
+      axios.get(`${API_BASE}/api/history`).then(res => setHistoryLogs(res.data.history)).catch(console.error);
+    }
+    if (currentView === 'cost') {
+      axios.get(`${API_BASE}/api/costs`).then(res => setCostLogs(res.data.costs)).catch(console.error);
+    }
+  }, [currentView]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -73,14 +75,12 @@ function App() {
   const handleAddManualLead = (e) => {
     e.preventDefault();
     if (!manualCompany || !manualWebsite) return;
-    
     const newLead = {
       Company: manualCompany,
       Website: manualWebsite.startsWith('http') ? manualWebsite : `https://${manualWebsite}`,
       Address: 'Added Manually',
       auditState: 'none'
     };
-    
     setLeads([newLead, ...leads]);
     setManualCompany('');
     setManualWebsite('');
@@ -88,8 +88,6 @@ function App() {
 
   const handleAudit = async (index) => {
     const lead = leadsRef.current[index];
-    
-    // Optimistic UI update
     setLeads(prev => {
       const newLeads = [...prev];
       newLeads[index].auditState = 'auditing';
@@ -125,7 +123,7 @@ function App() {
   const startAutopilot = async () => {
     setIsAutopilot(true);
     for (let i = 0; i < leadsRef.current.length; i++) {
-      if (!isAutopilotRef.current) break; // Allow stopping
+      if (!isAutopilotRef.current) break; 
       const lead = leadsRef.current[i];
       if (lead.auditState === 'none' && lead.Website) {
         await handleAudit(i);
@@ -160,229 +158,255 @@ function App() {
     } catch (err) {
       alert("Failed to send email.");
       const finalLeads = [...leads];
-      finalLeads[index].auditState = 'done'; // Revert back to done so they can retry
+      finalLeads[index].auditState = 'done'; 
       setLeads(finalLeads);
     }
   };
 
-  const handleReject = (index) => {
-    const newLeads = [...leads];
-    newLeads[index].auditState = 'rejected';
-    setLeads(newLeads);
-  };
-
-  return (
-    <div className="app-container">
-      <div className="bg-glow-left"></div>
-      <div className="bg-glow-right"></div>
-      
+  const renderHome = () => (
+    <>
       <header className="header">
-        <div className="logo-container">
-          <Zap className="logo-icon" />
-          <h1>Lead Audit AI</h1>
-        </div>
         <p className="subtitle">Automated Web Scraping, AI Auditing & Outreach</p>
         
-        {/* Cost Dashboard */}
-        <div style={{ position: 'absolute', top: '24px', right: '32px', background: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(10px)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* Session Cost Dashboard */}
+        <div style={{ position: 'absolute', top: '24px', right: '32px', background: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(10px)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} onClick={() => setCurrentView('cost')}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Exact Cost Used</span>
-            <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#10b981' }}>${totalCost.toFixed(5)}</span>
-          </div>
-          <div style={{ height: '32px', width: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-            <span style={{ fontSize: '10px', color: '#64748b' }}>AI Tokens: <strong>Live Tracked</strong></span>
-            <span style={{ fontSize: '10px', color: '#64748b' }}>Google Maps: <strong>Live Tracked</strong></span>
-            <span style={{ fontSize: '10px', color: '#64748b' }}>AWS SES: <strong>$0.0001/ea</strong></span>
+            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Session Cost</span>
+            <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#10b981' }}>${sessionTotalCost.toFixed(5)}</span>
           </div>
         </div>
       </header>
 
-      <main className="main-content">
-        <form className="search-box glass" onSubmit={handleSearch}>
-          <div className="input-group">
-            <label>Business Niche</label>
-            <input 
-              type="text" 
-              value={niche} 
-              onChange={e => setNiche(e.target.value)} 
-              placeholder="e.g. Digital Marketing Agency"
-              required 
-            />
-          </div>
-          <div className="input-group">
-            <label>City</label>
-            <input 
-              type="text" 
-              value={city} 
-              onChange={e => setCity(e.target.value)} 
-              placeholder="e.g. Mumbai"
-              required 
-            />
-          </div>
-          <div className="input-group" style={{maxWidth: '100px'}}>
-            <label>Leads</label>
-            <input 
-              type="number" 
-              value={limit} 
-              onChange={e => setLimit(e.target.value)} 
-              min="1"
-              max="100"
-              required 
-            />
-          </div>
-          <button type="submit" className="primary-btn" disabled={loadingSearch}>
-            {loadingSearch ? <Loader2 className="spin" /> : <Search />}
-            {loadingSearch ? 'Scraping Google Maps...' : 'Find Leads'}
-          </button>
-        </form>
-
-        <form className="search-box glass" style={{ marginTop: '16px' }} onSubmit={handleAddManualLead}>
-          <div className="input-group">
-            <label>Specific Company Name</label>
-            <input 
-              type="text" 
-              value={manualCompany} 
-              onChange={e => setManualCompany(e.target.value)} 
-              placeholder="e.g. Acme Corp"
-            />
-          </div>
-          <div className="input-group">
-            <label>Website URL</label>
-            <input 
-              type="text" 
-              value={manualWebsite} 
-              onChange={e => setManualWebsite(e.target.value)} 
-              placeholder="e.g. acme.com"
-            />
-          </div>
-          <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>
-            + Add Lead
-          </button>
-        </form>
-
-        {leads.length > 0 && (
-          <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
-            <button 
-              className={`primary-btn ${isAutopilot ? 'danger' : ''}`} 
-              onClick={() => isAutopilot ? setIsAutopilot(false) : startAutopilot()}
-              style={{ background: isAutopilot ? '#ef4444' : 'var(--primary-color)' }}
-            >
-              <Activity className={isAutopilot ? 'spin' : ''} />
-              {isAutopilot ? 'Stop Autopilot' : 'Start Autopilot (Audit All)'}
-            </button>
-          </div>
-        )}
-
-        <div className="leads-grid">
-          <AnimatePresence>
-            {leads.map((lead, i) => (
-              <motion.div 
-                key={i} 
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                transition={{ duration: 0.4, delay: i * 0.1 }}
-                className={`lead-card glass ${lead.auditState === 'rejected' ? 'rejected' : ''}`}
-              >
-                <div className="lead-header">
-                  <h3>{lead.Company}</h3>
-                  {lead.auditState === 'sent' && <span className="badge success"><Check size={14}/> Sent</span>}
-                  {lead.auditState === 'rejected' && <span className="badge danger"><X size={14}/> Rejected</span>}
-                </div>
-                
-                <div className="lead-details">
-                  <p><strong>URL:</strong> <a href={lead.Website} target="_blank" rel="noreferrer">{lead.Website || 'N/A'}</a></p>
-                  <p><strong>Address:</strong> {lead.Address}</p>
-                  {lead.auditState === 'sent' && lead.auditData && (
-                    <div style={{ marginTop: '12px', padding: '8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                      <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {lead.auditData.email}</p>
-                      <p style={{ color: '#475569', fontSize: '0.9em' }}><strong>From:</strong> {lead.auditData.sender_email || 'System'}</p>
-                    </div>
-                  )}
-                </div>
-
-                {lead.auditState === 'none' && lead.Website && (
-                  <button className="audit-btn" onClick={() => handleAudit(i)}>
-                    <Activity size={18} /> Generate AI Audit & Email Draft
-                  </button>
-                )}
-
-                {!lead.Website && (
-                  <p className="error-text">Cannot audit — no website found.</p>
-                )}
-
-                {lead.auditState === 'auditing' && (
-                  <div className="auditing-state">
-                    <Loader2 className="spin" size={24} />
-                    <p>Scraping website, running lighthouse, drafting with Claude...</p>
-                  </div>
-                )}
-
-                {lead.auditState === 'failed' && (
-                  <p className="error-text">Audit failed (Website unreachable or AI error).</p>
-                )}
-
-                {lead.auditState === 'done' && lead.auditData && (
-                  <motion.div 
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    className="audit-results"
-                  >
-                    <div className="stats-row">
-                      <div className="stat-box">
-                        <Zap size={16} />
-                        <span>Speed</span>
-                        <strong>{lead.auditData.page_speed_score}/100</strong>
-                      </div>
-                      <div className="stat-box">
-                        <BarChart size={16} />
-                        <span>SEO</span>
-                        <strong>{lead.auditData.seo_score}/100</strong>
-                      </div>
-                    </div>
-
-                    <div className="email-draft">
-                      <h4><FileText size={16} /> Drafted Email</h4>
-                      {lead.auditData.image_url && (
-                        <div style={{ marginBottom: '16px', textAlign: 'center' }}>
-                          <img src={lead.auditData.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
-                        </div>
-                      )}
-                      <p className="target-email"><strong>To:</strong> {lead.auditData.email || 'Email not found (will fail)'}</p>
-                      <p className="subject"><strong>Subject:</strong> {lead.auditData.subject}</p>
-                      <textarea 
-                        className="email-body-editor"
-                        value={lead.auditData.body}
-                        onChange={(e) => {
-                          const newLeads = [...leads];
-                          newLeads[i].auditData.body = e.target.value;
-                          setLeads(newLeads);
-                        }}
-                      />
-                    </div>
-
-                    <div className="action-buttons">
-                      <button className="reject-btn" onClick={() => handleReject(i)}>
-                        <X size={18} /> Reject
-                      </button>
-                      <button className="send-btn" onClick={() => handleSend(i)}>
-                        <Send size={18} /> Approve & Send
-                      </button>
-                    </div>
-                  </motion.div>
-                )}
-                
-                {lead.auditState === 'sending' && (
-                  <div className="auditing-state">
-                    <Loader2 className="spin" size={24} />
-                    <p>Sending email via AWS SES...</p>
-                  </div>
-                )}
-              </motion.div>
-            ))}
-          </AnimatePresence>
+      <form className="search-box glass" onSubmit={handleSearch}>
+        <div className="input-group">
+          <label>Business Niche</label>
+          <input type="text" value={niche} onChange={e => setNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" required />
         </div>
+        <div className="input-group">
+          <label>City</label>
+          <input type="text" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
+        </div>
+        <div className="input-group" style={{maxWidth: '100px'}}>
+          <label>Leads</label>
+          <input type="number" value={limit} onChange={e => setLimit(e.target.value)} min="1" max="100" required />
+        </div>
+        <button type="submit" className="primary-btn" disabled={loadingSearch}>
+          {loadingSearch ? <Loader2 className="spin" /> : <Search />}
+          {loadingSearch ? 'Scraping Google Maps...' : 'Find Leads'}
+        </button>
+      </form>
+
+      <form className="search-box glass" style={{ marginTop: '16px' }} onSubmit={handleAddManualLead}>
+        <div className="input-group">
+          <label>Specific Company Name</label>
+          <input type="text" value={manualCompany} onChange={e => setManualCompany(e.target.value)} placeholder="e.g. Acme Corp" />
+        </div>
+        <div className="input-group">
+          <label>Website URL</label>
+          <input type="text" value={manualWebsite} onChange={e => setManualWebsite(e.target.value)} placeholder="e.g. acme.com" />
+        </div>
+        <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>+ Add Lead</button>
+      </form>
+
+      {leads.length > 0 && (
+        <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
+          <button 
+            className={`primary-btn ${isAutopilot ? 'danger' : ''}`} 
+            onClick={() => isAutopilot ? setIsAutopilot(false) : startAutopilot()}
+            style={{ background: isAutopilot ? '#ef4444' : 'var(--primary-color)' }}
+          >
+            <Activity className={isAutopilot ? 'spin' : ''} />
+            {isAutopilot ? 'Stop Autopilot' : 'Start Autopilot (Audit All)'}
+          </button>
+        </div>
+      )}
+
+      <div className="leads-grid">
+        <AnimatePresence>
+          {leads.map((lead, i) => (
+            <motion.div key={i} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className={`lead-card glass ${lead.auditState === 'rejected' ? 'rejected' : ''}`}>
+              <div className="lead-header">
+                <h3>{lead.Company}</h3>
+                {lead.auditState === 'sent' && <span className="badge success"><Check size={14}/> Sent</span>}
+                {lead.auditState === 'rejected' && <span className="badge danger"><X size={14}/> Rejected</span>}
+              </div>
+              
+              <div className="lead-details">
+                <p><strong>URL:</strong> <a href={lead.Website} target="_blank" rel="noreferrer">{lead.Website || 'N/A'}</a></p>
+                <p><strong>Address:</strong> {lead.Address}</p>
+                {lead.auditState === 'sent' && lead.auditData && (
+                  <div style={{ marginTop: '12px', padding: '8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                    <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {lead.auditData.email}</p>
+                    <p style={{ color: '#475569', fontSize: '0.9em' }}><strong>From:</strong> {lead.auditData.sender_email || 'System'}</p>
+                  </div>
+                )}
+              </div>
+
+              {lead.auditState === 'none' && lead.Website && (
+                <button className="audit-btn" onClick={() => handleAudit(i)}><Activity size={18} /> Generate AI Audit & Draft</button>
+              )}
+
+              {!lead.Website && <p className="error-text">Cannot audit — no website found.</p>}
+              {lead.auditState === 'auditing' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Running analysis...</p></div>}
+              {lead.auditState === 'failed' && <p className="error-text">Audit failed.</p>}
+              {lead.auditState === 'sending' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>}
+
+              {lead.auditState === 'done' && lead.auditData && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="audit-results">
+                  <div className="stats-row">
+                    <div className="stat-box"><Zap size={16} /><span>Speed</span><strong>{lead.auditData.page_speed_score}/100</strong></div>
+                    <div className="stat-box"><BarChart size={16} /><span>SEO</span><strong>{lead.auditData.seo_score}/100</strong></div>
+                  </div>
+                  <div className="email-draft">
+                    <h4><FileText size={16} /> Drafted Email</h4>
+                    {lead.auditData.image_url && (
+                      <div style={{ marginBottom: '16px', textAlign: 'center' }}>
+                        <img src={lead.auditData.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
+                      </div>
+                    )}
+                    <p className="target-email"><strong>To:</strong> {lead.auditData.email || 'Email not found (will fail)'}</p>
+                    <p className="subject"><strong>Subject:</strong> {lead.auditData.subject}</p>
+                    <textarea 
+                      className="email-body-editor" 
+                      value={lead.auditData.body} 
+                      onChange={(e) => {
+                        const newLeads = [...leads];
+                        newLeads[i].auditData.body = e.target.value;
+                        setLeads(newLeads);
+                      }} 
+                    />
+                  </div>
+                  <div className="action-buttons">
+                    <button className="reject-btn" onClick={() => {
+                      const newLeads = [...leads];
+                      newLeads[i].auditState = 'rejected';
+                      setLeads(newLeads);
+                    }}><X size={18} /> Reject</button>
+                    <button className="send-btn" onClick={() => handleSend(i)}><Send size={18} /> Approve & Send</button>
+                  </div>
+                </motion.div>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </>
+  );
+
+  const renderHistory = () => (
+    <div className="glass" style={{ padding: '24px' }}>
+      <h2><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
+      <p style={{color: '#94a3b8', marginBottom: '24px'}}>Persistent log of all outbound emails dispatched.</p>
+      
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {historyLogs.map(log => (
+          <div key={log.id} style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h4 style={{ margin: '0 0 4px 0' }}>{log.company}</h4>
+                <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {log.target_email} • From: {log.sender_email}</p>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{ fontSize: '12px', color: '#10b981', display: 'block' }}>{log.timestamp}</span>
+                <button 
+                  style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '13px', padding: '4px 0' }}
+                  onClick={() => setExpandedEmail(expandedEmail === log.id ? null : log.id)}
+                >
+                  {expandedEmail === log.id ? 'Hide Content' : 'View Content'}
+                </button>
+              </div>
+            </div>
+            
+            {expandedEmail === log.id && (
+              <div style={{ marginTop: '16px', padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px' }}>
+                <p style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 'bold' }}>Subject: {log.subject}</p>
+                <p style={{ margin: 0, fontSize: '13px', whiteSpace: 'pre-wrap', lineHeight: '1.6' }}>{log.body}</p>
+              </div>
+            )}
+          </div>
+        ))}
+        {historyLogs.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No emails sent yet.</p>}
+      </div>
+    </div>
+  );
+
+  const renderCost = () => {
+    const totalAllTime = costLogs.reduce((acc, log) => acc + log.cost, 0);
+    return (
+      <div className="glass" style={{ padding: '24px' }}>
+        <h2><DollarSign style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Lifetime Cost Dashboard</h2>
+        <p style={{color: '#94a3b8', marginBottom: '24px'}}>Exact fractional penny tracking pulled from AI provider headers & API metadata.</p>
+        
+        <div style={{ display: 'flex', gap: '24px', marginBottom: '32px' }}>
+          <div style={{ flex: 1, padding: '24px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '12px', textAlign: 'center' }}>
+            <span style={{ fontSize: '14px', color: '#059669', textTransform: 'uppercase', letterSpacing: '1px' }}>Total Pipeline Cost</span>
+            <div style={{ fontSize: '48px', fontWeight: 'bold', color: '#10b981', margin: '12px 0' }}>${totalAllTime.toFixed(5)}</div>
+          </div>
+        </div>
+
+        <h3><Calendar style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}} size={18}/> Audit Trail</h3>
+        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '16px', fontSize: '14px' }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', color: '#94a3b8' }}>
+              <th style={{ textAlign: 'left', padding: '12px 8px' }}>Timestamp</th>
+              <th style={{ textAlign: 'left', padding: '12px 8px' }}>Category</th>
+              <th style={{ textAlign: 'left', padding: '12px 8px' }}>Description</th>
+              <th style={{ textAlign: 'right', padding: '12px 8px' }}>Cost ($)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {costLogs.map(log => (
+              <tr key={log.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <td style={{ padding: '12px 8px', color: '#cbd5e1' }}>{log.timestamp}</td>
+                <td style={{ padding: '12px 8px', color: '#38bdf8' }}>{log.category}</td>
+                <td style={{ padding: '12px 8px', color: '#94a3b8' }}>{log.description}</td>
+                <td style={{ padding: '12px 8px', textAlign: 'right', color: '#10b981', fontFamily: 'monospace' }}>{log.cost.toFixed(5)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {costLogs.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No costs accrued yet.</p>}
+      </div>
+    );
+  };
+
+  return (
+    <div className="app-container" style={{ display: 'flex', flexDirection: 'row', minHeight: '100vh', padding: 0 }}>
+      <div className="bg-glow-left"></div>
+      <div className="bg-glow-right"></div>
+      
+      {/* Sidebar Navigation */}
+      <nav style={{ width: '260px', background: 'rgba(15, 23, 42, 0.4)', backdropFilter: 'blur(20px)', borderRight: '1px solid rgba(255,255,255,0.05)', padding: '32px 24px', display: 'flex', flexDirection: 'column', gap: '8px', zIndex: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '32px' }}>
+          <Zap className="logo-icon" size={28} />
+          <h1 style={{ margin: 0, fontSize: '20px', letterSpacing: '-0.5px' }}>Lead Audit AI</h1>
+        </div>
+        
+        <button 
+          onClick={() => setCurrentView('home')}
+          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'home' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'home' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'home' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+        >
+          <Home size={18} /> Outreach Dashboard
+        </button>
+        <button 
+          onClick={() => setCurrentView('cost')}
+          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'cost' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'cost' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'cost' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+        >
+          <LayoutDashboard size={18} /> Cost Metrics
+        </button>
+        <button 
+          onClick={() => setCurrentView('history')}
+          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'history' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'history' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'history' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+        >
+          <Clock size={18} /> Email History
+        </button>
+      </nav>
+
+      {/* Main Content */}
+      <main className="main-content" style={{ flex: 1, padding: '40px', overflowY: 'auto' }}>
+        {currentView === 'home' && renderHome()}
+        {currentView === 'history' && renderHistory()}
+        {currentView === 'cost' && renderCost()}
       </main>
     </div>
   );

@@ -15,6 +15,7 @@ from emailer.ses_sender import SESSender
 from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot
 from storage.sheets import SheetsStorage
+from storage import db
 
 app = FastAPI(title="Lead Audit Bot Web App")
 
@@ -69,6 +70,12 @@ async def search_leads(req: SearchRequest, background_tasks: BackgroundTasks):
     try:
         leads = maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
+        
+        # Log exact Maps API cost
+        total_search_cost = sum(lead.get("search_cost", 0) for lead in leads)
+        if total_search_cost > 0:
+            db.log_cost("Google Maps API", total_search_cost, description=f"Search: {req.niche} in {req.city} ({len(leads)} leads)")
+            
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -126,6 +133,10 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
                 print(f"Error updating audit in sheets: {e}")
 
         background_tasks.add_task(save_audit_to_sheets)
+        
+        # Log AI Cost
+        ai_cost = analysis.get("ai_cost", 0.0001)
+        db.log_cost("AI Audit", ai_cost, description=f"Audit for {req.company}")
 
         return {
             "email": email,
@@ -164,9 +175,30 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
                 except Exception as e:
                     print(f"Error updating send status in sheets: {e}")
             background_tasks.add_task(save_send_to_sheets)
+            
+            # Log exact costs and email history
+            db.log_cost("AWS SES", 0.0001, description=f"Email to {req.email}")
+            db.log_email(req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body)
+            
             return {"status": "success"}
         else:
             raise HTTPException(status_code=500, detail="Failed to send via SES")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/costs")
+async def get_costs():
+    try:
+        costs = db.get_costs()
+        return {"costs": costs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/history")
+async def get_history():
+    try:
+        history = db.get_email_history()
+        return {"history": history}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
