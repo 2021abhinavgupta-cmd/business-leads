@@ -50,6 +50,9 @@ def init_db():
     )
     """)
     
+    # ONE-TIME CLEANUP: Remove historical Google Maps API costs since it is now free
+    cursor.execute("DELETE FROM cost_logs WHERE category = 'Google Maps API'")
+    
     conn.commit()
     conn.close()
 
