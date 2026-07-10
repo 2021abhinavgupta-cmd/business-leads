@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -12,6 +12,17 @@ function App() {
   const [limit, setLimit] = useState(10);
   const [leads, setLeads] = useState([]);
   const [loadingSearch, setLoadingSearch] = useState(false);
+  const [isAutopilot, setIsAutopilot] = useState(false);
+  const isAutopilotRef = useRef(false);
+  const leadsRef = useRef([]); // To keep track of latest leads in async loops
+
+  useEffect(() => {
+    isAutopilotRef.current = isAutopilot;
+  }, [isAutopilot]);
+
+  useEffect(() => {
+    leadsRef.current = leads;
+  }, [leads]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -28,12 +39,14 @@ function App() {
   };
 
   const handleAudit = async (index) => {
-    const lead = leads[index];
+    const lead = leadsRef.current[index];
     
     // Optimistic UI update
-    const newLeads = [...leads];
-    newLeads[index].auditState = 'auditing';
-    setLeads(newLeads);
+    setLeads(prev => {
+      const newLeads = [...prev];
+      newLeads[index].auditState = 'auditing';
+      return newLeads;
+    });
 
     try {
       const res = await axios.post(`${API_BASE}/api/audit`, {
@@ -42,19 +55,35 @@ function App() {
         instagram_handle: lead['Instagram Handle']
       });
       
-      const updatedLeads = [...leads];
-      if (res.data.error) {
-        updatedLeads[index].auditState = 'failed';
-      } else {
-        updatedLeads[index].auditState = 'done';
-        updatedLeads[index].auditData = res.data;
-      }
-      setLeads(updatedLeads);
+      setLeads(prev => {
+        const updatedLeads = [...prev];
+        if (res.data.error) {
+          updatedLeads[index].auditState = 'failed';
+        } else {
+          updatedLeads[index].auditState = 'done';
+          updatedLeads[index].auditData = res.data;
+        }
+        return updatedLeads;
+      });
     } catch (err) {
-      const updatedLeads = [...leads];
-      updatedLeads[index].auditState = 'failed';
-      setLeads(updatedLeads);
+      setLeads(prev => {
+        const updatedLeads = [...prev];
+        updatedLeads[index].auditState = 'failed';
+        return updatedLeads;
+      });
     }
+  };
+
+  const startAutopilot = async () => {
+    setIsAutopilot(true);
+    for (let i = 0; i < leadsRef.current.length; i++) {
+      if (!isAutopilotRef.current) break; // Allow stopping
+      const lead = leadsRef.current[i];
+      if (lead.auditState === 'none' && lead.Website) {
+        await handleAudit(i);
+      }
+    }
+    setIsAutopilot(false);
   };
 
   const handleSend = async (index) => {
@@ -145,6 +174,19 @@ function App() {
             {loadingSearch ? 'Scraping Google Maps...' : 'Find Leads'}
           </button>
         </form>
+
+        {leads.length > 0 && (
+          <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
+            <button 
+              className={`primary-btn ${isAutopilot ? 'danger' : ''}`} 
+              onClick={() => isAutopilot ? setIsAutopilot(false) : startAutopilot()}
+              style={{ background: isAutopilot ? '#ef4444' : 'var(--primary-color)' }}
+            >
+              <Activity className={isAutopilot ? 'spin' : ''} />
+              {isAutopilot ? 'Stop Autopilot' : 'Start Autopilot (Audit All)'}
+            </button>
+          </div>
+        )}
 
         <div className="leads-grid">
           <AnimatePresence>
