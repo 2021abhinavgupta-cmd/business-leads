@@ -10,7 +10,10 @@ function App() {
   const [niche, setNiche] = useState('Digital Marketing Agency');
   const [city, setCity] = useState('Mumbai');
   const [limit, setLimit] = useState(10);
-  const [leads, setLeads] = useState([]);
+  const [leads, setLeads] = useState(() => {
+    const saved = localStorage.getItem('leadAuditLeads');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [isAutopilot, setIsAutopilot] = useState(false);
   const isAutopilotRef = useRef(false);
@@ -22,6 +25,7 @@ function App() {
 
   useEffect(() => {
     leadsRef.current = leads;
+    localStorage.setItem('leadAuditLeads', JSON.stringify(leads));
   }, [leads]);
 
   const handleSearch = async (e) => {

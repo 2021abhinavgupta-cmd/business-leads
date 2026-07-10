@@ -55,25 +55,25 @@ async def process_single_lead(lead: dict) -> str:
     if not instagram_handle and website:
         instagram_handle = decision_maker.find_instagram_handle(company, website)
     
-    # Step 2: Find decision maker if name or email missing
+    # Step 2: Scrape Instagram
+    ig_data = None
+    if instagram_handle:
+        ig_data = ig_scraper.get_instagram_data(instagram_handle)
+        print(f"  IG: {ig_data.followers if ig_data else 'not found'} followers")
+    
+    # Step 3: Generate Visual Evidence & Scrape HTML (Playwright)
+    print(f"  Generating visual evidence & scraping for {website}...")
+    image_path, html_content = await generate_audit_screenshot(website, company)
+    
+    # Step 4: Find decision maker if name or email missing (using Playwright HTML)
     if (not contact or not email) and website:
-        dm = decision_maker.find_decision_maker(company, website)
+        dm = decision_maker.find_decision_maker(company, website, html_content=html_content)
         contact = dm.get("name", "")
         email = dm.get("email", "")
     
     if not email:
         print(f"  No email found for {company}")
         return "failed_no_email"
-    
-    # Step 3: Scrape Instagram
-    ig_data = None
-    if instagram_handle:
-        ig_data = ig_scraper.get_instagram_data(instagram_handle)
-        print(f"  IG: {ig_data.followers if ig_data else 'not found'} followers")
-    
-    # Step 4: Generate Visual Evidence & Scrape HTML (Playwright)
-    print(f"  Generating visual evidence & scraping for {website}...")
-    image_path, html_content = await generate_audit_screenshot(website, company)
     
     # Step 5: Audit website (with Playwright HTML)
     web_data = await web_scraper.audit_website(website, html=html_content)

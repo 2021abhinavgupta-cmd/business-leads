@@ -82,6 +82,7 @@ class DecisionMaker:
         Args:
             company_name: Business name.
             website:      Business website URL.
+            html_content: Pre-rendered Playwright HTML of the homepage (optional).
 
         Returns:
             ``{"name": str, "email": str, "title": str}``
@@ -93,8 +94,8 @@ class DecisionMaker:
         if not website.startswith(("http://", "https://")):
             website = f"https://{website}"
 
-        # Strategy 1 — Internal Scraper
-        scraped_email = self._scrape_website_for_email(website)
+        # Strategy 1 — Internal Scraper (Now powered by Playwright HTML)
+        scraped_email = self._scrape_website_for_email(website, html_content)
         if scraped_email:
             return {
                 "name": "Marketing Team", # Hard to infer exact names from raw emails
@@ -128,27 +129,32 @@ class DecisionMaker:
     # Custom Website Scraper for Emails
     # ------------------------------------------------------------------
 
-    def _scrape_website_for_email(self, base_url: str) -> str:
+    def _scrape_website_for_email(self, base_url: str, html_content: str | None = None) -> str:
         """
         Crawl homepage, /contact, and /about pages looking for emails.
+        If html_content is provided, it scans that first without making a network request.
         """
-        paths_to_check = ["", "/contact"]
         found_emails = set()
-
-        for path in paths_to_check:
-            url = urljoin(base_url, path)
-            try:
-                response = self.client.get(url, headers=self.headers, follow_redirects=True)
-                if response.status_code == 200:
-                    # Extract emails using regex
-                    emails = set(re.findall(_EMAIL_REGEX, response.text))
-                    found_emails.update(emails)
-                    
-                    # If we found emails, stop checking more paths to save time
-                    if found_emails:
-                        break
-            except Exception:
-                continue
+        
+        # Check provided Playwright HTML first (bypasses Cloudflare)
+        if html_content:
+            emails = set(re.findall(_EMAIL_REGEX, html_content))
+            found_emails.update(emails)
+            
+        # If we didn't find anything, try standard HTTP ping on contact pages
+        if not found_emails:
+            paths_to_check = ["", "/contact"]
+            for path in paths_to_check:
+                url = urljoin(base_url, path)
+                try:
+                    response = self.client.get(url, headers=self.headers, follow_redirects=True)
+                    if response.status_code == 200:
+                        emails = set(re.findall(_EMAIL_REGEX, response.text))
+                        found_emails.update(emails)
+                        if found_emails:
+                            break
+                except Exception:
+                    continue
                 
         # Filter out common false positives (e.g. image files matching regex)
         valid_emails = []

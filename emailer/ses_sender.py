@@ -97,8 +97,19 @@ class SESSender:
                     msg['From'] = self.from_email
                     msg['To'] = to_email
                     
-                    # Embed the image in the HTML body
-                    html_with_img = f"{body}<br><br><img src='cid:audit_img' style='max-width:100%; border:2px solid red;'><br>"
+                    # Professional HTML Layout for the Email
+                    html_with_img = f\"\"\"
+                    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
+                        <div style="padding: 20px;">
+                            {body}
+                        </div>
+                        <div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                            <h3 style="margin-top: 0; color: #0f172a; font-size: 16px;">📸 Visual Audit Evidence</h3>
+                            <p style="color: #475569; font-size: 14px; margin-bottom: 16px;">Here is the screenshot my team took of your website on mobile:</p>
+                            <img src='cid:audit_img' alt='Website Audit' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>
+                        </div>
+                    </div>
+                    \"\"\"
                     msg_alternative = MIMEMultipart('alternative')
                     msg.attach(msg_alternative)
                     msg_alternative.attach(MIMEText(html_with_img, 'html'))

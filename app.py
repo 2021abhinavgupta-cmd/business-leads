@@ -12,6 +12,7 @@ from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
 from emailer.ses_sender import SESSender
+from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot
 from storage.sheets import SheetsStorage
 
@@ -42,13 +43,13 @@ class SendRequest(BaseModel):
     company: str
     website: str
 
-# Instantiations
 maps_scraper = GoogleMapsScraper()
 web_scraper = WebsiteScraper()
 ig_scraper = InstagramScraper()
 auditor = AIAuditor()
 ses = SESSender()
 sheets = SheetsStorage()
+decision_maker = DecisionMaker()
 
 def save_leads_to_sheets_bg(leads: list):
     for lead in leads:
@@ -107,9 +108,8 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         if not analysis:
             return {"error": "AI failed to analyze."}
 
-        # Find Contact (mocked or simplified for now, as DuckDuckGo was blocking)
-        from enrichment.decision_maker import find_decision_maker
-        dm = find_decision_maker(req.company, req.website)
+        # 5. Find Contact (using fully rendered HTML)
+        dm = decision_maker.find_decision_maker(req.company, req.website, html_content=html_content)
         contact = dm.get("name", "")
         email = dm.get("email", "")
 

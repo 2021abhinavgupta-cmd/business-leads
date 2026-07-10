@@ -1,10 +1,15 @@
 import os
+import asyncio
 from io import BytesIO
 from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw
 
 # Create temporary directory for screenshots
 os.makedirs("screenshots", exist_ok=True)
+
+# Global Semaphore to limit Playwright concurrency to 1.
+# This prevents Out of Memory (OOM) crashes on Railway's 500MB instances.
+_PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
 
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None]:
     """
@@ -15,31 +20,32 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         url = f"https://{url}"
         
     try:
-        # Step 1: Capture Screenshot via Playwright
-        async with async_playwright() as p:
-            # Launch chromium headless
-            browser = await p.chromium.launch(headless=True)
-            
-            # Simulate a standard mobile device (iPhone 13 dimensions)
-            context = await browser.new_context(
-                viewport={'width': 390, 'height': 844},
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-                is_mobile=True,
-                has_touch=True
-            )
-            
-            page = await context.new_page()
-            
-            # Go to URL with a timeout and wait until network is mostly idle
-            await page.goto(url, timeout=20000, wait_until="networkidle")
-            
-            # Take screenshot directly to memory
-            screenshot_bytes = await page.screenshot(full_page=False)
-            
-            # Grab fully rendered HTML
-            html_content = await page.content()
-            
-            await browser.close()
+        async with _PLAYWRIGHT_SEMAPHORE:
+            # Step 1: Capture Screenshot via Playwright
+            async with async_playwright() as p:
+                # Launch chromium headless
+                browser = await p.chromium.launch(headless=True)
+                
+                # Simulate a standard mobile device (iPhone 13 dimensions)
+                context = await browser.new_context(
+                    viewport={'width': 390, 'height': 844},
+                    user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
+                    is_mobile=True,
+                    has_touch=True
+                )
+                
+                page = await context.new_page()
+                
+                # Go to URL with a timeout and wait until network is mostly idle
+                await page.goto(url, timeout=20000, wait_until="networkidle")
+                
+                # Take screenshot directly to memory
+                screenshot_bytes = await page.screenshot(full_page=False)
+                
+                # Grab fully rendered HTML
+                html_content = await page.content()
+                
+                await browser.close()
             
         # Step 2: Draw on the image via Pillow
         img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")

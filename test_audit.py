@@ -24,7 +24,7 @@ async def test_audit():
     print("Testing DecisionMaker...")
     dm = DecisionMaker()
     try:
-        contact = dm.find_decision_maker("TIMEZONE", url)
+        contact = dm.find_decision_maker("TIMEZONE", url, html_content=html_content)
         print(f"Contact: {contact}")
     except Exception as e:
         print(f"DecisionMaker crashed: {e}")
@@ -35,7 +35,7 @@ async def test_audit():
     print("Testing AIAuditor...")
     auditor = AIAuditor()
     try:
-        analysis = auditor.analyze_lead("TIMEZONE", None, web_data)
+        analysis = auditor.analyze_lead("TIMEZONE", None, web_data, image_path=image_path)
         print(f"Analysis: {analysis.keys() if analysis else 'None'}")
     except Exception as e:
         print(f"AIAuditor crashed: {e}")
