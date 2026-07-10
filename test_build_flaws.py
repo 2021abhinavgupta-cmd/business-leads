@@ -17,6 +17,8 @@ _BASE_PARSED = {
     "has_canonical": True,
     "is_noindexed": False,
     "has_og_tags": True,
+    "has_viewport_meta": True,
+    "has_favicon": True,
 }
 
 _BASE_KWARGS = dict(
@@ -87,6 +89,31 @@ def test_flaws_are_ranked_most_severe_first():
 def test_thin_content_flag():
     flaws = _build(seo_page={"word_count": 50})
     assert any("thin content" in f.description for f in flaws)
+
+
+def test_missing_viewport_meta_flagged():
+    flaws = _build(parsed={**_BASE_PARSED, "has_viewport_meta": False})
+    assert any(f.severity == "high" and "viewport" in f.description for f in flaws)
+
+
+def test_missing_favicon_flagged():
+    flaws = _build(parsed={**_BASE_PARSED, "has_favicon": False})
+    assert any("favicon" in f.description for f in flaws)
+
+
+def test_too_many_fonts_flagged():
+    flaws = _build(font_families=["Arial", "Georgia", "Comic Sans MS", "Verdana", "Times New Roman"])
+    assert any("different fonts" in f.description for f in flaws)
+
+
+def test_few_fonts_not_flagged():
+    flaws = _build(font_families=["Arial", "Georgia"])
+    assert not any("different fonts" in f.description for f in flaws)
+
+
+def test_stretched_images_flagged():
+    flaws = _build(stretched_images=3)
+    assert any("blurry" in f.description and "3 images are" in f.description for f in flaws)
 
 
 def test_seo_analyzer_anchor_warnings_filtered_out():

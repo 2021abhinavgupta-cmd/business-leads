@@ -28,6 +28,9 @@ function App() {
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [isAutopilot, setIsAutopilot] = useState(false);
   
+  const [leadsPage, setLeadsPage] = useState(1);
+  const LEADS_PAGE_SIZE = 12;
+
   const [historyLogs, setHistoryLogs] = useState([]);
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
@@ -87,6 +90,7 @@ function App() {
     e.preventDefault();
     setLoadingSearch(true);
     setLeads([]);
+    setLeadsPage(1);
     try {
       const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10 });
       setLeads(res.data.leads.map(lead => ({ ...lead, auditState: 'none' })));
@@ -108,6 +112,7 @@ function App() {
       auditState: 'none'
     };
     setLeads([newLead, ...leads]);
+    setLeadsPage(1);
     setManualCompany('');
     setManualWebsite('');
   };
@@ -311,7 +316,9 @@ function App() {
 
       <div className="leads-grid">
         <AnimatePresence>
-          {leads.map((lead, i) => (
+          {leads.slice((leadsPage - 1) * LEADS_PAGE_SIZE, leadsPage * LEADS_PAGE_SIZE).map((lead, pageI) => {
+          const i = (leadsPage - 1) * LEADS_PAGE_SIZE + pageI;
+          return (
             <motion.div key={i} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className={`lead-card glass ${lead.auditState === 'rejected' ? 'rejected' : ''}`}>
               <div className="lead-header">
                 <h3>{lead.Company}</h3>
@@ -336,7 +343,12 @@ function App() {
 
               {!lead.Website && <p className="error-text">Cannot audit — no website found.</p>}
               {lead.auditState === 'auditing' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Running analysis...</p></div>}
-              {lead.auditState === 'failed' && <p className="error-text">Audit failed.</p>}
+              {lead.auditState === 'failed' && (
+                <div className="auditing-state" style={{ flexDirection: 'column', gap: '8px' }}>
+                  <p className="error-text">Audit failed.</p>
+                  <button className="audit-btn" onClick={() => handleAudit(i)}><Activity size={18} /> Retry Audit</button>
+                </div>
+              )}
               {lead.auditState === 'sending' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>}
 
               {lead.auditState === 'done' && lead.auditData && (
@@ -375,9 +387,31 @@ function App() {
                 </motion.div>
               )}
             </motion.div>
-          ))}
+          );})}
         </AnimatePresence>
       </div>
+
+      {leads.length > LEADS_PAGE_SIZE && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', margin: '24px 0' }}>
+          <button
+            onClick={() => setLeadsPage(p => Math.max(1, p - 1))}
+            disabled={leadsPage === 1}
+            style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#f8fafc', cursor: leadsPage === 1 ? 'not-allowed' : 'pointer', opacity: leadsPage === 1 ? 0.5 : 1 }}
+          >
+            Previous
+          </button>
+          <span style={{ color: '#94a3b8', fontSize: '14px' }}>
+            Page {leadsPage} of {Math.ceil(leads.length / LEADS_PAGE_SIZE)}
+          </span>
+          <button
+            onClick={() => setLeadsPage(p => Math.min(Math.ceil(leads.length / LEADS_PAGE_SIZE), p + 1))}
+            disabled={leadsPage >= Math.ceil(leads.length / LEADS_PAGE_SIZE)}
+            style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#f8fafc', cursor: leadsPage >= Math.ceil(leads.length / LEADS_PAGE_SIZE) ? 'not-allowed' : 'pointer', opacity: leadsPage >= Math.ceil(leads.length / LEADS_PAGE_SIZE) ? 0.5 : 1 }}
+          >
+            Next
+          </button>
+        </div>
+      )}
     </>
   );
 

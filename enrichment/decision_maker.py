@@ -22,6 +22,19 @@ from email_validator import validate_email, EmailNotValidError
 # ---------------------------------------------------------------------------
 _MARKETING_KEYWORDS = {"marketing", "brand", "digital"}
 _EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+# Local-parts that are never a real contact address, even if they match a
+# company's domain (e.g. transactional "noreply@" addresses picked up by
+# regex/OSINT search snippets) — sending outreach to these bounces or gets
+# auto-discarded.
+_JUNK_LOCAL_PARTS = {
+    "noreply", "no-reply", "donotreply", "do-not-reply",
+    "postmaster", "mailer-daemon", "webmaster", "abuse",
+}
+
+
+def _is_junk_email(email: str) -> bool:
+    local_part = email.split("@", 1)[0].lower()
+    return local_part in _JUNK_LOCAL_PARTS
 
 
 class DecisionMaker:
@@ -101,11 +114,16 @@ class DecisionMaker:
         if not website.startswith(("http://", "https://")):
             website = f"https://{website}"
 
+        # Generic salutation, personalized to the actual business instead of
+        # a fixed "Marketing Team" string, since we usually can't infer a
+        # real person's name from a scraped/guessed inbox address.
+        generic_name = f"{company_name} Team" if company_name else "Team"
+
         # Strategy 1 — Internal Scraper (Now powered by Playwright HTML)
         scraped_email = self._scrape_website_for_email(website, html_content)
         if scraped_email:
             return {
-                "name": "Marketing Team", # Hard to infer exact names from raw emails
+                "name": generic_name,
                 "email": scraped_email,
                 "title": ""
             }
@@ -124,13 +142,13 @@ class DecisionMaker:
         osint_email = self._find_email_via_osint(company_name, domain)
         if osint_email:
             return {
-                "name": "Team",
+                "name": generic_name,
                 "email": osint_email,
                 "title": ""
             }
 
         # Strategy 4 — generic email patterns
-        return self._fallback_patterns(domain)
+        return self._fallback_patterns(domain, generic_name)
 
     # ------------------------------------------------------------------
     # Custom Website Scraper for Emails
@@ -169,9 +187,9 @@ class DecisionMaker:
         
         for email in found_emails:
             email_lower = email.lower()
-            if not email_lower.endswith(junk_extensions):
+            if not email_lower.endswith(junk_extensions) and not _is_junk_email(email_lower):
                 valid_emails.append(email_lower)
-                
+
         if not valid_emails:
             return ""
             
@@ -187,16 +205,24 @@ class DecisionMaker:
             
         valid_emails.sort(key=score_email, reverse=True)
         
-        # Verify via SMTP before accepting
+        # Verify deliverability (DNS/MX lookup) before accepting
         for candidate in valid_emails:
             try:
-                # check_deliverability=True performs SMTP checks
                 valid = validate_email(candidate, check_deliverability=True)
                 return valid.normalized
             except EmailNotValidError:
                 continue
-                
-        return ""
+
+        # Deliverability checks failed for every candidate — this is often a
+        # false negative (DNS/MX lookups from a cloud host getting blocked or
+        # timing out), not proof the address is fake. These emails were
+        # scraped directly off the business's own site, so trust format
+        # validity alone rather than cascading down to weaker OSINT-guessed
+        # fallback strategies that produce worse results.
+        try:
+            return validate_email(valid_emails[0], check_deliverability=False).normalized
+        except EmailNotValidError:
+            return ""
 
     # ------------------------------------------------------------------
     # LinkedIn OSINT
@@ -301,7 +327,10 @@ class DecisionMaker:
             text = res.get("body", "") + " " + res.get("title", "")
             emails = re.findall(_EMAIL_REGEX, text)
             for email in emails:
-                if email.lower().endswith(domain) or email.lower().endswith("@gmail.com"):
+                email_lower = email.lower()
+                if _is_junk_email(email_lower):
+                    continue
+                if email_lower.endswith(domain) or email_lower.endswith("@gmail.com"):
                     try:
                         valid = validate_email(email, check_deliverability=False)
                         return valid.normalized
@@ -314,7 +343,7 @@ class DecisionMaker:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _fallback_patterns(domain: str) -> dict:
+    def _fallback_patterns(domain: str, generic_name: str = "Marketing Team") -> dict:
         """
         Return a generic marketing email for *domain* when all
         external lookups fail.
@@ -325,7 +354,7 @@ class DecisionMaker:
             f"hello@{domain}",
         ]
         return {
-            "name": "Marketing Team",
+            "name": generic_name,
             "email": patterns[0],
             "title": "",
         }

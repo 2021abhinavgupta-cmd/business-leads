@@ -20,7 +20,11 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install Playwright dependencies
+# Install Playwright dependencies + Node.js runtime. Node is required at
+# RUNTIME (not just for the frontend build) because analyzer/lighthouse.py
+# shells out to the `lighthouse` CLI binary — without a `node` executable in
+# this final image, every Lighthouse run silently fails (falls through to
+# the PageSpeed API fallback, or to hardcoded 0 scores if that also fails).
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -35,12 +39,20 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libgbm1 \
     libasound2 \
+    curl \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=backend-builder /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
 COPY --from=backend-builder /usr/local/bin/ /usr/local/bin/
 COPY . .
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+
+# Install the Lighthouse CLI (root package.json) so analyzer/lighthouse.py
+# finds it at node_modules/.bin/lighthouse.
+RUN npm install --omit=dev
 
 # Install playwright browsers
 RUN playwright install chromium

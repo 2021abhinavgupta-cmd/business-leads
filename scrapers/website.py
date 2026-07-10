@@ -63,6 +63,7 @@ _LOW_READABILITY_SCORE = 30  # Flesch Reading Ease; below this = "very difficult
 _MIN_WORDS_FOR_READABILITY = 50  # too little text and the score is meaningless noise
 
 _AXE_SEVERITY_MAP = {"critical": "critical", "serious": "high", "moderate": "medium", "minor": "low"}
+_MAX_CONSISTENT_FONTS = 3  # most well-designed sites use 1-2 type families, occasionally 3
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +213,8 @@ class WebsiteScraper:
             seo_page=seo_page,
             accessibility_violations=extra.get("accessibility_violations", []),
             broken_links=extra.get("broken_links", []),
+            font_families=extra.get("font_families", []),
+            stretched_images=extra.get("stretched_images", 0),
         )
 
         return WebsiteData(
@@ -255,6 +258,10 @@ class WebsiteScraper:
             Dict with keys: performance, seo, accessibility, best_practices (each 0-100)
             Returns empty dict on failure.
         """
+        if not config.PAGESPEED_KEY:
+            print("[PageSpeed API] PAGESPEED_KEY is not set — skipping, scores will be 0. Set it in the environment (this is the fallback used whenever the Lighthouse CLI is unavailable).")
+            return {}
+
         try:
             # PageSpeed API requires explicitly requesting multiple categories
             params = [
@@ -274,6 +281,9 @@ class WebsiteScraper:
             data = response.json()
 
             categories = data.get("lighthouseResult", {}).get("categories", {})
+            if not categories:
+                print(f"[PageSpeed API] Response for {url} had no lighthouseResult.categories — raw keys: {list(data.keys())}")
+                return {}
 
             return {
                 "performance": int((categories.get("performance", {}).get("score") or 0) * 100),
@@ -282,7 +292,8 @@ class WebsiteScraper:
                 "best_practices": int((categories.get("best-practices", {}).get("score") or 0) * 100),
             }
         except Exception as e:
-            print(f"[PageSpeed API] Failed for {url}: {e}")
+            body = getattr(getattr(e, "response", None), "text", "")[:300]
+            print(f"[PageSpeed API] Failed for {url}: {e} {body}")
             return {}
 
     # ------------------------------------------------------------------
@@ -434,6 +445,17 @@ class WebsiteScraper:
             or soup.find("meta", property="og:image")
         )
 
+        # Mobile viewport meta tag — its absence is a strong "not mobile
+        # optimized" signal independent of the Lighthouse mobile score.
+        viewport_tag = soup.find("meta", attrs={"name": "viewport"})
+        has_viewport_meta = bool(viewport_tag and viewport_tag.get("content"))
+
+        # Favicon — missing one is a small but very visible polish flaw
+        # (shows as a broken/blank browser tab icon).
+        has_favicon = bool(
+            soup.find("link", rel=lambda r: r and "icon" in r.lower())
+        )
+
         return {
             "meta_title": meta_title,
             "meta_description": meta_description,
@@ -447,6 +469,8 @@ class WebsiteScraper:
             "has_canonical": has_canonical,
             "is_noindexed": is_noindexed,
             "has_og_tags": has_og_tags,
+            "has_viewport_meta": has_viewport_meta,
+            "has_favicon": has_favicon,
         }
 
     # ------------------------------------------------------------------
@@ -615,6 +639,8 @@ class WebsiteScraper:
         seo_page: dict,
         accessibility_violations: list[dict],
         broken_links: list[dict],
+        font_families: list[str] | None = None,
+        stretched_images: int = 0,
     ) -> list[Flaw]:
         """
         Reconcile every audit signal (Lighthouse/PageSpeed, HTML parsing,
@@ -678,6 +704,19 @@ class WebsiteScraper:
 
         if readability_score is not None and readability_score < _LOW_READABILITY_SCORE:
             flaws.append(Flaw("content", "medium", f"Homepage copy scores {readability_score:.0f}/100 on the Flesch Reading Ease scale (very difficult to read) — simplifying the language could improve conversion."))
+
+        if not parsed.get("has_viewport_meta"):
+            flaws.append(Flaw("performance", "high", "No mobile viewport meta tag — the page will render at desktop width and appear tiny/unusable on phones."))
+
+        if not parsed.get("has_favicon"):
+            flaws.append(Flaw("content", "low", "No favicon found — the browser tab shows a blank/broken icon, which looks unpolished."))
+
+        if font_families and len(font_families) > _MAX_CONSISTENT_FONTS:
+            flaws.append(Flaw("content", "medium", f"Uses {len(font_families)} different fonts on one page ({', '.join(font_families[:5])}) — inconsistent typography reads as unpolished/unprofessional."))
+
+        if stretched_images >= 1:
+            plural = "s are" if stretched_images > 1 else " is"
+            flaws.append(Flaw("content", "medium", f"{stretched_images} image{plural} displayed larger than their native resolution and will look blurry/pixelated to visitors."))
 
         word_count = seo_page.get("word_count")
         if word_count is not None and word_count < _THIN_CONTENT_WORDS:

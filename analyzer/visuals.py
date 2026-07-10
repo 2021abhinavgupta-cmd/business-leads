@@ -70,6 +70,18 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # headers here is free (no extra network call).
                 response_headers = dict(response.headers) if response else {}
 
+                # The `load` event fires before CSS fade-in animations finish and
+                # before lazy-loaded hero images/cookie-banner widgets settle, so a
+                # screenshot taken immediately after goto() can capture a half-faded,
+                # not-yet-rendered page that doesn't match what a real visitor sees.
+                # Best-effort wait for network activity to quiet down, then a fixed
+                # settle delay for CSS transitions — never fail the audit over this.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1000)
+
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
                 
@@ -84,7 +96,11 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 
                 # --- 5. Check for broken links/images ---
                 broken_links = await _check_broken_assets(page, context)
-                
+
+                # --- 6. Visual polish checks (typography consistency, stretched images) ---
+                font_families = await _check_font_consistency(page)
+                stretched_images = await _check_stretched_images(page)
+
                 await browser.close()
             
         # Draw analysis box on the image
@@ -108,7 +124,9 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "broken_links": broken_links,
             "perf_timing": perf_timing,
             "response_headers": response_headers,
-            "visual_flaw_context": visual_flaw_context
+            "visual_flaw_context": visual_flaw_context,
+            "font_families": font_families,
+            "stretched_images": stretched_images,
         }
         
         return filepath, html_content, extra_audit_data
@@ -205,6 +223,57 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
     except Exception as e:
         print(f"[Axe] Accessibility audit failed (non-critical): {e}")
         return [], None
+
+
+async def _check_font_consistency(page) -> list:
+    """
+    Collect distinct font-family stacks actually rendered on visible text.
+    Too many different fonts on one page is a classic "doesn't look
+    professional/cohesive" symptom — cheap to detect via computed styles,
+    no visual-model call needed.
+    """
+    try:
+        families = await page.evaluate("""() => {
+            const seen = new Set();
+            const els = document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, a, button, span, li, label');
+            for (const el of els) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                const family = getComputedStyle(el).fontFamily;
+                if (family) seen.add(family.split(',')[0].replace(/['"]/g, '').trim());
+            }
+            return Array.from(seen);
+        }""")
+        return families or []
+    except Exception as e:
+        print(f"[Visuals] Font consistency check failed (non-critical): {e}")
+        return []
+
+
+async def _check_stretched_images(page) -> int:
+    """
+    Count visible <img> elements displayed significantly larger than their
+    natural (source) resolution — a classic cause of blurry/pixelated
+    images that immediately reads as unpolished.
+    """
+    try:
+        count = await page.evaluate("""() => {
+            const imgs = document.querySelectorAll('img');
+            let stretched = 0;
+            for (const img of imgs) {
+                const rect = img.getBoundingClientRect();
+                if (rect.width < 40 || rect.height < 40) continue; // ignore icons
+                if (!img.naturalWidth || !img.naturalHeight) continue;
+                if (rect.width > img.naturalWidth * 1.4 || rect.height > img.naturalHeight * 1.4) {
+                    stretched++;
+                }
+            }
+            return stretched;
+        }""")
+        return count or 0
+    except Exception as e:
+        print(f"[Visuals] Stretched image check failed (non-critical): {e}")
+        return 0
 
 
 async def _check_broken_assets(page, context) -> list:

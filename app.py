@@ -18,19 +18,21 @@ from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
 from storage.sheets import SheetsStorage
 from storage import db
+from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
 
 app = FastAPI(title="Lead Audit Bot Web App")
 
-# Allow CORS for local dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if config.ALLOWED_ORIGINS == ["*"]:
+    print("[CORS] WARNING: ALLOWED_ORIGINS not set — allowing all origins. Set ALLOWED_ORIGINS in production.")
 
 if not config.API_KEY:
     print(
@@ -80,6 +82,32 @@ def rate_limit(max_calls: int, window_seconds: int):
             )
         bucket.append(now)
     return _check
+
+
+# Short-TTL cache for /api/audit results keyed by normalized website URL —
+# guards against accidental duplicate audits (double-clicks, re-opening the
+# same lead) re-running the full scrape+AI pipeline and burning cost/time.
+_AUDIT_CACHE_TTL = 600
+_audit_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _audit_cache_key(website: str) -> str:
+    return website.strip().lower().rstrip("/")
+
+
+def _audit_cache_get(website: str) -> dict | None:
+    entry = _audit_cache.get(_audit_cache_key(website))
+    if not entry:
+        return None
+    ts, data = entry
+    if time.monotonic() - ts > _AUDIT_CACHE_TTL:
+        return None
+    return data
+
+
+def _audit_cache_set(website: str, data: dict) -> None:
+    _audit_cache[_audit_cache_key(website)] = (time.monotonic(), data)
+
 
 class SearchRequest(BaseModel):
     niche: str
@@ -149,6 +177,16 @@ async def audit_lead(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(5, 60)),
 ):
+    if req.website:
+        try:
+            await asyncio.to_thread(validate_public_url, req.website)
+        except UnsafeURLError as e:
+            raise HTTPException(status_code=400, detail=f"Refusing to audit this URL: {e}")
+
+        cached = _audit_cache_get(req.website)
+        if cached is not None:
+            return cached
+
     try:
         # Check SES quota (optional but good for safety)
         quota = await asyncio.to_thread(ses.check_ses_quota)
@@ -226,7 +264,7 @@ async def audit_lead(
             image_url=image_url or ""
         )
 
-        return {
+        result = {
             "email": email,
             "sender_email": config.FROM_EMAIL,
             "subject": subject,
@@ -238,6 +276,9 @@ async def audit_lead(
             "image_url": image_url,
             "ai_cost": analysis.get("ai_cost", 0.0001)
         }
+        if req.website:
+            _audit_cache_set(req.website, result)
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
