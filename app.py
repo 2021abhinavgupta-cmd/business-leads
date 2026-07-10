@@ -89,8 +89,19 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         if req.instagram_handle:
             ig_data = ig_scraper.get_instagram_data(req.instagram_handle)
 
-        # AI Audit
-        analysis = auditor.analyze_lead(req.company, ig_data, web_data)
+        # AI Audit (with visual critique)
+        image_path = None
+        if req.website:
+            image_path = await generate_audit_screenshot(req.website, req.company)
+
+        analysis = auditor.analyze_lead(req.company, ig_data, web_data, image_path=image_path)
+        
+        if image_path:
+            try:
+                os.remove(image_path)
+            except Exception:
+                pass
+                
         if not analysis:
             return {"error": "AI failed to analyze."}
 

@@ -8,6 +8,7 @@ produces specific, number-backed audit results rather than generic advice.
 
 import json
 import re
+import base64
 
 import anthropic
 import google.generativeai as genai
@@ -54,6 +55,7 @@ class AIAuditor:
         company: str,
         ig: InstagramData | None,
         web: WebsiteData,
+        image_path: str | None = None
     ) -> dict | None:
         """
         Analyse a lead's digital presence via an AI fallback chain.
@@ -68,7 +70,15 @@ class AIAuditor:
             ``email_subject``, ``opening_line`` — or ``None`` if every
             AI provider fails.
         """
-        prompt = self._build_prompt(company, ig, web)
+        prompt = self._build_prompt(company, ig, web, bool(image_path))
+
+        base64_image = None
+        if image_path:
+            try:
+                with open(image_path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            except Exception as e:
+                print(f"Failed to read image for AI audit: {e}")
 
         # Fallback chain: Claude Haiku → Gemini → GPT-4o-mini
         for call_fn in (
@@ -76,7 +86,7 @@ class AIAuditor:
             self._call_gemini,
             self._call_openai,
         ):
-            raw = call_fn(prompt)
+            raw = call_fn(prompt, base64_image)
             if raw is None:
                 continue
 
@@ -102,6 +112,7 @@ class AIAuditor:
         company: str,
         ig: InstagramData | None,
         web: WebsiteData,
+        has_image: bool = False
     ) -> str:
         """
         Assemble the audit prompt using real data from *ig* and *web*.
@@ -150,8 +161,9 @@ class AIAuditor:
             "Be direct, casual, and friendly. Do not use corporate jargon. "
             "Talk like a normal human being reaching out to a peer.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
-            "If page_speed < 50 say exactly that and how much traffic they are losing.\n"
-            "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized (e.g. 'Since you guys use Shopify...').\n\n"
+            "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized (e.g. 'Since you guys use Shopify...').\n"
+            + ("CRITICAL: An image screenshot of their website is attached. Actively critique their visual design, typography, layout, or mobile responsiveness based on the image.\n" if has_image else "") + 
+            "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. "
             "No explanation.\n"
             "Use this exact structure:\n"
@@ -176,55 +188,74 @@ class AIAuditor:
     # Provider calls
     # ------------------------------------------------------------------
 
-    def _call_gemini(self, prompt: str) -> str | None:
+    def _call_gemini(self, prompt: str, base64_image: str | None = None) -> str | None:
         """
         Call Google Gemini Flash (``gemini-2.0-flash``).
-
-        Returns the raw response text or ``None`` on failure.
         """
         if not config.GEMINI_API_KEY:
             return None
 
         try:
             model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(prompt)
+            content = [prompt]
+            if base64_image:
+                content.append({
+                    "mime_type": "image/jpeg",
+                    "data": base64_image
+                })
+            response = model.generate_content(content)
             return response.text
         except Exception:
             return None
 
-    def _call_openai(self, prompt: str) -> str | None:
+    def _call_openai(self, prompt: str, base64_image: str | None = None) -> str | None:
         """
         Call OpenAI GPT-4o-mini.
-
-        Returns the raw response text or ``None`` on failure.
         """
         if not self._openai_client:
             return None
 
         try:
+            content = [{"type": "text", "text": prompt}]
+            if base64_image:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
+
             response = self._openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
                 temperature=0.7,
             )
             return response.choices[0].message.content
         except Exception:
             return None
 
-    def _call_anthropic(self, prompt: str) -> str | None:
+    def _call_anthropic(self, prompt: str, base64_image: str | None = None) -> str | None:
         """
-        Call Anthropic Claude Haiku (``claude-haiku-4-5-20251001``).
-
-        Returns the raw response text or ``None`` on failure.
+        Call Anthropic Claude Haiku.
         """
         if not self._anthropic_client:
             return None
 
         try:
+            content = []
+            if base64_image:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64_image
+                    }
+                })
+            content.append({"type": "text", "text": prompt})
+
             message = self._anthropic_client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-3-5-haiku-20241022",
                 max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": content}],
             )
             return message.content[0].text
         except Exception:

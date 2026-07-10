@@ -79,20 +79,20 @@ async def process_single_lead(lead: dict) -> str:
     web_data = await web_scraper.audit_website(website)
     print(f"  Web: speed={web_data.page_speed_score}, seo={web_data.seo_score}")
     
-    # Step 5: AI Analysis
-    analysis = auditor.analyze_lead(company, ig_data, web_data)
+    # Step 5: Generate Visual Evidence (Screenshot)
+    print(f"  Generating visual evidence for {website}...")
+    image_path = await generate_audit_screenshot(website, company)
+
+    # Step 6: AI Analysis
+    analysis = auditor.analyze_lead(company, ig_data, web_data, image_path=image_path)
     if not analysis:
         print(f"  AI audit failed for {company}")
         return "failed_ai_error"
     
-    # Step 6: Skip if score is too good (not worth emailing)
+    # Step 7: Skip if score is too good (not worth emailing)
     if analysis.get("overall_score", 100) > 70:
         print(f"  Score {analysis.get('overall_score')} — too good, skipping")
         return "skipped"
-    
-    # Step 7: Generate Visual Evidence (Screenshot)
-    print(f"  Generating visual evidence for {website}...")
-    image_path = await generate_audit_screenshot(website, company)
     
     # Step 8: Generate and draft email
     subject, body = ses.generate_email(company, contact, analysis, YOUR_NAME)
