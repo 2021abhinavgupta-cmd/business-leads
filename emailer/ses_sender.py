@@ -53,14 +53,17 @@ class SESSender:
         ]
         
         if flaws:
-            for idx, flaw in enumerate(flaws):
-                body_lines.append(f"{flaw.get('headline', '')}")
-                bridge = "This is" if idx == 0 else "Which means"
-                body_lines.append(f"{flaw.get('detail', '')} {bridge} {flaw.get('impact', '')}.\n")
+            for flaw in flaws:
+                if 'paragraph' in flaw:
+                    body_lines.append(f"{flaw.get('paragraph', '')}\n")
+                else:
+                    # Fallback for old AI responses
+                    body_lines.append(f"{flaw.get('headline', '')}")
+                    body_lines.append(f"{flaw.get('detail', '')} This means {flaw.get('impact', '')}.\n")
             
         body_lines.extend([
             "I've been helping brands fix exactly these things.",
-            "Worth a quick 10-minute call this week?\n",
+            "Worth a quick 10 minute call this week?\n",
             f"{your_name}"
         ])
         

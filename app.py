@@ -122,7 +122,7 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         email = dm.get("email", "")
 
         # Generate Draft
-        YOUR_NAME = os.getenv("YOUR_NAME", "Admin")
+        YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")
         subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME)
 
         # Update Sheets in background

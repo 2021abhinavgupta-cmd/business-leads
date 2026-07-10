@@ -170,7 +170,8 @@ class AIAuditor:
             f"{brand_context_section}\n"
             "TASK:\n"
             "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
-            "Be direct, casual, and friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
+            "Be direct, casual, and extremely friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
+            "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response. For example, use '10 minute call' instead of '10-minute call'.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
@@ -182,15 +183,12 @@ class AIAuditor:
             "{\n"
             '  "flaws": [\n'
             "    {\n"
-            '      "area": "Visual Design / Performance / SEO",\n'
-            '      "headline": "specific one-line problem with their actual numbers or visual layout (casual tone)",\n'
-            '      "detail": "2 sentence explanation referencing their real data or the screenshot (casual tone)",\n'
-            '      "impact": "what this costs them in business terms"\n'
+            '      "paragraph": "A single, highly conversational, flowing 2 to 3 sentence paragraph explaining the specific problem and the business impact. NO HYPHENS. NO DASHES. Be extremely natural."\n'
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
-            '  "email_subject": "ultra-casual, lowercase subject line (e.g. \'quick question about your mobile site\')",\n'
-            '  "opening_line": "friendly, personalized opening line"\n'
+            '  "email_subject": "ultra casual lowercase subject line without hyphens",\n'
+            '  "opening_line": "friendly personalized opening line without hyphens"\n'
             "}\n"
             )
 
