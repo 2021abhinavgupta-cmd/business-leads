@@ -36,16 +36,14 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 browser = await p.chromium.launch(headless=True)
                 
                 context = await browser.new_context(
-                    viewport={'width': 390, 'height': 844},
-                    user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-                    is_mobile=True,
-                    has_touch=True
+                    viewport={'width': 1280, 'height': 800},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
                 
                 page = await context.new_page()
                 
-                # Navigate and wait for network idle
-                await page.goto(url, timeout=20000, wait_until="networkidle")
+                # Navigate and wait for page load
+                await page.goto(url, timeout=30000, wait_until="load")
                 
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
@@ -57,7 +55,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 perf_timing = await _get_performance_timing(page)
                 
                 # --- 4. Run axe-core accessibility audit ---
-                accessibility_violations = await _run_axe_audit(page)
+                accessibility_violations, visual_flaw = await _run_axe_audit(page)
                 
                 # --- 5. Check for broken links/images ---
                 broken_links = await _check_broken_assets(page, context)
@@ -66,10 +64,16 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             
         # Draw analysis box on the image
         img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
-        draw = ImageDraw.Draw(img)
-        width, height = img.size
-        box = [20, 100, width - 20, 300]
-        draw.rectangle(box, outline="red", width=5)
+        
+        visual_flaw_context = ""
+        if visual_flaw:
+            draw = ImageDraw.Draw(img)
+            box = visual_flaw["box"]
+            # Pad the box slightly for better visibility
+            pad = 5
+            padded_box = [max(0, box[0]-pad), max(0, box[1]-pad), box[2]+pad, box[3]+pad]
+            draw.rectangle(padded_box, outline="red", width=4)
+            visual_flaw_context = f"The red box in the screenshot highlights an accessibility flaw: {visual_flaw['description']}."
         
         safe_name = "".join([c if c.isalnum() else "_" for c in company_name.lower()])
         filepath = os.path.join(SCREENSHOTS_DIR, f"{safe_name}_audit.jpg")
@@ -79,6 +83,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "accessibility_violations": accessibility_violations,
             "broken_links": broken_links,
             "perf_timing": perf_timing,
+            "visual_flaw_context": visual_flaw_context
         }
         
         return filepath, html_content, extra_audit_data
@@ -110,7 +115,7 @@ async def _get_performance_timing(page) -> dict:
     return {}
 
 
-async def _run_axe_audit(page) -> list:
+async def _run_axe_audit(page) -> tuple[list, dict | None]:
     """Run axe-core accessibility engine on the current page."""
     try:
         from axe_playwright_python.async_playwright import Axe
@@ -124,6 +129,7 @@ async def _run_axe_audit(page) -> list:
                 "impact": v.get("impact", ""),  # critical, serious, moderate, minor
                 "description": v.get("description", ""),
                 "help": v.get("help", ""),
+                "nodes": v.get("nodes", []),
                 "nodes_count": len(v.get("nodes", [])),
             })
         
@@ -131,12 +137,40 @@ async def _run_axe_audit(page) -> list:
         severity_order = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
         violations.sort(key=lambda x: severity_order.get(x["impact"], 4))
         
+        # Interconnect: Find a visible node to draw a real red box around
+        visual_flaw = None
+        for v in violations:
+            for node in v.get("nodes", []):
+                target_selectors = node.get("target", [])
+                if not target_selectors:
+                    continue
+                selector = target_selectors[0]
+                try:
+                    if isinstance(selector, list):
+                        selector = selector[0]
+                    # Get exact coordinates of the flawed element
+                    box = await page.locator(selector).first.bounding_box(timeout=1000)
+                    if box and box["width"] > 0 and box["height"] > 0:
+                        visual_flaw = {
+                            "box": [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
+                            "description": v["help"]
+                        }
+                        break
+                except Exception:
+                    pass
+            if visual_flaw:
+                break
+        
+        # Clean up nodes array to save memory
+        for v in violations:
+            v.pop("nodes", None)
+            
         print(f"[Axe] Found {len(violations)} accessibility violations.")
-        return violations[:10]  # Cap at 10 most severe
+        return violations[:10], visual_flaw
         
     except Exception as e:
         print(f"[Axe] Accessibility audit failed (non-critical): {e}")
-        return []
+        return [], None
 
 
 async def _check_broken_assets(page, context) -> list:

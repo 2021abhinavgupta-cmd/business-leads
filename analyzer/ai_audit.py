@@ -212,6 +212,14 @@ class AIAuditor:
                 f"{web.company_context[:3000]}\n"
             )
 
+        # --- Visual Flaw Context ---
+        visual_flaw_section = ""
+        if getattr(web, 'visual_flaw_context', None):
+            visual_flaw_section = (
+                f"SCREENSHOT VISUAL FLAW:\n"
+                f"{web.visual_flaw_context}\n"
+            )
+
         return (
             f"You are a sharp, conversational digital marketing consultant auditing "
             f"{company}.\n\n"
@@ -222,18 +230,19 @@ class AIAuditor:
             f"{a11y_section}\n"
             f"{broken_section}\n"
             f"{brand_context_section}\n"
+            f"{visual_flaw_section}\n"
             "TASK:\n"
             "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
             "Be direct, casual, and extremely friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
             "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response. For example, use '10 minute call' instead of '10-minute call'.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
-            "If REAL BROWSER PERFORMANCE shows full_load_ms > 3000, quote it (e.g., 'your page took 4.2 seconds to load on mobile').\n"
-            "If ACCESSIBILITY VIOLATIONS exist, mention specific ones by name (e.g., 'your site has 5 images missing alt text, which hurts both SEO and accessibility').\n"
-            "If BROKEN ASSETS exist, mention them (e.g., 'I noticed a few broken links on your homepage').\n"
+            "If ACCESSIBILITY VIOLATIONS exist, mention specific ones by name.\n"
+            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot (e.g., 'I attached a screenshot of your site—the red box highlights a button that is completely invisible to screen readers, which is hurting your SEO').\n"
+            "If BROKEN ASSETS exist, mention them.\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
-            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a mobile screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your mobile menu overlaps...').\n" if has_image else "") + 
+            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...').\n" if has_image else "") + 
             "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"
             "Use this exact structure:\n"

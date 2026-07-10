@@ -82,6 +82,7 @@ class WebsiteData:
     broken_links: list[dict] = field(default_factory=list)
     perf_timing: dict = field(default_factory=dict)
     lighthouse_scores: dict = field(default_factory=dict)
+    visual_flaw_context: str = ""
     issues: list[str] = field(default_factory=list)
 
 
@@ -209,6 +210,7 @@ class WebsiteScraper:
             broken_links=extra.get("broken_links", []),
             perf_timing=perf_timing,
             lighthouse_scores=lighthouse_scores,
+            visual_flaw_context=extra.get("visual_flaw_context", ""),
             issues=issues,
         )
 
