@@ -6,6 +6,13 @@ import './App.css';
 
 const API_BASE = ""; // Use relative paths so it works on same domain
 
+// Sent as X-API-Key on every request; backend only enforces it if API_KEY is
+// set server-side (see config.py / .env.example). Set VITE_API_KEY in
+// frontend/.env to match the backend's API_KEY before building for production.
+if (import.meta.env.VITE_API_KEY) {
+  axios.defaults.headers.common['X-API-Key'] = import.meta.env.VITE_API_KEY;
+}
+
 function App() {
   const [currentView, setCurrentView] = useState('home');
   const [niche, setNiche] = useState('');

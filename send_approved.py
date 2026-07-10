@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 
 from emailer.ses_sender import SESSender
@@ -37,15 +38,14 @@ async def send_approved_emails():
         # Generate fresh screenshot for the email
         image_path = None
         if website:
-            image_path = await generate_audit_screenshot(website, company)
+            image_path, _html_content, _extra_audit_data = await generate_audit_screenshot(website, company)
 
         success = ses.send_email(email, subject, body, image_path=image_path)
 
         if image_path:
-            import os
             try:
                 os.remove(image_path)
-            except:
+            except OSError:
                 pass
 
         if success:

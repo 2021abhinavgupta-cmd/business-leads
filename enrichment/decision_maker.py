@@ -30,7 +30,7 @@ class DecisionMaker:
     def __init__(self, min_score: int = 50):
         self.min_score = min_score
         # Relaxed httpx client for scraping random websites (fast timeout to prevent 502)
-        self.client = httpx.Client(timeout=5, verify=False)
+        self.client = httpx.Client(timeout=5)
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -258,7 +258,7 @@ class DecisionMaker:
         try:
             validate_email(f"bounce-test-992384@{domain}", check_deliverability=True)
             is_catch_all = True
-        except:
+        except Exception:
             pass
             
         if not is_catch_all:
@@ -305,7 +305,7 @@ class DecisionMaker:
                     try:
                         valid = validate_email(email, check_deliverability=False)
                         return valid.normalized
-                    except:
+                    except Exception:
                         pass
         return ""
 
@@ -329,20 +329,6 @@ class DecisionMaker:
             "email": patterns[0],
             "title": "",
         }
-
-    # ------------------------------------------------------------------
-    # Lead scoring (kept from original stub)
-    # ------------------------------------------------------------------
-
-    def score_lead(self, lead_data: dict) -> int:
-        """
-        Assign a quality score (0-100) to *lead_data*.
-        """
-        raise NotImplementedError
-
-    def is_qualified(self, lead_data: dict) -> bool:
-        """Return True if the lead's score meets the minimum threshold."""
-        return self.score_lead(lead_data) >= self.min_score
 
     # ------------------------------------------------------------------
     # Helpers

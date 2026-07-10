@@ -50,9 +50,15 @@ def init_db():
     )
     """)
     
-    # ONE-TIME CLEANUP: Remove historical Google Maps API costs since it is now free
-    cursor.execute("DELETE FROM cost_logs WHERE category = 'Google Maps API'")
-    
+    # ONE-TIME CLEANUP: Remove historical Google Maps API costs since it is now free.
+    # Guarded by PRAGMA user_version so this DELETE runs once ever, not on every
+    # init_db() call (init_db() is called from every public function in this module).
+    cursor.execute("PRAGMA user_version")
+    schema_version = cursor.fetchone()[0]
+    if schema_version < 1:
+        cursor.execute("DELETE FROM cost_logs WHERE category = 'Google Maps API'")
+        cursor.execute("PRAGMA user_version = 1")
+
     conn.commit()
     conn.close()
 

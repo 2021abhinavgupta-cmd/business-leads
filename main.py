@@ -3,6 +3,7 @@ Main orchestration script — ties all modules together to run the lead audit bo
 """
 
 import asyncio
+import os
 import random
 import sys
 
@@ -14,7 +15,6 @@ from scrapers.instagram import InstagramScraper
 from scrapers.website import WebsiteScraper
 from storage.sheets import SheetsStorage
 from analyzer.visuals import generate_audit_screenshot
-from storage.sheets import SheetsStorage
 
 # ==============================================================================
 # Initialization
@@ -31,7 +31,7 @@ except Exception as e:
     print(f"Failed to initialize components: {e}")
     sys.exit(1)
 
-YOUR_NAME = "Your Name Here"
+YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")
 emails_sent = 0
 
 # ==============================================================================
@@ -63,20 +63,20 @@ async def process_single_lead(lead: dict) -> str:
     
     # Step 3: Generate Visual Evidence & Scrape HTML (Playwright)
     print(f"  Generating visual evidence & scraping for {website}...")
-    image_path, html_content = await generate_audit_screenshot(website, company)
-    
+    image_path, html_content, extra_audit_data = await generate_audit_screenshot(website, company)
+
     # Step 4: Find decision maker if name or email missing (using Playwright HTML)
     if (not contact or not email) and website:
         dm = decision_maker.find_decision_maker(company, website, html_content=html_content)
         contact = dm.get("name", "")
         email = dm.get("email", "")
-    
+
     if not email:
         print(f"  No email found for {company}")
         return "failed_no_email"
-    
+
     # Step 5: Audit website (with Playwright HTML)
-    web_data = await web_scraper.audit_website(website, html=html_content)
+    web_data = await web_scraper.audit_website(website, html=html_content, extra_audit_data=extra_audit_data)
     print(f"  Web: speed={web_data.page_speed_score}, seo={web_data.seo_score}")
 
     # Step 6: AI Analysis
@@ -99,10 +99,9 @@ async def process_single_lead(lead: dict) -> str:
         
     # Clean up the screenshot file to save space
     if image_path:
-        import os
         try:
             os.remove(image_path)
-        except:
+        except OSError:
             pass
             
     return "drafted"
@@ -128,8 +127,8 @@ async def run_batch():
         print("No SES quota remaining today. Exiting.")
         return
         
-    leads = sheets.get_pending_leads()[:10]  # LIMIT TO 10 FOR TESTING
-    print(f"Pending leads in CRM (Testing batch of 10): {len(leads)}")
+    leads = sheets.get_pending_leads()[:config.DAILY_EMAIL_LIMIT]
+    print(f"Pending leads in CRM (batch capped at DAILY_EMAIL_LIMIT={config.DAILY_EMAIL_LIMIT}): {len(leads)}")
     
     for lead in leads:
         if emails_sent >= config.DAILY_EMAIL_LIMIT:

@@ -1,7 +1,9 @@
 import asyncio
 import os
 import random
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import time
+from collections import defaultdict, deque
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,7 +15,7 @@ from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
 from emailer.ses_sender import SESSender
 from enrichment.decision_maker import DecisionMaker
-from analyzer.visuals import generate_audit_screenshot
+from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
 from storage.sheets import SheetsStorage
 from storage import db
 
@@ -29,6 +31,46 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if not config.API_KEY:
+    print(
+        "[Auth] WARNING: API_KEY is not set — every /api/* endpoint is unauthenticated. "
+        "Set API_KEY in your environment before deploying anywhere reachable from the internet."
+    )
+
+
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """
+    Gate on X-API-Key. No-op (open) if API_KEY isn't configured, so local dev
+    without a .env still works — but that means auth is OFF until you set it.
+    """
+    if not config.API_KEY:
+        return
+    if x_api_key != config.API_KEY:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
+
+
+# In-memory sliding-window rate limiter, keyed by API key (or "anonymous" if
+# API_KEY isn't set). Single-process/in-memory is fine for a single Railway
+# instance; won't hold up across multiple instances/workers.
+_rate_limit_buckets: dict[str, deque] = defaultdict(deque)
+
+
+def rate_limit(max_calls: int, window_seconds: int):
+    """Dependency factory: allow at most *max_calls* requests per *window_seconds* per API key."""
+    async def _check(x_api_key: str | None = Header(default=None)) -> None:
+        key = x_api_key or "anonymous"
+        bucket = _rate_limit_buckets[key]
+        now = time.monotonic()
+        while bucket and now - bucket[0] > window_seconds:
+            bucket.popleft()
+        if len(bucket) >= max_calls:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: max {max_calls} requests per {window_seconds}s on this endpoint",
+            )
+        bucket.append(now)
+    return _check
 
 class SearchRequest(BaseModel):
     niche: str
@@ -69,25 +111,38 @@ def save_leads_to_sheets_bg(leads: list):
             print(f"Error saving to sheets: {e}")
 
 @app.post("/api/search")
-async def search_leads(req: SearchRequest, background_tasks: BackgroundTasks):
+async def search_leads(
+    req: SearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
     try:
         leads = await maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
-        
+
         # Log exact Maps API cost
         total_search_cost = sum(lead.get("search_cost", 0) for lead in leads)
         if total_search_cost > 0:
-            db.log_cost("Google Maps API", total_search_cost, description=f"Search: {req.niche} in {req.city} ({len(leads)} leads)")
-            
+            await asyncio.to_thread(
+                db.log_cost, "Google Maps API", total_search_cost,
+                description=f"Search: {req.niche} in {req.city} ({len(leads)} leads)"
+            )
+
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/audit")
-async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
+async def audit_lead(
+    req: AuditRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
     try:
         # Check SES quota (optional but good for safety)
-        quota = ses.check_ses_quota()
+        quota = await asyncio.to_thread(ses.check_ses_quota)
         remaining_quota = quota.get('Max24HourSend', 0) - quota.get('SentLast24Hours', 0)
         if remaining_quota <= 0:
             return {"error": "SES quota exceeded."}
@@ -101,7 +156,7 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
 
         # 2. Website Audit (using fully rendered HTML + Playwright audit data)
         web_data = await web_scraper.audit_website(req.website, html=html_content, extra_audit_data=extra_audit_data)
-        
+
         # 3. Instagram Data — use handle from request, or auto-detect from website
         ig_handle = req.instagram_handle
         if not ig_handle and web_data.instagram_url:
@@ -111,23 +166,23 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
             if match:
                 ig_handle = match.group(1)
                 print(f"[Audit] Auto-detected Instagram handle from website: @{ig_handle}")
-        
+
         ig_data = None
         if ig_handle:
-            ig_data = ig_scraper.get_instagram_data(ig_handle)
+            ig_data = await asyncio.to_thread(ig_scraper.get_instagram_data, ig_handle)
 
         # 4. AI Audit (with visual critique)
-        analysis = auditor.analyze_lead(req.company, ig_data, web_data, image_path=image_path)
-        
+        analysis = await asyncio.to_thread(auditor.analyze_lead, req.company, ig_data, web_data, image_path=image_path)
+
         image_url = None
         if image_path:
             image_url = f"/screenshots/{os.path.basename(image_path)}"
-                
+
         if not analysis:
             return {"error": "AI failed to analyze."}
 
         # 5. Find Contact (using fully rendered HTML)
-        dm = decision_maker.find_decision_maker(req.company, req.website, html_content=html_content)
+        dm = await asyncio.to_thread(decision_maker.find_decision_maker, req.company, req.website, html_content=html_content)
         contact = dm.get("name", "")
         email = dm.get("email", "")
 
@@ -146,18 +201,19 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
                 print(f"Error updating audit in sheets: {e}")
 
         background_tasks.add_task(save_audit_to_sheets)
-        
+
         # Log AI Cost
         ai_cost = analysis.get("ai_cost", 0.0001)
-        db.log_cost("AI Audit", ai_cost, description=f"Audit for {req.company}")
-        
+        await asyncio.to_thread(db.log_cost, "AI Audit", ai_cost, description=f"Audit for {req.company}")
+
         # Save to DB Drafts
-        db.log_draft(
-            company=req.company, 
-            website=req.website, 
-            target_email=email, 
-            subject=subject, 
-            body=body, 
+        await asyncio.to_thread(
+            db.log_draft,
+            company=req.company,
+            website=req.website,
+            target_email=email,
+            subject=subject,
+            body=body,
             image_url=image_url or ""
         )
 
@@ -177,18 +233,22 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send")
-async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
+async def send_email(
+    req: SendRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
     try:
-        # Use existing screenshot
+        # Use existing screenshot (same collision-safe name generate_audit_screenshot wrote)
         image_path = None
-        if req.company:
-            safe_name = "".join([c if c.isalnum() else "_" for c in req.company.lower()])
-            candidate_path = os.path.join(SCREENSHOTS_DIR, f"{safe_name}_audit.jpg")
+        if req.company and req.website:
+            candidate_path = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(req.company, req.website))
             if os.path.exists(candidate_path):
                 image_path = candidate_path
 
-        success = ses.send_email(req.email, req.subject, req.body, image_path=image_path)
-        
+        success = await asyncio.to_thread(ses.send_email, req.email, req.subject, req.body, image_path=image_path)
+
         if success:
             def save_send_to_sheets():
                 try:
@@ -198,14 +258,14 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
                 except Exception as e:
                     print(f"Error updating send status in sheets: {e}")
             background_tasks.add_task(save_send_to_sheets)
-            
+
             # Log exact costs and email history
-            db.log_cost("AWS SES", 0.0001, description=f"Email to {req.email}")
-            db.log_email(req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body)
-            
+            await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
+            await asyncio.to_thread(db.log_email, req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body)
+
             # Remove from drafts since it's sent
-            db.delete_draft_by_website(req.website)
-            
+            await asyncio.to_thread(db.delete_draft_by_website, req.website)
+
             return {"status": "success"}
         else:
             raise HTTPException(status_code=500, detail="Failed to send via SES")
@@ -213,33 +273,33 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/costs")
-async def get_costs():
+async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
-        costs = db.get_costs()
+        costs = await asyncio.to_thread(db.get_costs)
         return {"costs": costs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/history")
-async def get_history():
+async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
-        history = db.get_email_history()
+        history = await asyncio.to_thread(db.get_email_history)
         return {"history": history}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/drafts")
-async def get_drafts():
+async def get_drafts(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
-        drafts = db.get_drafts()
+        drafts = await asyncio.to_thread(db.get_drafts)
         return {"drafts": drafts}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/drafts/{draft_id}")
-async def delete_draft(draft_id: int):
+async def delete_draft(draft_id: int, _auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(30, 60))):
     try:
-        db.delete_draft(draft_id)
+        await asyncio.to_thread(db.delete_draft, draft_id)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

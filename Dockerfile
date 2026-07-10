@@ -6,6 +6,12 @@ RUN pip install fastapi uvicorn
 
 FROM node:20 as frontend-builder
 WORKDIR /app/frontend
+# Set VITE_API_KEY as a Railway Build Variable (Project Settings > Variables >
+# mark as build-time) so it's baked into the built JS at image-build time —
+# never committed to git, but still readable by anyone who inspects the
+# shipped JS bundle (same caveat as any client-side "secret").
+ARG VITE_API_KEY
+ENV VITE_API_KEY=$VITE_API_KEY
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend/ .

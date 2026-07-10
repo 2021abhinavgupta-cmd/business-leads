@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install Playwright browser
+        run: playwright install --with-deps chromium
+
+      # Integration tests (test_audit.py, test_lh.py) hit real websites/AI
+      # providers and skip themselves when API keys/binaries aren't present.
+      # No secrets are configured in this workflow, so they'll show as
+      # "skipped" rather than run for real — avoiding API costs on every push.
+      # Add repo secrets + an `env:` block here if you want them to run live.
+      - name: Run tests
+        run: pytest -v

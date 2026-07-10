@@ -15,15 +15,15 @@ from storage.sheets import SheetsStorage
 import config
 
 
-def ingest_leads():
+async def ingest_leads():
     """
     Scrape leads from Google Maps and Apollo and append them to the CRM.
     """
     print("--- Starting Lead Ingestion ---")
-    
+
     try:
         sheets = SheetsStorage()
-        
+
         # Select scraper based on LEAD_SOURCE in config
         source = config.LEAD_SOURCE
         if source == "ecommerce":
@@ -43,7 +43,7 @@ def ingest_leads():
                 ("restaurant", "Mumbai"),
                 ("fashion brand", "Mumbai")
             ]
-            
+
     except Exception as e:
         print(f"Failed to initialize ingestion components: {e}")
         return
@@ -53,14 +53,14 @@ def ingest_leads():
         if source == "maps":
             niche_query, city = niche
             print(f"Scraping Maps: {niche_query} in {city}...")
-            leads = scraper.scrape_google_maps(niche_query, city, limit=50)
+            leads = await scraper.scrape_google_maps(niche_query, city, limit=50)
         else:
             print(f"Scraping {source}: {niche}...")
             leads = scraper.scrape(niche, limit=50)
-            
+
         for lead in leads:
             sheets.add_lead(lead)
-            
+
     print("--- Lead Ingestion Complete ---")
 
 
@@ -86,7 +86,7 @@ def start_scheduler():
     
     # 2) Ingest new leads every Sunday at 8:00 PM IST
     scheduler.add_job(
-        ingest_leads,
+        lambda: asyncio.run(ingest_leads()),
         CronTrigger(day_of_week="sun", hour=20, minute=0),
         name="ingest_leads_sunday"
     )

@@ -26,6 +26,12 @@ _SESSION_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sessio
 _DELAY_MIN = 3
 _DELAY_MAX = 5
 
+# How long to stop hitting Instagram entirely after a ban/checkpoint signal
+# (LoginRequired/ChallengeRequired). Retrying immediately after a challenge is
+# what turns a soft flag into a permanent ban — this is a circuit breaker, not
+# a fix for the underlying ToS risk of scraping Instagram at all.
+_CHALLENGE_COOLDOWN_SECONDS = 60 * 60
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -61,10 +67,21 @@ class InstagramScraper:
     def __init__(self):
         self.cl = Client()
         self._logged_in = False
+        self._locked_until = 0.0
 
     # ------------------------------------------------------------------
     # Authentication
     # ------------------------------------------------------------------
+
+    def _trip_challenge_breaker(self, context: str) -> None:
+        """Stop all Instagram calls for a cooldown window after a ban/checkpoint signal."""
+        self._logged_in = False
+        self._locked_until = time.time() + _CHALLENGE_COOLDOWN_SECONDS
+        print(
+            f"[Instagram] Challenge/checkpoint hit during {context} — "
+            f"pausing all Instagram calls for {_CHALLENGE_COOLDOWN_SECONDS // 60} minutes "
+            f"to avoid escalating a soft flag into a ban."
+        )
 
     def _ensure_logged_in(self) -> None:
         """
@@ -74,6 +91,12 @@ class InstagramScraper:
         2. Fall back to fresh login with ``IG_USERNAME`` / ``IG_PASSWORD``.
         3. Persist the session after successful login.
         """
+        if time.time() < self._locked_until:
+            raise LoginRequired(
+                f"Instagram account in cooldown after a challenge signal, "
+                f"{int(self._locked_until - time.time())}s remaining"
+            )
+
         if self._logged_in:
             return
 
@@ -121,6 +144,9 @@ class InstagramScraper:
 
         except UserNotFound:
             return None
+        except ChallengeRequired:
+            self._trip_challenge_breaker("get_instagram_data")
+            return None
         except LoginRequired:
             # Session died mid-run — force re-login on next call
             self._logged_in = False
@@ -139,8 +165,10 @@ class InstagramScraper:
             user_id = self.cl.user_id_from_username(target_username)
             self.cl.direct_send(message, user_ids=[user_id])
             return True
-        except (LoginRequired, ChallengeRequired) as e:
-            print(f"Instagram account locked/checkpointed! Pausing DMs. ({e})")
+        except ChallengeRequired:
+            self._trip_challenge_breaker("send_dm")
+            return False
+        except LoginRequired:
             self._logged_in = False
             return False
         except UserNotFound:

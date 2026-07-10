@@ -5,6 +5,7 @@ performance, SEO, accessibility, and best practices scores.
 Falls back to PageSpeed Insights API if Lighthouse CLI is not available.
 """
 
+import asyncio
 import json
 import subprocess
 import tempfile
@@ -14,21 +15,23 @@ import os
 async def run_lighthouse(url: str) -> dict:
     """
     Run Lighthouse CLI on a URL and return structured scores.
-    
+
     Returns:
         Dict with keys: performance, seo, accessibility, best_practices (each 0-100)
         Returns empty dict on failure.
     """
-    # Try local Lighthouse CLI first (installed via package.json)
-    scores = _run_lighthouse_cli(url)
+    # Try local Lighthouse CLI first (installed via package.json).
+    # Both helpers shell out via blocking subprocess.run, so run them in a
+    # worker thread — otherwise a 120s Lighthouse run blocks the event loop.
+    scores = await asyncio.to_thread(_run_lighthouse_cli, url)
     if scores:
         return scores
-    
+
     # Try npx as fallback
-    scores = _run_lighthouse_npx(url)
+    scores = await asyncio.to_thread(_run_lighthouse_npx, url)
     if scores:
         return scores
-    
+
     print("[Lighthouse] CLI not available, skipping.")
     return {}
 
@@ -81,10 +84,11 @@ def _run_lighthouse_npx(url: str) -> dict:
 
 def _execute_lighthouse(binary: str, url: str, use_npx: bool = False) -> dict:
     """Execute lighthouse and parse the JSON output."""
+    output_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             output_path = tmp.name
-        
+
         cmd = []
         if use_npx:
             cmd = ["npx", "--yes", "lighthouse"]
@@ -138,7 +142,7 @@ def _execute_lighthouse(binary: str, url: str, use_npx: bool = False) -> dict:
     finally:
         # Clean up temp file if it exists
         try:
-            if os.path.exists(output_path):
+            if output_path and os.path.exists(output_path):
                 os.unlink(output_path)
-        except:
+        except OSError:
             pass

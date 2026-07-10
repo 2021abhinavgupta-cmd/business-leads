@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 from urllib.parse import urlparse
 import httpx
@@ -109,15 +110,15 @@ class GoogleMapsScraper:
                 
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(3) # Wait for initial results
-                    
+                    await asyncio.sleep(random.uniform(2.5, 4.5)) # Wait for initial results (jittered)
+
                     # Scroll down the feed a few times to load more leads
                     for _ in range(limit // 5):
                         try:
                             await page.hover('a[href*="/maps/place/"]')
                             await page.mouse.wheel(0, 2000)
-                            await asyncio.sleep(1.5)
-                        except:
+                            await asyncio.sleep(random.uniform(1.2, 2.5)) # jittered, anti-detection
+                        except Exception:
                             break
                             
                     # Extract unique names from aria-labels
@@ -133,9 +134,14 @@ class GoogleMapsScraper:
                     
         names = names[:limit]
         
-        # Resolve domains using DDG (100% Free OSINT)
-        for name in names:
-            website = self._find_website_for_business(name, city)
+        # Resolve domains using DDG (100% Free OSINT). Jittered delay between
+        # lookups so a big batch doesn't hammer DDG in a tight loop.
+        for i, name in enumerate(names):
+            if i > 0:
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+            # _find_website_for_business is sync (blocking DDGS network call);
+            # thread it so it doesn't stall the event loop for other requests.
+            website = await asyncio.to_thread(self._find_website_for_business, name, city)
             if not website:
                 continue
                 
@@ -165,7 +171,7 @@ class GoogleMapsScraper:
                     if any(x in href for x in ["yelp.com", "facebook.com", "instagram.com", "linkedin.com", "justdial", "yellowpages"]):
                         continue
                     return res.get("href", "")
-        except:
+        except Exception:
             pass
         return ""
 

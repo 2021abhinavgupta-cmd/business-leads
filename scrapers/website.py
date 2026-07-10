@@ -8,6 +8,7 @@ Performs four audit steps:
     4. Issue generation (plain-English list of problems found)
 """
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 import trafilatura
 from markdownify import markdownify as md
-from Wappalyzer import Wappalyzer, WebPage
+from wappalyzer import analyze as wappalyzer_analyze
 import warnings
 warnings.filterwarnings("ignore", message=".*looks like a URL.*")
 
@@ -171,8 +172,8 @@ class WebsiteScraper:
             print(f"[Audit] Using PageSpeed API scores: perf={perf_score}, seo={seo_score}")
 
         # Step 3 — HTML analysis (Crawl4AI enhanced → markdownify fallback)
-        parsed = self._parse_html(html)
-        technologies = self._detect_technologies(url)
+        parsed = await self._parse_html(html)
+        technologies = await self._detect_technologies(url)
         
         # Step 3.5 — Deep Brand Crawl (trafilatura → Jina Reader fallback)
         company_context = await self._deep_crawl(url, html)
@@ -268,7 +269,6 @@ class WebsiteScraper:
         and extract clean text. Uses trafilatura as primary, Jina Reader as fallback.
         """
         import urllib.parse
-        import asyncio
 
         soup = BeautifulSoup(html, "html.parser")
         target_keywords = ['about', 'service', 'product', 'work', 'what-we-do', 'solution']
@@ -321,7 +321,7 @@ class WebsiteScraper:
     # Step 3 — HTML parsing
     # ------------------------------------------------------------------
 
-    def _parse_html(self, html: str) -> dict:
+    async def _parse_html(self, html: str) -> dict:
         """
         Extract audit signals from raw *html*.
 
@@ -330,39 +330,17 @@ class WebsiteScraper:
             has_cta, has_contact, has_testimonials, has_blog
         """
         soup = BeautifulSoup(html, "html.parser")
-        
+
         # Remove useless boilerplate tags for cleaner markdown
         for tag in soup(["script", "style", "noscript", "svg", "img"]):
             tag.decompose()
-            
-        # Primary: Crawl4AI for superior LLM-ready markdown extraction
-        # Fallback: markdownify if Crawl4AI is unavailable
-        markdown_text = ""
-        try:
-            from crawl4ai import AsyncWebCrawler
-            # Crawl4AI can extract from raw HTML without launching its own browser
-            import asyncio
-            
-            async def _crawl4ai_extract():
-                async with AsyncWebCrawler(verbose=False) as crawler:
-                    result = await crawler.arun(url="raw:html", raw_html=html)
-                    return result.markdown if result and result.markdown else ""
-            
-            # Try to run in existing event loop or create new one
-            try:
-                loop = asyncio.get_running_loop()
-                # Already in async context, can't run nested - use markdownify
-                raise RuntimeError("In async context")
-            except RuntimeError:
-                markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
-                print("[Parse] Using markdownify (async context)")
-        except ImportError:
-            markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
-            print("[Parse] Crawl4AI not installed, using markdownify fallback")
-        except Exception as e:
-            markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
-            print(f"[Parse] Crawl4AI error ({e}), using markdownify fallback")
-        
+
+        # Primary: Crawl4AI for superior LLM-ready markdown extraction (run in a
+        # worker thread with its own event loop so it doesn't collide with the
+        # event loop already running this coroutine).
+        # Fallback: markdownify if Crawl4AI is unavailable, times out, or errors.
+        markdown_text = await self._extract_markdown(html, soup)
+
         # We also need the raw text for keyword searching (CTAs, testimonials)
         page_text = soup.get_text(separator=" ", strip=True).lower()
 
@@ -420,6 +398,43 @@ class WebsiteScraper:
             "has_blog": has_blog,
             "instagram_url": instagram_url,
         }
+
+    # ------------------------------------------------------------------
+    # Step 3 (cont.) — Crawl4AI markdown extraction
+    # ------------------------------------------------------------------
+
+    async def _extract_markdown(self, html: str, soup) -> str:
+        """Run Crawl4AI off-thread with a timeout; fall back to markdownify."""
+        try:
+            markdown_text = await asyncio.wait_for(
+                asyncio.to_thread(self._run_crawl4ai_sync, html), timeout=15
+            )
+            if markdown_text:
+                print("[Parse] Using Crawl4AI markdown extraction")
+                return markdown_text
+        except ImportError:
+            print("[Parse] Crawl4AI not installed, using markdownify fallback")
+        except asyncio.TimeoutError:
+            print("[Parse] Crawl4AI timed out, using markdownify fallback")
+        except Exception as e:
+            print(f"[Parse] Crawl4AI error ({e}), using markdownify fallback")
+
+        return md(str(soup), strip=['a'], heading_style="ATX").strip()
+
+    @staticmethod
+    def _run_crawl4ai_sync(html: str) -> str:
+        """
+        Runs in a worker thread (via asyncio.to_thread), so it's safe to spin up
+        its own event loop with asyncio.run() without colliding with the caller's.
+        """
+        from crawl4ai import AsyncWebCrawler
+
+        async def _crawl4ai_extract():
+            async with AsyncWebCrawler(verbose=False) as crawler:
+                result = await crawler.arun(url="raw:html", raw_html=html)
+                return result.markdown if result and result.markdown else ""
+
+        return asyncio.run(_crawl4ai_extract())
 
     # ------------------------------------------------------------------
     # Step 4 — Issue builder
@@ -518,11 +533,36 @@ class WebsiteScraper:
     # Step 5 — Tech stack detection
     # ------------------------------------------------------------------
 
+    async def _detect_technologies(self, url: str) -> list[str]:
+        """
+        Detect the tech stack of the website using wappalyzer-next
+        (https://github.com/s0md3v/wappalyzer-next).
+
+        Uses scan_type="fast" (a single HTTP request, no browser, no extra DNS/JS
+        probing) — measured ~5s in testing vs. ~13s for "balanced" and 10-20s+ for
+        "full" (which launches its own headless Chromium via the Wappalyzer
+        extension). "full" would also stack a second concurrent browser launch on
+        top of the Playwright screenshot semaphore and risk the same Railway OOM
+        this project already works around elsewhere. Still runs in a worker
+        thread with a hard timeout so it can't block the event loop; on
+        timeout/error it degrades to an empty list instead of failing the audit.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._run_wappalyzer_sync, url), timeout=10
+            )
+        except asyncio.TimeoutError:
+            print(f"[Wappalyzer] Timed out for {url}, skipping tech detection")
+            return []
+        except Exception as e:
+            print(f"[Wappalyzer] Failed for {url}: {e}")
+            return []
+
     @staticmethod
-    def _detect_technologies(url: str) -> list[str]:
-        """Detect the tech stack of the website using Wappalyzer."""
-        # DISABLED: Wappalyzer is synchronous and takes 10-20 seconds, causing Railway 502 timeouts.
-        return []
+    def _run_wappalyzer_sync(url: str) -> list[str]:
+        results = wappalyzer_analyze(url=url, scan_type="fast", timeout=8)
+        techs = results.get(url) or next(iter(results.values()), {})
+        return sorted(techs.keys())
 
     # ------------------------------------------------------------------
     # Helpers

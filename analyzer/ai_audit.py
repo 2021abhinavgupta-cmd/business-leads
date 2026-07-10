@@ -98,6 +98,7 @@ class AIAuditor:
                 parsed["ai_cost"] = cost
                 return parsed
 
+        print(f"[AIAuditor] All AI providers failed or returned unparseable output for '{company}' — check API keys/quotas.")
         return None
 
     def should_contact(self, audit_result: dict) -> bool:

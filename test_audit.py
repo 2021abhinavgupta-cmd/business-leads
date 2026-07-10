@@ -1,46 +1,46 @@
-import time
-import asyncio
-from scrapers.website import WebsiteScraper
-from enrichment.decision_maker import DecisionMaker
+"""
+Integration smoke test for the full audit pipeline: Playwright screenshot ->
+website audit -> decision-maker lookup -> AI analysis.
+
+Hits a real website and (if keys are configured) real AI provider APIs, so
+it's marked `integration` and skips itself when no AI provider key is set.
+"""
+
+import pytest
+
+import config
 from analyzer.ai_audit import AIAuditor
 from analyzer.visuals import generate_audit_screenshot
+from enrichment.decision_maker import DecisionMaker
+from scrapers.website import WebsiteScraper
 
-async def test_audit():
-    start_time = time.time()
-    print("Testing WebsiteScraper on TIMEZONE...")
+TEST_URL = (
+    "https://www.timezonegames.com/en-in/locations/"
+    "timezone-oberoi-mall-goregaon"
+    "?utm_source=google&utm_medium=organic"
+    "&utm_campaign=intz_20220420_googlemybusiness&utm_term"
+)
+TEST_COMPANY = "TIMEZONE"
+
+_HAS_AI_KEY = bool(config.ANTHROPIC_API_KEY or config.GEMINI_API_KEY or config.OPENAI_API_KEY)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _HAS_AI_KEY, reason="No AI provider API key configured (ANTHROPIC/GEMINI/OPENAI_API_KEY)")
+async def test_full_audit_pipeline():
+    image_path, html_content, extra_audit_data = await generate_audit_screenshot(TEST_URL, TEST_COMPANY)
+    assert html_content, "Expected Playwright to return rendered HTML"
+
     scraper = WebsiteScraper()
-    url = "https://www.timezonegames.com/en-in/locations/timezone-oberoi-mall-goregaon?utm_source=google&utm_medium=organic&utm_campaign=intz_20220420_googlemybusiness&utm_term"
-    
-    try:
-        image_path, html_content = await generate_audit_screenshot(url, "TIMEZONE")
-        web_data = await scraper.audit_website(url, html=html_content)
-        print(f"Web Data: Reachable={web_data.reachable}, Speed={web_data.page_speed_score}")
-    except Exception as e:
-        print(f"WebsiteScraper crashed: {e}")
-        return
-    print(f"WebsiteScraper took {time.time() - start_time:.2f}s")
+    web_data = await scraper.audit_website(TEST_URL, html=html_content, extra_audit_data=extra_audit_data)
+    assert web_data.reachable is True
 
-    dm_start = time.time()
-    print("Testing DecisionMaker...")
     dm = DecisionMaker()
-    try:
-        contact = dm.find_decision_maker("TIMEZONE", url, html_content=html_content)
-        print(f"Contact: {contact}")
-    except Exception as e:
-        print(f"DecisionMaker crashed: {e}")
-        return
-    print(f"DecisionMaker took {time.time() - dm_start:.2f}s")
+    contact = dm.find_decision_maker(TEST_COMPANY, TEST_URL, html_content=html_content)
+    assert isinstance(contact, dict)
 
-    ai_start = time.time()
-    print("Testing AIAuditor...")
     auditor = AIAuditor()
-    try:
-        analysis = auditor.analyze_lead("TIMEZONE", None, web_data, image_path=image_path)
-        print(f"Analysis: {analysis.keys() if analysis else 'None'}")
-    except Exception as e:
-        print(f"AIAuditor crashed: {e}")
-    print(f"AIAuditor took {time.time() - ai_start:.2f}s")
-    print(f"Total time: {time.time() - start_time:.2f}s")
-
-if __name__ == "__main__":
-    asyncio.run(test_audit())
+    analysis = auditor.analyze_lead(TEST_COMPANY, None, web_data, image_path=image_path)
+    assert analysis is not None
+    assert "overall_score" in analysis
+    assert "flaws" in analysis

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import asyncio
 from io import BytesIO
@@ -13,6 +14,24 @@ os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 # Global Semaphore to limit Playwright concurrency to 1.
 # This prevents Out of Memory (OOM) crashes on Railway's 500MB instances.
 _PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
+
+
+def normalise_url(url: str) -> str:
+    """Ensure *url* has a scheme prefix (mirrors scrapers.website._normalise_url)."""
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+    return url
+
+
+def make_screenshot_filename(company_name: str, url: str) -> str:
+    """
+    Build a screenshot filename from company name + a short hash of the
+    (normalised) URL, so two companies that sanitize to the same name
+    don't overwrite each other's screenshot.
+    """
+    safe_name = "".join(c if c.isalnum() else "_" for c in company_name.lower())
+    url_hash = hashlib.md5(normalise_url(url).encode()).hexdigest()[:8]
+    return f"{safe_name}_{url_hash}_audit.jpg"
 
 
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
@@ -75,8 +94,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             draw.rectangle(padded_box, outline="red", width=4)
             visual_flaw_context = f"The red box in the screenshot highlights an accessibility flaw: {visual_flaw['description']}."
         
-        safe_name = "".join([c if c.isalnum() else "_" for c in company_name.lower()])
-        filepath = os.path.join(SCREENSHOTS_DIR, f"{safe_name}_audit.jpg")
+        filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
         
         extra_audit_data = {
