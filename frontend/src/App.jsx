@@ -18,6 +18,7 @@ function App() {
   const [loadingSearch, setLoadingSearch] = useState(false);
   const [manualCompany, setManualCompany] = useState('');
   const [manualWebsite, setManualWebsite] = useState('');
+  const [showManualEntry, setShowManualEntry] = useState(false);
   const [isAutopilot, setIsAutopilot] = useState(false);
   
   const [historyLogs, setHistoryLogs] = useState([]);
@@ -254,23 +255,32 @@ function App() {
           <label>Leads</label>
           <input type="number" value={limit} onChange={e => setLimit(e.target.value)} min="1" max="100" required />
         </div>
-        <button type="submit" className="primary-btn" disabled={loadingSearch}>
-          {loadingSearch ? <Loader2 className="spin" /> : <Search />}
-          {loadingSearch ? 'Scraping Google Maps...' : 'Find Leads'}
-        </button>
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+          <button type="submit" className="primary-btn" disabled={loadingSearch}>
+            {loadingSearch ? <Loader2 className="spin" /> : <Search />}
+            {loadingSearch ? 'Scraping...' : 'Find Leads'}
+          </button>
+          <button type="button" onClick={() => setShowManualEntry(!showManualEntry)} style={{ background: showManualEntry ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255,255,255,0.1)', border: showManualEntry ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(255,255,255,0.2)', color: showManualEntry ? '#f87171' : '#e2e8f0', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
+            {showManualEntry ? 'Cancel' : '+ Specific Lead'}
+          </button>
+        </div>
       </form>
 
-      <form className="search-box glass" style={{ marginTop: '16px' }} onSubmit={handleAddManualLead}>
-        <div className="input-group">
-          <label>Specific Company Name</label>
-          <input type="text" value={manualCompany} onChange={e => setManualCompany(e.target.value)} placeholder="e.g. Acme Corp" />
-        </div>
-        <div className="input-group">
-          <label>Website URL</label>
-          <input type="text" value={manualWebsite} onChange={e => setManualWebsite(e.target.value)} placeholder="e.g. acme.com" />
-        </div>
-        <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>+ Add Lead</button>
-      </form>
+      <AnimatePresence>
+        {showManualEntry && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden' }} onSubmit={handleAddManualLead}>
+            <div className="input-group">
+              <label>Specific Company Name</label>
+              <input type="text" value={manualCompany} onChange={e => setManualCompany(e.target.value)} placeholder="e.g. Acme Corp" />
+            </div>
+            <div className="input-group">
+              <label>Website URL</label>
+              <input type="text" value={manualWebsite} onChange={e => setManualWebsite(e.target.value)} placeholder="e.g. acme.com" />
+            </div>
+            <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>+ Add Lead</button>
+          </motion.form>
+        )}
+      </AnimatePresence>
 
       {leads.length > 0 && (
         <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
