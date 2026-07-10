@@ -74,6 +74,7 @@ class WebsiteData:
     meta_description: str
     h1_tags: list[str] = field(default_factory=list)
     homepage_text: str = ""
+    company_context: str = ""
     technologies: list[str] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
 
@@ -144,6 +145,9 @@ class WebsiteScraper:
         # Step 3 — HTML analysis
         parsed = self._parse_html(html)
         technologies = self._detect_technologies(url)
+        
+        # Step 3.5 — Deep Brand Crawl
+        company_context = await self._deep_crawl(url, html)
 
         # Step 4 — Build issues list
         issues = self._build_issues(
@@ -171,6 +175,7 @@ class WebsiteScraper:
             meta_description=parsed["meta_description"],
             h1_tags=parsed["h1_tags"],
             homepage_text=parsed["homepage_text"],
+            company_context=company_context,
             technologies=technologies,
             issues=issues,
         )
@@ -220,6 +225,53 @@ class WebsiteScraper:
 
         except Exception:
             return 0, 0, 0
+
+    # ------------------------------------------------------------------
+    # Step 2.5 — Deep Context Crawling
+    # ------------------------------------------------------------------
+
+    async def _deep_crawl(self, base_url: str, html: str) -> str:
+        """
+        Scan homepage for 'about' and 'service' links, fetch them asynchronously,
+        and extract clean text using trafilatura.
+        """
+        import urllib.parse
+        import asyncio
+
+        soup = BeautifulSoup(html, "html.parser")
+        target_keywords = ['about', 'service', 'product', 'work', 'what-we-do', 'solution']
+        
+        target_urls = set()
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].lower()
+            if any(kw in href for kw in target_keywords):
+                full_url = urllib.parse.urljoin(base_url, anchor["href"])
+                # Only crawl internal links
+                if full_url.startswith("http") and urllib.parse.urlparse(base_url).netloc in full_url:
+                    target_urls.add(full_url)
+        
+        # Limit to 3 context pages to prevent extreme latency
+        target_urls = list(target_urls)[:3]
+        
+        async def fetch_and_extract(url):
+            try:
+                res = await self.client.get(url, timeout=10)
+                if res.status_code == 200:
+                    text = trafilatura.extract(res.text)
+                    if text:
+                        return f"--- CONTEXT FROM {url} ---\n{text[:1500]}"
+            except Exception:
+                pass
+            return ""
+
+        context_parts = []
+        if target_urls:
+            results = await asyncio.gather(*[fetch_and_extract(u) for u in target_urls])
+            for r in results:
+                if r:
+                    context_parts.append(r)
+                    
+        return "\n\n".join(context_parts)
 
     # ------------------------------------------------------------------
     # Step 3 — HTML parsing

@@ -151,21 +151,31 @@ class AIAuditor:
             f"- Has blog: {web.has_blog}\n"
             f"- Raw issues found: {web.issues}\n"
             f"- Tech Stack: {web.technologies}\n"
-            f"- Homepage text: {web.homepage_text[:400]}\n"
+            f"- Homepage text: {web.homepage_text[:2000]}\n"
         )
+        
+        # --- Deep Brand Context ---
+        brand_context_section = ""
+        if getattr(web, 'company_context', None):
+            brand_context_section = (
+                f"DEEP BRAND CONTEXT (Scraped from About/Services pages):\n"
+                f"{web.company_context[:3000]}\n"
+            )
 
         return (
             f"You are a sharp, conversational digital marketing consultant auditing "
             f"{company}.\n\n"
             f"{ig_section}\n"
             f"{web_section}\n"
+            f"{brand_context_section}\n"
             "TASK:\n"
             "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
             "Be direct, casual, and friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
-            + ("CRITICAL INSTRUCTION: I am attaching a mobile screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your mobile menu overlaps...').\n" if has_image else "") + 
+            "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
+            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a mobile screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your mobile menu overlaps...').\n" if has_image else "") + 
             "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"
             "Use this exact structure:\n"
