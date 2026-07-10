@@ -262,7 +262,7 @@ function App() {
             {loadingSearch ? <Loader2 className="spin" /> : <Search />}
             {loadingSearch ? 'Scraping...' : 'Find Leads'}
           </button>
-          <button type="button" onClick={() => setShowManualEntry(!showManualEntry)} style={{ background: showManualEntry ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255,255,255,0.1)', border: showManualEntry ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(255,255,255,0.2)', color: showManualEntry ? '#f87171' : '#e2e8f0', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
+          <button type="button" onClick={() => setShowManualEntry(!showManualEntry)} style={{ background: showManualEntry ? '#fee2e2' : '#f8fafc', border: showManualEntry ? '1px solid #f87171' : '1px solid #cbd5e1', color: showManualEntry ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showManualEntry ? 'Cancel' : '+ Specific Lead'}
           </button>
         </div>
@@ -289,7 +289,7 @@ function App() {
           <button 
             className={`primary-btn ${isAutopilot ? 'danger' : ''}`} 
             onClick={() => isAutopilot ? setIsAutopilot(false) : startAutopilot()}
-            style={{ background: isAutopilot ? '#ef4444' : 'var(--primary-color)' }}
+            style={{ background: isAutopilot ? '#ef4444' : '#10b981', color: '#ffffff', border: 'none', padding: '12px 24px', fontSize: '16px', fontWeight: 'bold', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}
           >
             <Activity className={isAutopilot ? 'spin' : ''} />
             {isAutopilot ? 'Stop Autopilot' : 'Start Autopilot (Audit All)'}
