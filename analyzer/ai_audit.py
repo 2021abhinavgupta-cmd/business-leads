@@ -187,7 +187,7 @@ class AIAuditor:
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
-            '  "email_subject": "ultra casual lowercase subject line without hyphens",\n'
+            '  "email_subject": "short, engaging, and professional subject line using Title Case",\n'
             '  "opening_line": "friendly personalized opening line without hyphens"\n'
             "}\n"
             )
