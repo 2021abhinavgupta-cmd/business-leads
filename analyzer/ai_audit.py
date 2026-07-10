@@ -88,12 +88,14 @@ class AIAuditor:
             self._call_gemini,
             self._call_openai,
         ):
-            raw = call_fn(prompt, base64_image)
-            if raw is None:
+            result = call_fn(prompt, base64_image)
+            if result is None:
                 continue
-
+                
+            raw, cost = result
             parsed = self._parse_json(raw)
             if parsed is not None:
+                parsed["ai_cost"] = cost
                 return parsed
 
         return None
@@ -191,7 +193,7 @@ class AIAuditor:
     # Provider calls
     # ------------------------------------------------------------------
 
-    def _call_gemini(self, prompt: str, base64_image: str | None = None) -> str | None:
+    def _call_gemini(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
         """
         Call Google Gemini Flash (``gemini-2.0-flash``).
         """
@@ -207,11 +209,21 @@ class AIAuditor:
                     "data": base64_image
                 })
             response = model.generate_content(content)
-            return response.text
-        except Exception:
+            
+            # Pricing: $0.075/1M input, $0.30/1M output
+            try:
+                inp = response.usage_metadata.prompt_token_count
+                out = response.usage_metadata.candidates_token_count
+                cost = (inp * 0.075 / 1_000_000) + (out * 0.30 / 1_000_000)
+            except Exception:
+                cost = 0.0001 # fallback estimate
+                
+            return response.text, cost
+        except Exception as e:
+            print(f"Gemini error: {e}")
             return None
 
-    def _call_openai(self, prompt: str, base64_image: str | None = None) -> str | None:
+    def _call_openai(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
         """
         Call OpenAI GPT-4o-mini.
         """
@@ -231,11 +243,20 @@ class AIAuditor:
                 messages=[{"role": "user", "content": content}],
                 temperature=0.7,
             )
-            return response.choices[0].message.content
+            
+            # Pricing: $0.150/1M input, $0.60/1M output
+            try:
+                inp = response.usage.prompt_tokens
+                out = response.usage.completion_tokens
+                cost = (inp * 0.150 / 1_000_000) + (out * 0.60 / 1_000_000)
+            except Exception:
+                cost = 0.0002
+                
+            return response.choices[0].message.content, cost
         except Exception:
             return None
 
-    def _call_anthropic(self, prompt: str, base64_image: str | None = None) -> str | None:
+    def _call_anthropic(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
         """
         Call Anthropic Claude Haiku.
         """
@@ -260,7 +281,16 @@ class AIAuditor:
                 max_tokens=1024,
                 messages=[{"role": "user", "content": content}],
             )
-            return message.content[0].text
+            
+            # Pricing: $0.25/1M input, $1.25/1M output
+            try:
+                inp = message.usage.input_tokens
+                out = message.usage.output_tokens
+                cost = (inp * 0.25 / 1_000_000) + (out * 1.25 / 1_000_000)
+            except Exception:
+                cost = 0.0006
+                
+            return message.content[0].text, cost
         except Exception:
             return None
 

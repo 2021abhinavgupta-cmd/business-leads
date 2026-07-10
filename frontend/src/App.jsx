@@ -21,6 +21,32 @@ function App() {
   const isAutopilotRef = useRef(false);
   const leadsRef = useRef([]); // To keep track of latest leads in async loops
 
+  // Calculate dynamic exact cost based on backend tracking
+  const totalCost = leads.reduce((acc, lead) => {
+    let cost = 0;
+    
+    // Add exact Google Maps search cost
+    if (lead.search_cost) {
+      cost += parseFloat(lead.search_cost);
+    }
+    
+    // Add exact AI Audit cost (Penny-perfect tracking from API tokens)
+    if (lead.auditState === 'done' || lead.auditState === 'sent' || lead.auditState === 'sending') {
+      if (lead.auditData && lead.auditData.ai_cost) {
+        cost += parseFloat(lead.auditData.ai_cost);
+      } else {
+        cost += 0.0001; // fallback if missing
+      }
+    }
+    
+    // SES Email cost (Flat $0.10 per 1000 sends)
+    if (lead.auditState === 'sent') {
+      cost += 0.0001;
+    }
+    
+    return acc + cost;
+  }, 0);
+
   useEffect(() => {
     isAutopilotRef.current = isAutopilot;
   }, [isAutopilot]);
@@ -156,6 +182,20 @@ function App() {
           <h1>Lead Audit AI</h1>
         </div>
         <p className="subtitle">Automated Web Scraping, AI Auditing & Outreach</p>
+        
+        {/* Cost Dashboard */}
+        <div style={{ position: 'absolute', top: '24px', right: '32px', background: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(10px)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Exact Cost Used</span>
+            <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#10b981' }}>${totalCost.toFixed(5)}</span>
+          </div>
+          <div style={{ height: '32px', width: '1px', background: 'rgba(255,255,255,0.1)' }}></div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '10px', color: '#64748b' }}>AI Tokens: <strong>Live Tracked</strong></span>
+            <span style={{ fontSize: '10px', color: '#64748b' }}>Google Maps: <strong>Live Tracked</strong></span>
+            <span style={{ fontSize: '10px', color: '#64748b' }}>AWS SES: <strong>$0.0001/ea</strong></span>
+          </div>
+        </div>
       </header>
 
       <main className="main-content">

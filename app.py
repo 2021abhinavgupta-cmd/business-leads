@@ -136,7 +136,8 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
             "seo_score": web_data.seo_score,
             "overall_score": analysis.get("overall_score", 100),
             "flaws": analysis.get("flaws", []),
-            "image_url": image_url
+            "image_url": image_url,
+            "ai_cost": analysis.get("ai_cost", 0.0001)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

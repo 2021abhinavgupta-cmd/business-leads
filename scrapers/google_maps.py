@@ -26,9 +26,12 @@ class GoogleMapsScraper:
             "pageSize": 20
         }
         
+        num_requests = 0
+        
         while len(leads) < limit:
             time.sleep(_REQUEST_DELAY)
             try:
+                num_requests += 1
                 response = self.client.post(TEXT_SEARCH_URL, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
@@ -65,7 +68,15 @@ class GoogleMapsScraper:
                 break
             payload["pageToken"] = next_token
             
-        return self._deduplicate(leads)[:limit]
+        # Pricing: Google Places API (New) Text Search is $0.032 per request
+        total_cost = num_requests * 0.032
+        unique_leads = self._deduplicate(leads)[:limit]
+        
+        cost_per_lead = total_cost / max(1, len(unique_leads))
+        for lead in unique_leads:
+            lead["search_cost"] = cost_per_lead
+            
+        return unique_leads
 
     def _deduplicate(self, leads: list[dict]) -> list[dict]:
         seen_domains = set()
