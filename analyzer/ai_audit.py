@@ -160,32 +160,27 @@ class AIAuditor:
             f"{ig_section}\n"
             f"{web_section}\n"
             "TASK:\n"
-            "Find the 2 most painful, specific problems using THEIR "
-            "real numbers.\n"
-            "Be direct, casual, and friendly. Do not use corporate jargon. "
-            "Talk like a normal human being reaching out to a peer.\n"
+            "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
+            "Be direct, casual, and friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
-            "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized (e.g. 'Since you guys use Shopify...').\n"
-            + ("CRITICAL: An image screenshot of their website is attached. Actively critique their visual design, typography, layout, or mobile responsiveness based on the image.\n" if has_image else "") + 
+            "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
+            + ("CRITICAL INSTRUCTION: I am attaching a mobile screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your mobile menu overlaps...').\n" if has_image else "") + 
             "\n"
-            "IMPORTANT: Return ONLY valid JSON. No markdown. "
-            "No explanation.\n"
+            "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"
             "Use this exact structure:\n"
             "{\n"
             '  "flaws": [\n'
             "    {\n"
-            '      "area": "Instagram or Website",\n'
-            '      "headline": "specific one-line problem with their '
-            'actual numbers (casual tone)",\n'
-            '      "detail": "2 sentence explanation referencing their '
-            'real data (casual tone)",\n'
+            '      "area": "Visual Design / Performance / SEO",\n'
+            '      "headline": "specific one-line problem with their actual numbers or visual layout (casual tone)",\n'
+            '      "detail": "2 sentence explanation referencing their real data or the screenshot (casual tone)",\n'
             '      "impact": "what this costs them in business terms"\n'
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
             '  "email_subject": "ultra-casual, lowercase subject line (e.g. \'quick question about your mobile site\')",\n'
-            '  "opening_line": "friendly, personalized opening line (e.g. \'Loved what you guys are doing with [company], but noticed something while checking out your site\')"\n'
+            '  "opening_line": "friendly, personalized opening line"\n'
             "}\n"
             )
 

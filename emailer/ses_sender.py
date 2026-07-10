@@ -52,15 +52,11 @@ class SESSender:
             f"{opening_line}\n"
         ]
         
-        if len(flaws) >= 1:
-            flaw1 = flaws[0]
-            body_lines.append(f"{flaw1.get('headline', '')}")
-            body_lines.append(f"{flaw1.get('detail', '')} This is {flaw1.get('impact', '')}.\n")
-            
-        if len(flaws) >= 2:
-            flaw2 = flaws[1]
-            body_lines.append(f"{flaw2.get('headline', '')}")
-            body_lines.append(f"{flaw2.get('detail', '')} Which means {flaw2.get('impact', '')}.\n")
+        if flaws:
+            for idx, flaw in enumerate(flaws):
+                body_lines.append(f"{flaw.get('headline', '')}")
+                bridge = "This is" if idx == 0 else "Which means"
+                body_lines.append(f"{flaw.get('detail', '')} {bridge} {flaw.get('impact', '')}.\n")
             
         body_lines.extend([
             "I've been helping brands fix exactly these things.",
