@@ -53,14 +53,23 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 # In-memory sliding-window rate limiter, keyed by API key (or "anonymous" if
 # API_KEY isn't set). Single-process/in-memory is fine for a single Railway
 # instance; won't hold up across multiple instances/workers.
-_rate_limit_buckets: dict[str, deque] = defaultdict(deque)
 
 
 def rate_limit(max_calls: int, window_seconds: int):
-    """Dependency factory: allow at most *max_calls* requests per *window_seconds* per API key."""
+    """
+    Dependency factory: allow at most *max_calls* requests per *window_seconds* per API key.
+
+    Each call to this factory gets its OWN bucket store (closure-local, not a
+    shared module-level dict) — otherwise every route using rate_limit() would
+    share the same counters regardless of their different limits, and a route
+    polled frequently (e.g. /api/costs every 5s) would exhaust the budget for
+    an unrelated, much-stricter-limited route (e.g. /api/search at 5/min).
+    """
+    buckets: dict[str, deque] = defaultdict(deque)
+
     async def _check(x_api_key: str | None = Header(default=None)) -> None:
         key = x_api_key or "anonymous"
-        bucket = _rate_limit_buckets[key]
+        bucket = buckets[key]
         now = time.monotonic()
         while bucket and now - bucket[0] > window_seconds:
             bucket.popleft()

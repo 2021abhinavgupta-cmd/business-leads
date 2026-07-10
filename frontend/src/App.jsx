@@ -91,7 +91,8 @@ function App() {
       const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10 });
       setLeads(res.data.leads.map(lead => ({ ...lead, auditState: 'none' })));
     } catch (err) {
-      alert("Error searching leads.");
+      console.error('Search failed:', err);
+      alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
     } finally {
       setLoadingSearch(false);
     }
@@ -137,6 +138,7 @@ function App() {
         return updatedLeads;
       });
     } catch (err) {
+      console.error(`Audit failed for ${lead.Company}:`, err.response?.data?.detail || err.message, err);
       setLeads(prev => {
         const updatedLeads = [...prev];
         updatedLeads[index].auditState = 'failed';
@@ -181,9 +183,10 @@ function App() {
       finalLeads[index].auditState = 'sent';
       setLeads(finalLeads);
     } catch (err) {
-      alert("Failed to send email.");
+      console.error('Send failed:', err);
+      alert(`Failed to send email: ${err.response?.data?.detail || err.message}`);
       const finalLeads = [...leads];
-      finalLeads[index].auditState = 'done'; 
+      finalLeads[index].auditState = 'done';
       setLeads(finalLeads);
     }
   };
@@ -211,7 +214,8 @@ function App() {
       // Remove from drafts list since it was sent
       setDrafts(drafts.filter(d => d.id !== draft.id));
     } catch (err) {
-      alert("Failed to send draft email.");
+      console.error('Draft send failed:', err);
+      alert(`Failed to send draft email: ${err.response?.data?.detail || err.message}`);
       setDrafts(originalDrafts);
     }
   };
@@ -221,7 +225,8 @@ function App() {
       await axios.delete(`${API_BASE}/api/drafts/${draftId}`);
       setDrafts(drafts.filter(d => d.id !== draftId));
     } catch (err) {
-      alert("Failed to delete draft.");
+      console.error('Draft delete failed:', err);
+      alert(`Failed to delete draft: ${err.response?.data?.detail || err.message}`);
     }
   };
 
