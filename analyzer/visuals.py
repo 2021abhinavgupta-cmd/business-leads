@@ -70,6 +70,13 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # headers here is free (no extra network call).
                 response_headers = dict(response.headers) if response else {}
 
+                # The final URL after any redirects (e.g. http:// -> https://,
+                # or a bare domain -> www subdomain) — used for the HTTPS
+                # check instead of the raw input URL string, since a lead's
+                # stored URL is often "http://..." even when the site
+                # immediately redirects to HTTPS.
+                final_url = page.url
+
                 # The `load` event fires before CSS fade-in animations finish and
                 # before lazy-loaded hero images/cookie-banner widgets settle, so a
                 # screenshot taken immediately after goto() can capture a half-faded,
@@ -127,6 +134,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "visual_flaw_context": visual_flaw_context,
             "font_families": font_families,
             "stretched_images": stretched_images,
+            "final_url": final_url,
         }
         
         return filepath, html_content, extra_audit_data

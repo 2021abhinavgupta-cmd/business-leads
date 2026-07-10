@@ -136,8 +136,13 @@ class WebsiteScraper:
             fields will be zeroed/empty and ``reachable`` will be False.
         """
         url = self._normalise_url(url)
-        has_ssl = str(url).startswith("https://")
-        
+        # Determine HTTPS from what the browser actually loaded (after any
+        # redirects), not just the string we requested — a lead's stored URL
+        # is often "http://..." even when the site immediately redirects to
+        # HTTPS, which used to produce a false "no HTTPS" flaw.
+        final_url = (extra_audit_data or {}).get("final_url") or url
+        has_ssl = str(final_url).startswith("https://")
+
         if not html:
             return WebsiteData(
                 url=url,
@@ -372,11 +377,28 @@ class WebsiteScraper:
         for tag in soup(["script", "style", "noscript", "svg", "img"]):
             tag.decompose()
 
+        # Separate copy with <nav> also stripped, used ONLY for markdown/
+        # readability extraction — NOT for the `soup` object below, since
+        # has_blog/has_cta/has_contact/instagram-link detection scan for
+        # anchors and keywords that commonly live in the nav (e.g. a "Blog"
+        # link in the main menu) and would break if nav were removed there.
+        # Live-verified on a real gaming e-commerce site: its <nav> alone was
+        # 500+ words of category links ("HyperX Keyboards", "Razer Mouse",
+        # etc) that dominated the first 3000 chars of homepage_text, pushed
+        # out the actual hero/marketing copy, and made the Flesch readability
+        # score meaningless (a huge list of short noun phrases with almost no
+        # sentence punctuation scores as "very hard to read" even though it's
+        # not real prose at all).
+        markdown_soup = BeautifulSoup(str(soup), "html.parser")
+        for tag in markdown_soup.find_all("nav"):
+            tag.decompose()
+        cleaned_html = str(markdown_soup)
+
         # Primary: Crawl4AI for superior LLM-ready markdown extraction (run in a
         # worker thread with its own event loop so it doesn't collide with the
         # event loop already running this coroutine).
         # Fallback: markdownify if Crawl4AI is unavailable, times out, or errors.
-        markdown_text = await self._extract_markdown(html, soup)
+        markdown_text = await self._extract_markdown(cleaned_html, markdown_soup)
 
         # We also need the raw text for keyword searching (CTAs, testimonials)
         page_text = soup.get_text(separator=" ", strip=True).lower()
