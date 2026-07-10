@@ -78,6 +78,9 @@ class WebsiteData:
     company_context: str = ""
     technologies: list[str] = field(default_factory=list)
     instagram_url: str = ""
+    accessibility_violations: list[dict] = field(default_factory=list)
+    broken_links: list[dict] = field(default_factory=list)
+    perf_timing: dict = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
 
 
@@ -104,13 +107,14 @@ class WebsiteScraper:
     # Public API
     # ------------------------------------------------------------------
 
-    async def audit_website(self, url: str, html: str | None = None) -> WebsiteData:
+    async def audit_website(self, url: str, html: str | None = None, extra_audit_data: dict | None = None) -> WebsiteData:
         """
         Run a full 4-step audit on *url*.
 
         Args:
             url: The website URL to audit (e.g. ``"https://example.com"``).
             html: Pre-rendered HTML content (from Playwright).
+            extra_audit_data: Dict with accessibility_violations, broken_links, perf_timing from Playwright.
 
         Returns:
             A ``WebsiteData`` instance. If the site is unreachable or no html is provided, most
@@ -138,8 +142,10 @@ class WebsiteScraper:
                 issues=["Website is unreachable or returned an error"],
             )
 
-        # We are using Playwright now, so load time is no longer a simple httpx ping.
-        load_time_ms = 1500  # Default mock
+        # We are using Playwright now, so use real timing data if available.
+        extra = extra_audit_data or {}
+        perf_timing = extra.get("perf_timing", {})
+        load_time_ms = perf_timing.get("full_load_ms", 1500)  # Real value or default
 
         # Step 2 — PageSpeed Insights
         perf_score, seo_score, mobile_score = await self._pagespeed(url)
@@ -180,6 +186,9 @@ class WebsiteScraper:
             company_context=company_context,
             technologies=technologies,
             instagram_url=parsed.get("instagram_url", ""),
+            accessibility_violations=extra.get("accessibility_violations", []),
+            broken_links=extra.get("broken_links", []),
+            perf_timing=perf_timing,
             issues=issues,
         )
 

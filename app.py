@@ -92,14 +92,15 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         if remaining_quota <= 0:
             return {"error": "SES quota exceeded."}
 
-        # 1. Grab Screenshot and HTML via Playwright
+        # 1. Grab Screenshot, HTML, and run Playwright-based audits (axe-core, broken links, perf timing)
         image_path = None
         html_content = None
+        extra_audit_data = None
         if req.website:
-            image_path, html_content = await generate_audit_screenshot(req.website, req.company)
+            image_path, html_content, extra_audit_data = await generate_audit_screenshot(req.website, req.company)
 
-        # 2. Website Audit (using fully rendered HTML)
-        web_data = await web_scraper.audit_website(req.website, html=html_content)
+        # 2. Website Audit (using fully rendered HTML + Playwright audit data)
+        web_data = await web_scraper.audit_website(req.website, html=html_content, extra_audit_data=extra_audit_data)
         
         # 3. Instagram Data — use handle from request, or auto-detect from website
         ig_handle = req.instagram_handle

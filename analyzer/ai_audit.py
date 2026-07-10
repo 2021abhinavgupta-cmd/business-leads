@@ -155,6 +155,43 @@ class AIAuditor:
             f"- Homepage text: {web.homepage_text[:2000]}\n"
         )
         
+        # --- Performance Timing (real browser data) ---
+        perf_section = ""
+        if getattr(web, 'perf_timing', None) and web.perf_timing:
+            pt = web.perf_timing
+            perf_section = (
+                f"REAL BROWSER PERFORMANCE (measured by our automated browser):\n"
+                f"- Time to First Byte (TTFB): {pt.get('ttfb_ms', 'N/A')}ms\n"
+                f"- DOM Loaded: {pt.get('dom_load_ms', 'N/A')}ms\n"
+                f"- Full Page Load: {pt.get('full_load_ms', 'N/A')}ms\n"
+                f"- Page Transfer Size: {pt.get('transfer_size_kb', 'N/A')} KB\n"
+            )
+        
+        # --- Accessibility Violations (from axe-core) ---
+        a11y_section = ""
+        if getattr(web, 'accessibility_violations', None) and web.accessibility_violations:
+            violations_text = "\n".join([
+                f"  - [{v['impact'].upper()}] {v['help']} ({v['nodes_count']} instances)"
+                for v in web.accessibility_violations[:6]
+            ])
+            a11y_section = (
+                f"ACCESSIBILITY VIOLATIONS (detected by axe-core engine):\n"
+                f"{violations_text}\n"
+                f"Total violations found: {len(web.accessibility_violations)}\n"
+            )
+        
+        # --- Broken Links/Images ---
+        broken_section = ""
+        if getattr(web, 'broken_links', None) and web.broken_links:
+            broken_text = "\n".join([
+                f"  - Broken {b['type']}: {b['url']} (status: {b['status']})"
+                for b in web.broken_links[:5]
+            ])
+            broken_section = (
+                f"BROKEN ASSETS DETECTED:\n"
+                f"{broken_text}\n"
+            )
+        
         # --- Deep Brand Context ---
         brand_context_section = ""
         if getattr(web, 'company_context', None):
@@ -168,6 +205,9 @@ class AIAuditor:
             f"{company}.\n\n"
             f"{ig_section}\n"
             f"{web_section}\n"
+            f"{perf_section}\n"
+            f"{a11y_section}\n"
+            f"{broken_section}\n"
             f"{brand_context_section}\n"
             "TASK:\n"
             "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
@@ -175,6 +215,9 @@ class AIAuditor:
             "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response. For example, use '10 minute call' instead of '10-minute call'.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
+            "If REAL BROWSER PERFORMANCE shows full_load_ms > 3000, quote it (e.g., 'your page took 4.2 seconds to load on mobile').\n"
+            "If ACCESSIBILITY VIOLATIONS exist, mention specific ones by name (e.g., 'your site has 5 images missing alt text, which hurts both SEO and accessibility').\n"
+            "If BROKEN ASSETS exist, mention them (e.g., 'I noticed a few broken links on your homepage').\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
             + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a mobile screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your mobile menu overlaps...').\n" if has_image else "") + 
