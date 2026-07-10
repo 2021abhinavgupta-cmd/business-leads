@@ -15,6 +15,8 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [loadingSearch, setLoadingSearch] = useState(false);
+  const [manualCompany, setManualCompany] = useState('');
+  const [manualWebsite, setManualWebsite] = useState('');
   const [isAutopilot, setIsAutopilot] = useState(false);
   const isAutopilotRef = useRef(false);
   const leadsRef = useRef([]); // To keep track of latest leads in async loops
@@ -40,6 +42,22 @@ function App() {
     } finally {
       setLoadingSearch(false);
     }
+  };
+
+  const handleAddManualLead = (e) => {
+    e.preventDefault();
+    if (!manualCompany || !manualWebsite) return;
+    
+    const newLead = {
+      Company: manualCompany,
+      Website: manualWebsite.startsWith('http') ? manualWebsite : `https://${manualWebsite}`,
+      Address: 'Added Manually',
+      auditState: 'none'
+    };
+    
+    setLeads([newLead, ...leads]);
+    setManualCompany('');
+    setManualWebsite('');
   };
 
   const handleAudit = async (index) => {
@@ -176,6 +194,30 @@ function App() {
           <button type="submit" className="primary-btn" disabled={loadingSearch}>
             {loadingSearch ? <Loader2 className="spin" /> : <Search />}
             {loadingSearch ? 'Scraping Google Maps...' : 'Find Leads'}
+          </button>
+        </form>
+
+        <form className="search-box glass" style={{ marginTop: '16px' }} onSubmit={handleAddManualLead}>
+          <div className="input-group">
+            <label>Specific Company Name</label>
+            <input 
+              type="text" 
+              value={manualCompany} 
+              onChange={e => setManualCompany(e.target.value)} 
+              placeholder="e.g. Acme Corp"
+            />
+          </div>
+          <div className="input-group">
+            <label>Website URL</label>
+            <input 
+              type="text" 
+              value={manualWebsite} 
+              onChange={e => setManualWebsite(e.target.value)} 
+              placeholder="e.g. acme.com"
+            />
+          </div>
+          <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>
+            + Add Lead
           </button>
         </form>
 
