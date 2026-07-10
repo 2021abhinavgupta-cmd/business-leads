@@ -8,8 +8,8 @@ const API_BASE = ""; // Use relative paths so it works on same domain
 
 function App() {
   const [currentView, setCurrentView] = useState('home');
-  const [niche, setNiche] = useState('Digital Marketing Agency');
-  const [city, setCity] = useState('Mumbai');
+  const [niche, setNiche] = useState('');
+  const [city, setCity] = useState('');
   const [limit, setLimit] = useState(10);
   const [leads, setLeads] = useState(() => {
     const saved = localStorage.getItem('leadAuditLeads');
@@ -226,11 +226,29 @@ function App() {
       <form className="search-box glass" onSubmit={handleSearch}>
         <div className="input-group">
           <label>Business Niche</label>
-          <input type="text" value={niche} onChange={e => setNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" required />
+          <input type="text" list="niche-options" value={niche} onChange={e => setNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" required />
+          <datalist id="niche-options">
+            <option value="Digital Marketing Agency" />
+            <option value="Software Development" />
+            <option value="Dental Clinic" />
+            <option value="Real Estate Agency" />
+            <option value="Law Firm" />
+            <option value="Accounting Firm" />
+            <option value="Plumbing Services" />
+          </datalist>
         </div>
         <div className="input-group">
           <label>City</label>
-          <input type="text" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
+          <input type="text" list="city-options" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
+          <datalist id="city-options">
+            <option value="Mumbai" />
+            <option value="London" />
+            <option value="New York" />
+            <option value="Toronto" />
+            <option value="Dubai" />
+            <option value="Sydney" />
+            <option value="Singapore" />
+          </datalist>
         </div>
         <div className="input-group" style={{maxWidth: '100px'}}>
           <label>Leads</label>
