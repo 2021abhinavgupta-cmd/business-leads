@@ -17,6 +17,9 @@ from analyzer.visuals import generate_audit_screenshot
 from storage.sheets import SheetsStorage
 from storage import db
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
+
 app = FastAPI(title="Lead Audit Bot Web App")
 
 # Allow CORS for local dev
@@ -170,7 +173,7 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
         image_path = None
         if req.company:
             safe_name = "".join([c if c.isalnum() else "_" for c in req.company.lower()])
-            candidate_path = f"screenshots/{safe_name}_audit.jpg"
+            candidate_path = os.path.join(SCREENSHOTS_DIR, f"{safe_name}_audit.jpg")
             if os.path.exists(candidate_path):
                 image_path = candidate_path
 
@@ -232,8 +235,8 @@ async def delete_draft(draft_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Mount screenshots folder
-os.makedirs("screenshots", exist_ok=True)
-app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
 # Mount Vite frontend (for production deployment on Railway)
 frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")

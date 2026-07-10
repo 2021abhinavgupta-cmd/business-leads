@@ -4,8 +4,11 @@ from io import BytesIO
 from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
+
 # Create temporary directory for screenshots
-os.makedirs("screenshots", exist_ok=True)
+os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
 # Global Semaphore to limit Playwright concurrency to 1.
 # This prevents Out of Memory (OOM) crashes on Railway's 500MB instances.
@@ -59,7 +62,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         
         # Save the image
         safe_name = "".join([c if c.isalnum() else "_" for c in company_name.lower()])
-        filepath = f"screenshots/{safe_name}_audit.jpg"
+        filepath = os.path.join(SCREENSHOTS_DIR, f"{safe_name}_audit.jpg")
         img.save(filepath, format="JPEG", quality=85)
         
         return filepath, html_content
