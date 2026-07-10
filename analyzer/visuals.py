@@ -43,6 +43,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         - accessibility_violations: list of axe-core violations
         - broken_links: list of broken URLs found on the page
         - perf_timing: dict with real browser timing metrics
+        - response_headers: dict of HTTP response headers from the page load (for security-header checks)
     
     Returns (None, None, None) on failure.
     """
@@ -62,8 +63,13 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 page = await context.new_page()
                 
                 # Navigate and wait for page load (increased timeout for better accuracy)
-                await page.goto(url, timeout=60000, wait_until="load")
-                
+                response = await page.goto(url, timeout=60000, wait_until="load")
+
+                # Response headers, reused for the security-headers check — this is
+                # the request we're already making for the screenshot, so capturing
+                # headers here is free (no extra network call).
+                response_headers = dict(response.headers) if response else {}
+
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
                 
@@ -101,6 +107,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "accessibility_violations": accessibility_violations,
             "broken_links": broken_links,
             "perf_timing": perf_timing,
+            "response_headers": response_headers,
             "visual_flaw_context": visual_flaw_context
         }
         

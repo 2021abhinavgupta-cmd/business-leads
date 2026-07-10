@@ -143,20 +143,16 @@ class AIAuditor:
                 "- IMPORTANT: Do NOT claim the company has no Instagram. They may have one that we couldn't analyze. Skip Instagram-related flaws entirely.\n"
             )
 
-        # --- Website section ---
+        # --- Website section (headline numbers + context, not flaws) ---
         web_section = (
             f"WEBSITE DATA:\n"
             f"- Page speed (mobile): {web.page_speed_score}/100\n"
             f"- SEO score: {web.seo_score}/100\n"
-            f"- Has clear CTA: {web.has_cta}\n"
-            f"- Has testimonials: {web.has_testimonials}\n"
-            f"- Has blog: {web.has_blog}\n"
-            f"- Raw issues found: {web.issues}\n"
             f"- Tech Stack: {web.technologies}\n"
             f"- Homepage text: {web.homepage_text[:2000]}\n"
         )
-        
-        # --- Performance Timing (real browser data) ---
+
+        # --- Performance Timing (real browser data — context/color, not a flaw itself) ---
         perf_section = ""
         if getattr(web, 'perf_timing', None) and web.perf_timing:
             pt = web.perf_timing
@@ -167,44 +163,17 @@ class AIAuditor:
                 f"- Full Page Load: {pt.get('full_load_ms', 'N/A')}ms\n"
                 f"- Page Transfer Size: {pt.get('transfer_size_kb', 'N/A')} KB\n"
             )
-        
-        # --- Lighthouse Scores ---
-        lighthouse_section = ""
-        if getattr(web, 'lighthouse_scores', None) and web.lighthouse_scores:
-            ls = web.lighthouse_scores
-            lighthouse_section = (
-                f"LIGHTHOUSE AUDIT SCORES (Google Lighthouse):\n"
-                f"- Performance: {ls.get('performance', 'N/A')}/100\n"
-                f"- SEO: {ls.get('seo', 'N/A')}/100\n"
-                f"- Accessibility: {ls.get('accessibility', 'N/A')}/100\n"
-                f"- Best Practices: {ls.get('best_practices', 'N/A')}/100\n"
-            )
-        
-        # --- Accessibility Violations (from axe-core) ---
-        a11y_section = ""
-        if getattr(web, 'accessibility_violations', None) and web.accessibility_violations:
-            violations_text = "\n".join([
-                f"  - [{v['impact'].upper()}] {v['help']} ({v['nodes_count']} instances)"
-                for v in web.accessibility_violations[:6]
-            ])
-            a11y_section = (
-                f"ACCESSIBILITY VIOLATIONS (detected by axe-core engine):\n"
-                f"{violations_text}\n"
-                f"Total violations found: {len(web.accessibility_violations)}\n"
-            )
-        
-        # --- Broken Links/Images ---
-        broken_section = ""
-        if getattr(web, 'broken_links', None) and web.broken_links:
-            broken_text = "\n".join([
-                f"  - Broken {b['type']}: {b['url']} (status: {b['status']})"
-                for b in web.broken_links[:5]
-            ])
-            broken_section = (
-                f"BROKEN ASSETS DETECTED:\n"
-                f"{broken_text}\n"
-            )
-        
+
+        # --- Flaws (reconciled: Lighthouse/PageSpeed, HTML parsing, security
+        # headers, structured data, readability, pyseoanalyzer, axe-core, and
+        # broken links, deduplicated and ranked in code — see
+        # scrapers/website.py:_build_flaws and analyzer/flaws.py. This
+        # replaces what used to be five separate raw, unreconciled sections. ---
+        flaws_section = ""
+        if getattr(web, 'flaws', None):
+            flaws_text = "\n".join(f"  - [{f.severity.upper()}] {f.description}" for f in web.flaws)
+            flaws_section = f"FLAWS DETECTED (ranked most severe first):\n{flaws_text}\n"
+
         # --- Deep Brand Context ---
         brand_context_section = ""
         if getattr(web, 'company_context', None):
@@ -227,20 +196,17 @@ class AIAuditor:
             f"{ig_section}\n"
             f"{web_section}\n"
             f"{perf_section}\n"
-            f"{lighthouse_section}\n"
-            f"{a11y_section}\n"
-            f"{broken_section}\n"
+            f"{flaws_section}\n"
             f"{brand_context_section}\n"
             f"{visual_flaw_section}\n"
             "TASK:\n"
-            "Find 2 or 3 painful, specific problems using THEIR real numbers and the visual screenshot.\n"
+            "Pick 2 or 3 of the most severe items from FLAWS DETECTED above (already ranked worst-first) and write about THOSE — don't go hunting for problems yourself, the list is already reconciled and prioritized.\n"
             "Be direct, casual, and extremely friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
             "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response. For example, use '10 minute call' instead of '10-minute call'.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
-            "If page_speed_score or load_time is slow, QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
-            "If ACCESSIBILITY VIOLATIONS exist, mention specific ones by name.\n"
+            "If a flaw includes a specific number (score, ms, word count), QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
+            "If any [ACCESSIBILITY] flaws are in the list, mention the specific violation by name.\n"
             "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot (e.g., 'I attached a screenshot of your site—the red box highlights a button that is completely invisible to screen readers, which is hurting your SEO').\n"
-            "If BROKEN ASSETS exist, mention them.\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
             + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...').\n" if has_image else "") + 
