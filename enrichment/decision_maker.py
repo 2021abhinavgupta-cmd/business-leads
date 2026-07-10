@@ -106,10 +106,10 @@ class DecisionMaker:
         # Strategy 2 — LinkedIn OSINT (CEO Discovery)
         ceo_name = self._find_ceo_name(company_name)
         if ceo_name:
-            first_name = ceo_name.split()[0].lower()
+            verified_email = self._guess_and_verify_email(ceo_name, domain)
             return {
                 "name": ceo_name,
-                "email": f"{first_name}@{domain}",
+                "email": verified_email,
                 "title": "Founder / CEO"
             }
 
@@ -216,6 +216,35 @@ class DecisionMaker:
                 print(f"DDG Error finding CEO for {company_name}: {e}")
                 return ""
         return ""
+
+    def _guess_and_verify_email(self, name: str, domain: str) -> str:
+        """Generate common email patterns for a name and verify via SMTP."""
+        parts = name.lower().split()
+        if not parts:
+            return ""
+            
+        first = re.sub(r'[^a-z]', '', parts[0])
+        last = re.sub(r'[^a-z]', '', parts[-1]) if len(parts) > 1 else ""
+        
+        patterns = [f"{first}@{domain}"]
+        if last:
+            patterns.extend([
+                f"{first}.{last}@{domain}",
+                f"{first}{last}@{domain}",
+                f"{first[0]}{last}@{domain}",
+                f"{first[0]}.{last}@{domain}"
+            ])
+            
+        for candidate in patterns:
+            try:
+                # check_deliverability=True performs DNS MX and SMTP checks
+                valid = validate_email(candidate, check_deliverability=True)
+                return valid.normalized
+            except EmailNotValidError:
+                continue
+                
+        # Fallback to firstname if all verification fails (some servers block pinging)
+        return patterns[0]
 
     def _find_email_via_osint(self, company_name: str, domain: str) -> str:
         """Fallback OSINT search to scrape emails directly off Google/DDG."""
