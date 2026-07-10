@@ -42,8 +42,8 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 
                 page = await context.new_page()
                 
-                # Navigate and wait for page load
-                await page.goto(url, timeout=30000, wait_until="load")
+                # Navigate and wait for page load (increased timeout for better accuracy)
+                await page.goto(url, timeout=60000, wait_until="load")
                 
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
@@ -191,7 +191,7 @@ async def _check_broken_assets(page, context) -> list:
         # Check each asset with a HEAD request (fast, no body download)
         for asset in assets:
             try:
-                response = await context.request.head(asset["url"], timeout=5000)
+                response = await context.request.head(asset["url"], timeout=10000)
                 status = response.status
                 if status >= 400:
                     broken.append({

@@ -105,7 +105,7 @@ def _execute_lighthouse(binary: str, url: str, use_npx: bool = False) -> dict:
             cmd,
             capture_output=True,
             text=True,
-            timeout=60  # 60 second timeout
+            timeout=120  # 120 second timeout for 100% accuracy on slow sites
         )
         
         if os.path.exists(output_path):
