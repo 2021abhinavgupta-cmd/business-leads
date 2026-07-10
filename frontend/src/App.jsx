@@ -463,41 +463,43 @@ function App() {
   };
 
   return (
-    <div className="app-container" style={{ display: 'flex', flexDirection: 'row', minHeight: '100vh', padding: 0 }}>
+    <div className="app-container" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', padding: 0 }}>
       <div className="bg-glow-left"></div>
       <div className="bg-glow-right"></div>
       
-      {/* Sidebar Navigation */}
-      <nav style={{ width: '260px', background: 'rgba(15, 23, 42, 0.4)', backdropFilter: 'blur(20px)', borderRight: '1px solid rgba(255,255,255,0.05)', padding: '32px 24px', display: 'flex', flexDirection: 'column', gap: '8px', zIndex: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '32px' }}>
+      {/* Top Navigation */}
+      <nav style={{ background: 'rgba(15, 23, 42, 0.9)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(255,255,255,0.1)', padding: '16px 32px', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '32px', zIndex: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#fff' }}>
           <Zap className="logo-icon" size={28} />
           <h1 style={{ margin: 0, fontSize: '20px', letterSpacing: '-0.5px' }}>Lead Audit AI</h1>
         </div>
         
-        <button 
-          onClick={() => setCurrentView('home')}
-          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'home' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'home' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'home' ? 'bold' : 'normal', transition: 'all 0.2s' }}
-        >
-          <Home size={18} /> Outreach Dashboard
-        </button>
-        <button 
-          onClick={() => setCurrentView('drafts')}
-          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
-        >
-          <FileEdit size={18} /> Saved Drafts
-        </button>
-        <button 
-          onClick={() => setCurrentView('cost')}
-          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'cost' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'cost' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'cost' ? 'bold' : 'normal', transition: 'all 0.2s' }}
-        >
-          <LayoutDashboard size={18} /> Cost Metrics
-        </button>
-        <button 
-          onClick={() => setCurrentView('history')}
-          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'history' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'history' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'history' ? 'bold' : 'normal', transition: 'all 0.2s' }}
-        >
-          <Clock size={18} /> Email History
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginLeft: 'auto' }}>
+          <button 
+            onClick={() => setCurrentView('home')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'home' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'home' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'home' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <Home size={18} /> Dashboard
+          </button>
+          <button 
+            onClick={() => setCurrentView('drafts')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <FileEdit size={18} /> Drafts
+          </button>
+          <button 
+            onClick={() => setCurrentView('cost')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'cost' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'cost' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'cost' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <LayoutDashboard size={18} /> Costs
+          </button>
+          <button 
+            onClick={() => setCurrentView('history')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'history' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'history' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'history' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <Clock size={18} /> History
+          </button>
+        </div>
       </nav>
 
       {/* Main Content */}
