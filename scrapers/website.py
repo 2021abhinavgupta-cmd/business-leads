@@ -160,10 +160,14 @@ class WebsiteScraper:
             perf_score = lighthouse_scores.get("performance", 0)
             seo_score = lighthouse_scores.get("seo", 0)
             mobile_score = perf_score  # Performance IS mobile score
-            print(f"[Audit] Using Lighthouse scores: perf={perf_score}, seo={seo_score}")
+            print(f"[Audit] Using Lighthouse CLI scores: perf={perf_score}, seo={seo_score}")
         else:
             # Fallback to PageSpeed Insights API
-            perf_score, seo_score, mobile_score = await self._pagespeed(url)
+            lighthouse_scores = await self._pagespeed(url)
+            perf_score = lighthouse_scores.get("performance", 0)
+            seo_score = lighthouse_scores.get("seo", 0)
+            mobile_score = perf_score
+            print(f"[Audit] Using PageSpeed API scores: perf={perf_score}, seo={seo_score}")
 
         # Step 3 — HTML analysis (Crawl4AI enhanced → markdownify fallback)
         parsed = self._parse_html(html)
@@ -214,45 +218,43 @@ class WebsiteScraper:
     # Step 2 — PageSpeed Insights
     # ------------------------------------------------------------------
 
-    async def _pagespeed(self, url: str) -> tuple[int, int, int]:
+    async def _pagespeed(self, url: str) -> dict:
         """
         Query Google PageSpeed Insights for *url*.
 
         Returns:
-            (performance_score, seo_score, mobile_score)
-            Each score is 0-100. Returns (0, 0, 0) on failure.
+            Dict with keys: performance, seo, accessibility, best_practices (each 0-100)
+            Returns empty dict on failure.
         """
         try:
+            # PageSpeed API requires explicitly requesting multiple categories
+            params = [
+                ("url", url),
+                ("strategy", "mobile"),
+                ("key", config.PAGESPEED_KEY),
+                ("category", "performance"),
+                ("category", "seo"),
+                ("category", "accessibility"),
+                ("category", "best-practices"),
+            ]
             response = await self.client.get(
                 PAGESPEED_URL,
-                params={
-                    "url": url,
-                    "strategy": "mobile",
-                    "key": config.PAGESPEED_KEY,
-                },
+                params=params,
             )
             response.raise_for_status()
             data = response.json()
 
-            categories = (
-                data
-                .get("lighthouseResult", {})
-                .get("categories", {})
-            )
+            categories = data.get("lighthouseResult", {}).get("categories", {})
 
-            perf = categories.get("performance", {})
-            seo = categories.get("seo", {})
-
-            perf_score = int((perf.get("score") or 0) * 100)
-            seo_score = int((seo.get("score") or 0) * 100)
-            # Mobile strategy already gives the mobile-optimised score;
-            # use performance as a proxy for mobile readiness.
-            mobile_score = perf_score
-
-            return perf_score, seo_score, mobile_score
-
-        except Exception:
-            return 0, 0, 0
+            return {
+                "performance": int((categories.get("performance", {}).get("score") or 0) * 100),
+                "seo": int((categories.get("seo", {}).get("score") or 0) * 100),
+                "accessibility": int((categories.get("accessibility", {}).get("score") or 0) * 100),
+                "best_practices": int((categories.get("best-practices", {}).get("score") or 0) * 100),
+            }
+        except Exception as e:
+            print(f"[PageSpeed API] Failed for {url}: {e}")
+            return {}
 
     # ------------------------------------------------------------------
     # Step 2.5 — Deep Context Crawling
