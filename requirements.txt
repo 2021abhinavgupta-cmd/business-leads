@@ -21,3 +21,4 @@ playwright
 Pillow
 fastapi
 uvicorn
+markdownify

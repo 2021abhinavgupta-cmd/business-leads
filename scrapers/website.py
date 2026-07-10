@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import httpx
 from bs4 import BeautifulSoup
 import trafilatura
+from markdownify import markdownify as md
 from Wappalyzer import Wappalyzer, WebPage
 import warnings
 warnings.filterwarnings("ignore", message=".*looks like a URL.*")
@@ -287,11 +288,17 @@ class WebsiteScraper:
         """
         soup = BeautifulSoup(html, "html.parser")
         
-        # Extract clean text via Trafilatura (fallback to beautifulsoup if it fails)
-        extracted_text = trafilatura.extract(html)
-        if not extracted_text:
-            extracted_text = soup.get_text(separator=" ", strip=True)
-        page_text = extracted_text.lower()
+        # Remove useless boilerplate tags for cleaner markdown
+        for tag in soup(["script", "style", "noscript", "svg", "img"]):
+            tag.decompose()
+            
+        # Upgrade: Extract clean, structured Markdown using markdownify
+        # This acts like Crawl4AI but relies on our existing Playwright HTML 
+        # to prevent out-of-memory crashes on Railway.
+        markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
+        
+        # We also need the raw text for keyword searching (CTAs, testimonials)
+        page_text = soup.get_text(separator=" ", strip=True).lower()
 
         # Meta tags
         meta_title = ""
@@ -325,8 +332,8 @@ class WebsiteScraper:
                 has_blog = True
                 break
 
-        # Homepage text (first 2000 chars for AI audit use)
-        homepage_text = page_text[:2000]
+        # Homepage text (converted to LLM-ready Markdown, truncated to 3000 chars)
+        homepage_text = markdown_text[:3000]
 
         return {
             "meta_title": meta_title,
