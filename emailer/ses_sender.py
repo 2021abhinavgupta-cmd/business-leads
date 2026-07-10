@@ -98,7 +98,7 @@ class SESSender:
                     msg['To'] = to_email
                     
                     # Professional HTML Layout for the Email
-                    html_with_img = f\"\"\"
+                    html_with_img = f"""
                     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
                         <div style="padding: 20px;">
                             {body}
@@ -109,7 +109,7 @@ class SESSender:
                             <img src='cid:audit_img' alt='Website Audit' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>
                         </div>
                     </div>
-                    \"\"\"
+                    """
                     msg_alternative = MIMEMultipart('alternative')
                     msg.attach(msg_alternative)
                     msg_alternative.attach(MIMEText(html_with_img, 'html'))
