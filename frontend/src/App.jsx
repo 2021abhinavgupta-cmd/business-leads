@@ -51,14 +51,15 @@ function App() {
 
   // Fetch DB data when view changes
   useEffect(() => {
+    const t = Date.now();
     if (currentView === 'history') {
-      axios.get(`${API_BASE}/api/history`).then(res => setHistoryLogs(res.data.history)).catch(console.error);
+      axios.get(`${API_BASE}/api/history?t=${t}`).then(res => setHistoryLogs(res.data.history)).catch(console.error);
     }
     if (currentView === 'cost') {
-      axios.get(`${API_BASE}/api/costs`).then(res => setCostLogs(res.data.costs)).catch(console.error);
+      axios.get(`${API_BASE}/api/costs?t=${t}`).then(res => setCostLogs(res.data.costs)).catch(console.error);
     }
     if (currentView === 'drafts') {
-      axios.get(`${API_BASE}/api/drafts`).then(res => setDrafts(res.data.drafts)).catch(console.error);
+      axios.get(`${API_BASE}/api/drafts?t=${t}`).then(res => setDrafts(res.data.drafts)).catch(console.error);
     }
   }, [currentView]);
 
