@@ -243,12 +243,14 @@ function App() {
           <input type="text" list="city-options" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
           <datalist id="city-options">
             <option value="Mumbai" />
-            <option value="London" />
-            <option value="New York" />
-            <option value="Toronto" />
-            <option value="Dubai" />
-            <option value="Sydney" />
-            <option value="Singapore" />
+            <option value="Pune" />
+            <option value="Nagpur" />
+            <option value="Nashik" />
+            <option value="Thane" />
+            <option value="Navi Mumbai" />
+            <option value="Chhatrapati Sambhajinagar" />
+            <option value="Kolhapur" />
+            <option value="Solapur" />
           </datalist>
         </div>
         <div className="input-group" style={{maxWidth: '100px'}}>
