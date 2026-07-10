@@ -35,6 +35,20 @@ def init_db():
     )
     """)
     
+    # Email Drafts Table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS email_drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        company TEXT,
+        website TEXT,
+        target_email TEXT,
+        subject TEXT,
+        body TEXT,
+        image_url TEXT
+    )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -79,3 +93,41 @@ def get_email_history():
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = ""):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url) VALUES (?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, subject, body, image_url)
+    )
+    conn.commit()
+    conn.close()
+
+def get_drafts():
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_drafts ORDER BY timestamp DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def delete_draft(draft_id: int):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM email_drafts WHERE id = ?", (draft_id,))
+    conn.commit()
+    conn.close()
+
+def delete_draft_by_website(website: str):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM email_drafts WHERE website = ?", (website,))
+    conn.commit()
+    conn.close()
+

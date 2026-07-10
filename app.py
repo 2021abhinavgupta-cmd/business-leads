@@ -137,6 +137,16 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         # Log AI Cost
         ai_cost = analysis.get("ai_cost", 0.0001)
         db.log_cost("AI Audit", ai_cost, description=f"Audit for {req.company}")
+        
+        # Save to DB Drafts
+        db.log_draft(
+            company=req.company, 
+            website=req.website, 
+            target_email=email, 
+            subject=subject, 
+            body=body, 
+            image_url=image_url or ""
+        )
 
         return {
             "email": email,
@@ -180,6 +190,9 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
             db.log_cost("AWS SES", 0.0001, description=f"Email to {req.email}")
             db.log_email(req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body)
             
+            # Remove from drafts since it's sent
+            db.delete_draft_by_website(req.website)
+            
             return {"status": "success"}
         else:
             raise HTTPException(status_code=500, detail="Failed to send via SES")
@@ -199,6 +212,22 @@ async def get_history():
     try:
         history = db.get_email_history()
         return {"history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/drafts")
+async def get_drafts():
+    try:
+        drafts = db.get_drafts()
+        return {"drafts": drafts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/drafts/{draft_id}")
+async def delete_draft(draft_id: int):
+    try:
+        db.delete_draft(draft_id)
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

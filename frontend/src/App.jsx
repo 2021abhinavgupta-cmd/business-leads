@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import './App.css';
 
@@ -22,6 +22,7 @@ function App() {
   
   const [historyLogs, setHistoryLogs] = useState([]);
   const [costLogs, setCostLogs] = useState([]);
+  const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
 
   const isAutopilotRef = useRef(false);
@@ -55,6 +56,9 @@ function App() {
     }
     if (currentView === 'cost') {
       axios.get(`${API_BASE}/api/costs`).then(res => setCostLogs(res.data.costs)).catch(console.error);
+    }
+    if (currentView === 'drafts') {
+      axios.get(`${API_BASE}/api/drafts`).then(res => setDrafts(res.data.drafts)).catch(console.error);
     }
   }, [currentView]);
 
@@ -160,6 +164,43 @@ function App() {
       const finalLeads = [...leads];
       finalLeads[index].auditState = 'done'; 
       setLeads(finalLeads);
+    }
+  };
+
+  const handleDraftSend = async (draft, draftIndex) => {
+    if (!draft.target_email) {
+      alert("No email address found to send to!");
+      return;
+    }
+    
+    const originalDrafts = [...drafts];
+    const newDrafts = [...drafts];
+    newDrafts[draftIndex] = { ...draft, sending: true };
+    setDrafts(newDrafts);
+
+    try {
+      await axios.post(`${API_BASE}/api/send`, {
+        email: draft.target_email,
+        subject: draft.subject,
+        body: draft.body,
+        company: draft.company,
+        website: draft.website
+      });
+      
+      // Remove from drafts list since it was sent
+      setDrafts(drafts.filter(d => d.id !== draft.id));
+    } catch (err) {
+      alert("Failed to send draft email.");
+      setDrafts(originalDrafts);
+    }
+  };
+
+  const handleDraftDelete = async (draftId) => {
+    try {
+      await axios.delete(`${API_BASE}/api/drafts/${draftId}`);
+      setDrafts(drafts.filter(d => d.id !== draftId));
+    } catch (err) {
+      alert("Failed to delete draft.");
     }
   };
 
@@ -293,6 +334,57 @@ function App() {
     </>
   );
 
+  const renderDrafts = () => (
+    <div className="glass" style={{ padding: '24px' }}>
+      <h2><FileEdit style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Saved Drafts</h2>
+      <p style={{color: '#94a3b8', marginBottom: '24px'}}>AI-generated audits ready for your review and approval.</p>
+      
+      <div className="leads-grid" style={{ gridTemplateColumns: '1fr' }}>
+        <AnimatePresence>
+          {drafts.map((draft, i) => (
+            <motion.div key={draft.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="lead-card glass">
+              <div className="lead-header">
+                <h3>{draft.company}</h3>
+                <span className="badge" style={{background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.4)'}}>Draft</span>
+              </div>
+              <div className="lead-details">
+                <p><strong>URL:</strong> <a href={draft.website} target="_blank" rel="noreferrer">{draft.website}</a></p>
+                <p><strong>To:</strong> {draft.target_email || 'Missing email'}</p>
+              </div>
+
+              {draft.sending ? (
+                <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>
+              ) : (
+                <div className="email-draft" style={{ marginTop: '16px' }}>
+                  {draft.image_url && (
+                    <div style={{ marginBottom: '16px', textAlign: 'center' }}>
+                      <img src={draft.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
+                    </div>
+                  )}
+                  <p className="subject" style={{marginBottom: '8px'}}><strong>Subject:</strong> {draft.subject}</p>
+                  <textarea 
+                    className="email-body-editor" 
+                    value={draft.body} 
+                    onChange={(e) => {
+                      const newDrafts = [...drafts];
+                      newDrafts[i].body = e.target.value;
+                      setDrafts(newDrafts);
+                    }} 
+                  />
+                  <div className="action-buttons" style={{marginTop: '16px'}}>
+                    <button className="reject-btn" onClick={() => handleDraftDelete(draft.id)}><X size={18} /> Discard</button>
+                    <button className="send-btn" onClick={() => handleDraftSend(draft, i)}><Send size={18} /> Approve & Send</button>
+                  </div>
+                </div>
+              )}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        {drafts.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No saved drafts.</p>}
+      </div>
+    </div>
+  );
+
   const renderHistory = () => (
     <div className="glass" style={{ padding: '24px' }}>
       <h2><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
@@ -389,6 +481,12 @@ function App() {
           <Home size={18} /> Outreach Dashboard
         </button>
         <button 
+          onClick={() => setCurrentView('drafts')}
+          style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+        >
+          <FileEdit size={18} /> Saved Drafts
+        </button>
+        <button 
           onClick={() => setCurrentView('cost')}
           style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px 16px', background: currentView === 'cost' ? 'rgba(255,255,255,0.1)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'cost' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'cost' ? 'bold' : 'normal', transition: 'all 0.2s' }}
         >
@@ -405,6 +503,7 @@ function App() {
       {/* Main Content */}
       <main className="main-content" style={{ flex: 1, padding: '40px', overflowY: 'auto' }}>
         {currentView === 'home' && renderHome()}
+        {currentView === 'drafts' && renderDrafts()}
         {currentView === 'history' && renderHistory()}
         {currentView === 'cost' && renderCost()}
       </main>
