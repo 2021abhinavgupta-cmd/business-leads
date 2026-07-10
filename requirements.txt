@@ -1,7 +1,7 @@
 instagrapi
 httpx
 beautifulsoup4
-duckduckgo-search
+ddgs
 playwright
 google-generativeai
 anthropic

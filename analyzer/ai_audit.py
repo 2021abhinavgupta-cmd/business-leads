@@ -11,6 +11,8 @@ import re
 import base64
 
 import anthropic
+import warnings
+warnings.filterwarnings("ignore", module="google.generativeai")
 import google.generativeai as genai
 import openai
 
@@ -253,7 +255,7 @@ class AIAuditor:
             content.append({"type": "text", "text": prompt})
 
             message = self._anthropic_client.messages.create(
-                model="claude-3-5-haiku-20241022",
+                model="claude-3-5-haiku-latest",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": content}],
             )

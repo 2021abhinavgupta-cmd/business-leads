@@ -13,7 +13,7 @@ import time
 from urllib.parse import urlparse, urljoin
 
 import httpx
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from email_validator import validate_email, EmailNotValidError
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ class DecisionMaker:
     # 2. Decision-maker contact discovery
     # ------------------------------------------------------------------
 
-    def find_decision_maker(self, company_name: str, website: str) -> dict:
+    def find_decision_maker(self, company_name: str, website: str, html_content: str | None = None) -> dict:
         """
         Find the best marketing contact for a company.
 
