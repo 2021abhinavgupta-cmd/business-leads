@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urljoin
 
 import httpx
 from ddgs import DDGS
+from googlesearch import search as google_search
 from email_validator import validate_email, EmailNotValidError
 
 # ---------------------------------------------------------------------------
@@ -45,13 +46,19 @@ class DecisionMaker:
         for attempt in range(2):
             try:
                 with DDGS() as ddgs:
-                    results = list(ddgs.text(f"{company_name} instagram", max_results=5))
-                    break
+                    results = list(ddgs.text(f"{company_name} instagram", max_results=5, backend="lite"))
+                    if results:
+                        break
             except Exception as e:
                 print(f"DDG Error for {company_name}: {e}")
+                results = []
+                
+        if not results:
+            try:
+                results = [{"href": res.url} for res in google_search(f"{company_name} instagram", num_results=5, advanced=True)]
+            except Exception as e:
+                print(f"Google fallback error: {e}")
                 return ""
-        else:
-            return ""
 
         for item in results:
             link = item.get("href", "")
@@ -196,25 +203,35 @@ class DecisionMaker:
     # ------------------------------------------------------------------
 
     def _find_ceo_name(self, company_name: str) -> str:
-        """Search LinkedIn via DDG for the CEO/Founder's name."""
+        """Search LinkedIn via DDG (with Google fallback) for the CEO/Founder's name."""
+        query = f'site:linkedin.com/in "Founder" OR "CEO" "{company_name}"'
+        results = []
+        
         for attempt in range(2):
             try:
                 with DDGS() as ddgs:
-                    query = f'site:linkedin.com/in "Founder" OR "CEO" "{company_name}"'
-                    results = list(ddgs.text(query, max_results=3))
-                    if not results:
-                        return ""
-                        
-                    title = results[0].get("title", "")
-                    parts = re.split(r'[-|]', title)
-                    if parts:
-                        name = parts[0].strip()
-                        if len(name.split()) <= 3 and "LinkedIn" not in name:
-                            return name
-                    break
+                    results = list(ddgs.text(query, max_results=3, backend="lite"))
+                    if results:
+                        break
             except Exception as e:
                 print(f"DDG Error finding CEO for {company_name}: {e}")
-                return ""
+                
+        if not results:
+            try:
+                raw_results = list(google_search(query, num_results=3, advanced=True))
+                results = [{"title": res.title} for res in raw_results]
+            except Exception as e:
+                pass
+                
+        if not results:
+            return ""
+            
+        title = results[0].get("title", "")
+        parts = re.split(r'[-|]', title)
+        if parts:
+            name = parts[0].strip()
+            if len(name.split()) <= 3 and "LinkedIn" not in name:
+                return name
         return ""
 
     def _guess_and_verify_email(self, name: str, domain: str) -> str:
@@ -235,29 +252,49 @@ class DecisionMaker:
                 f"{first[0]}.{last}@{domain}"
             ])
             
-        for candidate in patterns:
-            try:
-                # check_deliverability=True performs DNS MX and SMTP checks
-                valid = validate_email(candidate, check_deliverability=True)
-                return valid.normalized
-            except EmailNotValidError:
-                continue
+        # Catch-all detection: if a completely fake email validates, the domain is a catch-all
+        # and SMTP guessing is useless.
+        is_catch_all = False
+        try:
+            validate_email(f"bounce-test-992384@{domain}", check_deliverability=True)
+            is_catch_all = True
+        except:
+            pass
+            
+        if not is_catch_all:
+            for candidate in patterns:
+                try:
+                    # check_deliverability=True performs DNS MX and SMTP checks
+                    valid = validate_email(candidate, check_deliverability=True)
+                    return valid.normalized
+                except EmailNotValidError:
+                    continue
                 
-        # Fallback to firstname if all verification fails (some servers block pinging)
+        # Fallback to firstname if all verification fails (or if it's a catch-all)
         return patterns[0]
 
     def _find_email_via_osint(self, company_name: str, domain: str) -> str:
         """Fallback OSINT search to scrape emails directly off Google/DDG."""
         query = f'"{company_name}" "@gmail.com" OR "@{domain}" email'
+        results = []
+        
         for attempt in range(2):
             try:
                 with DDGS() as ddgs:
-                    results = list(ddgs.text(query, max_results=5))
-                    break
+                    results = list(ddgs.text(query, max_results=5, backend="lite"))
+                    if results:
+                        break
             except Exception as e:
                 print(f"DDG Error OSINT email for {company_name}: {e}")
-                return ""
-        else:
+                
+        if not results:
+            try:
+                raw_results = list(google_search(query, num_results=5, advanced=True))
+                results = [{"body": res.description, "title": res.title} for res in raw_results]
+            except Exception:
+                pass
+                
+        if not results:
             return ""
                     
         for res in results:
