@@ -469,7 +469,7 @@ function App() {
       <div className="bg-glow-right"></div>
       
       {/* Top Navigation */}
-      <nav style={{ background: 'rgba(15, 23, 42, 0.9)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(255,255,255,0.1)', padding: '16px 32px', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '32px', zIndex: 10 }}>
+      <nav style={{ background: 'rgba(15, 23, 42, 0.7)', backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.1)', padding: '12px 32px', display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '32px', zIndex: 10, borderRadius: '50px', margin: '24px auto 0 auto', width: '92%', maxWidth: '1200px', boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#fff' }}>
           <Zap className="logo-icon" size={28} />
           <h1 style={{ margin: 0, fontSize: '20px', letterSpacing: '-0.5px' }}>Lead Audit AI</h1>
