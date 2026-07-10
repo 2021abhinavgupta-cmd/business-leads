@@ -1,21 +1,99 @@
-"""
-Google Maps scraper — discovers businesses via the Google Places API (New).
-"""
 import asyncio
+import time
 from urllib.parse import urlparse
+import httpx
 from playwright.async_api import async_playwright
 from ddgs import DDGS
-from analyzer.visuals import _PLAYWRIGHT_SEMAPHORE # Limit concurrency
+
+import config
+from analyzer.visuals import _PLAYWRIGHT_SEMAPHORE
+
+TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+_REQUEST_DELAY = 2  # seconds
 
 class GoogleMapsScraper:
     def __init__(self):
-        pass
+        self.api_key = config.GOOGLE_MAPS_API_KEY
+        self.client = httpx.Client(timeout=30)
 
     async def scrape_google_maps(self, niche: str, city: str, limit: int = 20) -> list[dict]:
         """
-        Scrapes Google Maps entirely for free using Playwright.
-        Replaces the $0.032/query paid API with a stealthy browser scraper.
+        Hybrid Scraper Architecture:
+        1. Attempts to use the ultra-fast, reliable Google Places API (which provides a $200 free tier).
+        2. If the API fails (e.g. limit exceeded, no billing account), gracefully falls back 
+           to the 100% free Playwright + OSINT scraper.
         """
+        print(f"[Maps] Attempting official API scrape for {niche} in {city}...")
+        try:
+            leads = self._scrape_via_api(niche, city, limit)
+            if leads:
+                print(f"[Maps] API successful! Found {len(leads)} leads.")
+                return leads
+        except Exception as e:
+            print(f"[Maps] API failed or blocked: {e}")
+            
+        print("[Maps] Falling back to free Playwright OSINT scraper...")
+        return await self._scrape_via_playwright(niche, city, limit)
+
+    # ---------------------------------------------------------
+    # STRATEGY 1: Official Google Places API (Fast, Reliable)
+    # ---------------------------------------------------------
+    def _scrape_via_api(self, niche: str, city: str, limit: int) -> list[dict]:
+        if not self.api_key:
+            raise ValueError("No API Key provided")
+            
+        leads = []
+        headers = {
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": "places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "textQuery": f"{niche} in {city}",
+            "pageSize": 20
+        }
+        
+        while len(leads) < limit:
+            time.sleep(_REQUEST_DELAY)
+            response = self.client.post(TEXT_SEARCH_URL, headers=headers, json=payload)
+            response.raise_for_status() # Will raise Exception if 403 (Billing issues)
+            data = response.json()
+                
+            places = data.get("places", [])
+            if not places:
+                break
+                
+            for place in places:
+                name = place.get("displayName", {}).get("text", "")
+                website = place.get("websiteUri", "")
+                
+                if not name or not website:
+                    continue
+                    
+                leads.append({
+                    "Company": name,
+                    "Website": website,
+                    "Phone": place.get("nationalPhoneNumber", ""),
+                    "Address": place.get("formattedAddress", ""),
+                    "Rating": str(place.get("rating", "")),
+                    "Reviews Count": place.get("userRatingCount", 0),
+                    "Email": "",
+                    "Instagram Handle": "",
+                    "Decision Maker Name": "",
+                    "Source": "Google Maps (API)"
+                })
+                
+            next_token = data.get("nextPageToken")
+            if not next_token:
+                break
+            payload["pageToken"] = next_token
+            
+        return self._deduplicate(leads)[:limit]
+
+    # ---------------------------------------------------------
+    # STRATEGY 2: Playwright + DDGS OSINT (100% Free, Slower)
+    # ---------------------------------------------------------
+    async def _scrape_via_playwright(self, niche: str, city: str, limit: int) -> list[dict]:
         leads = []
         query = f"{niche} in {city}"
         url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
@@ -53,14 +131,11 @@ class GoogleMapsScraper:
                 finally:
                     await browser.close()
                     
-        # Limit to requested amount
         names = names[:limit]
         
         # Resolve domains using DDG (100% Free OSINT)
         for name in names:
             website = self._find_website_for_business(name, city)
-            
-            # If we couldn't resolve a website, skip the lead (we need a website for the AI Audit)
             if not website:
                 continue
                 
@@ -69,12 +144,12 @@ class GoogleMapsScraper:
                 "Website": website,
                 "Phone": "", # Website scraper will find this natively
                 "Address": city,
-                "Rating": "N/A", # Hard to scrape without clicking, saving memory by skipping
+                "Rating": "N/A", 
                 "Reviews Count": 0,
                 "Email": "",
                 "Instagram Handle": "",
                 "Decision Maker Name": "",
-                "Source": "Google Maps (Playwright OSINT)"
+                "Source": "Google Maps (Playwright OSINT Fallback)"
             })
             
         return self._deduplicate(leads)
@@ -87,7 +162,6 @@ class GoogleMapsScraper:
                 results = list(ddgs.text(query, max_results=3, backend="lite"))
                 for res in results:
                     href = res.get("href", "").lower()
-                    # Skip generic directories
                     if any(x in href for x in ["yelp.com", "facebook.com", "instagram.com", "linkedin.com", "justdial", "yellowpages"]):
                         continue
                     return res.get("href", "")
