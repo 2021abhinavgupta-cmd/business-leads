@@ -129,6 +129,7 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
 
         return {
             "email": email,
+            "sender_email": config.FROM_EMAIL,
             "subject": subject,
             "body": body,
             "page_speed_score": web_data.page_speed_score,

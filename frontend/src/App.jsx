@@ -254,6 +254,12 @@ function App() {
                 <div className="lead-details">
                   <p><strong>URL:</strong> <a href={lead.Website} target="_blank" rel="noreferrer">{lead.Website || 'N/A'}</a></p>
                   <p><strong>Address:</strong> {lead.Address}</p>
+                  {lead.auditState === 'sent' && lead.auditData && (
+                    <div style={{ marginTop: '12px', padding: '8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                      <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {lead.auditData.email}</p>
+                      <p style={{ color: '#475569', fontSize: '0.9em' }}><strong>From:</strong> {lead.auditData.sender_email || 'System'}</p>
+                    </div>
+                  )}
                 </div>
 
                 {lead.auditState === 'none' && lead.Website && (
