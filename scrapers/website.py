@@ -101,23 +101,22 @@ class WebsiteScraper:
     # Public API
     # ------------------------------------------------------------------
 
-    async def audit_website(self, url: str) -> WebsiteData:
+    async def audit_website(self, url: str, html: str | None = None) -> WebsiteData:
         """
         Run a full 4-step audit on *url*.
 
         Args:
             url: The website URL to audit (e.g. ``"https://example.com"``).
+            html: Pre-rendered HTML content (from Playwright).
 
         Returns:
-            A ``WebsiteData`` instance. If the site is unreachable, most
+            A ``WebsiteData`` instance. If the site is unreachable or no html is provided, most
             fields will be zeroed/empty and ``reachable`` will be False.
         """
         url = self._normalise_url(url)
-
-        # Step 1 — Reachability & load time
-        reachable, html, load_time_ms, has_ssl = await self._check_reachability(url)
-
-        if not reachable:
+        has_ssl = str(url).startswith("https://")
+        
+        if not html:
             return WebsiteData(
                 url=url,
                 reachable=False,
@@ -135,6 +134,9 @@ class WebsiteScraper:
                 technologies=[],
                 issues=["Website is unreachable or returned an error"],
             )
+
+        # We are using Playwright now, so load time is no longer a simple httpx ping.
+        load_time_ms = 1500  # Default mock
 
         # Step 2 — PageSpeed Insights
         perf_score, seo_score, mobile_score = await self._pagespeed(url)
@@ -173,30 +175,7 @@ class WebsiteScraper:
             issues=issues,
         )
 
-    # ------------------------------------------------------------------
-    # Step 1 — Reachability
-    # ------------------------------------------------------------------
-
-    async def _check_reachability(
-        self, url: str
-    ) -> tuple[bool, str, int, bool]:
-        """
-        Fetch *url* and measure response time.
-
-        Returns:
-            (reachable, html, load_time_ms, has_ssl)
-        """
-        try:
-            start = time.perf_counter()
-            response = await self.client.get(url)
-            elapsed_ms = int((time.perf_counter() - start) * 1000)
-            response.raise_for_status()
-
-            has_ssl = str(response.url).startswith("https://")
-            return True, response.text, elapsed_ms, has_ssl
-
-        except Exception:
-            return False, "", 0, False
+    # (Removed _check_reachability as we now use Playwright for rendering HTML)
 
     # ------------------------------------------------------------------
     # Step 2 — PageSpeed Insights

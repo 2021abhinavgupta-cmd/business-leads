@@ -6,10 +6,10 @@ from PIL import Image, ImageDraw
 # Create temporary directory for screenshots
 os.makedirs("screenshots", exist_ok=True)
 
-async def generate_audit_screenshot(url: str, company_name: str) -> str | None:
+async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None]:
     """
     Takes a mobile screenshot of the URL, draws an analysis box on it,
-    and returns the file path to the saved JPEG. Returns None on failure.
+    and returns a tuple of (filepath, html_content). Returns (None, None) on failure.
     """
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
@@ -35,6 +35,10 @@ async def generate_audit_screenshot(url: str, company_name: str) -> str | None:
             
             # Take screenshot directly to memory
             screenshot_bytes = await page.screenshot(full_page=False)
+            
+            # Grab fully rendered HTML
+            html_content = await page.content()
+            
             await browser.close()
             
         # Step 2: Draw on the image via Pillow
@@ -52,8 +56,8 @@ async def generate_audit_screenshot(url: str, company_name: str) -> str | None:
         filepath = f"screenshots/{safe_name}_audit.jpg"
         img.save(filepath, format="JPEG", quality=85)
         
-        return filepath
+        return filepath, html_content
         
     except Exception as e:
         print(f"Failed to generate visual evidence for {url}: {e}")
-        return None
+        return None, None

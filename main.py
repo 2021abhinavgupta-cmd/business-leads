@@ -71,17 +71,13 @@ async def process_single_lead(lead: dict) -> str:
         ig_data = ig_scraper.get_instagram_data(instagram_handle)
         print(f"  IG: {ig_data.followers if ig_data else 'not found'} followers")
     
-    # Step 4: Audit website
-    if not website:
-        print(f"  No website for {company}")
-        return "failed_no_website"
+    # Step 4: Generate Visual Evidence & Scrape HTML (Playwright)
+    print(f"  Generating visual evidence & scraping for {website}...")
+    image_path, html_content = await generate_audit_screenshot(website, company)
     
-    web_data = await web_scraper.audit_website(website)
+    # Step 5: Audit website (with Playwright HTML)
+    web_data = await web_scraper.audit_website(website, html=html_content)
     print(f"  Web: speed={web_data.page_speed_score}, seo={web_data.seo_score}")
-    
-    # Step 5: Generate Visual Evidence (Screenshot)
-    print(f"  Generating visual evidence for {website}...")
-    image_path = await generate_audit_screenshot(website, company)
 
     # Step 6: AI Analysis
     analysis = auditor.analyze_lead(company, ig_data, web_data, image_path=image_path)
