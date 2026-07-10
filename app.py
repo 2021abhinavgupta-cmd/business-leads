@@ -71,7 +71,7 @@ def save_leads_to_sheets_bg(leads: list):
 @app.post("/api/search")
 async def search_leads(req: SearchRequest, background_tasks: BackgroundTasks):
     try:
-        leads = maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
+        leads = await maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
         
         # Log exact Maps API cost
