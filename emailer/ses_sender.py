@@ -69,9 +69,8 @@ class SESSender:
         ])
         
         body = "\n".join(body_lines)
-        # Convert plain text body to simple HTML for inline images
-        html_body = body.replace('\n', '<br>')
-        return subject, html_body
+        body = "\n".join(body_lines)
+        return subject, body
 
     def send_email(self, to_email: str, subject: str, body: str, image_path: str = None) -> bool:
         """
@@ -97,11 +96,14 @@ class SESSender:
                     msg['From'] = self.from_email
                     msg['To'] = to_email
                     
+                    # Convert plain text body to HTML for the email layout
+                    html_body = body.replace('\n', '<br>')
+                    
                     # Professional HTML Layout for the Email
                     html_with_img = f"""
                     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
                         <div style="padding: 20px;">
-                            {body}
+                            {html_body}
                         </div>
                         <div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
                             <h3 style="margin-top: 0; color: #0f172a; font-size: 16px;">📸 Visual Audit Evidence</h3>

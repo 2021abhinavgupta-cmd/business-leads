@@ -99,11 +99,9 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         # 4. AI Audit (with visual critique)
         analysis = auditor.analyze_lead(req.company, ig_data, web_data, image_path=image_path)
         
+        image_url = None
         if image_path:
-            try:
-                os.remove(image_path)
-            except Exception:
-                pass
+            image_url = f"/screenshots/{os.path.basename(image_path)}"
                 
         if not analysis:
             return {"error": "AI failed to analyze."}
@@ -136,7 +134,8 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
             "page_speed_score": web_data.page_speed_score,
             "seo_score": web_data.seo_score,
             "overall_score": analysis.get("overall_score", 100),
-            "flaws": analysis.get("flaws", [])
+            "flaws": analysis.get("flaws", []),
+            "image_url": image_url
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -144,19 +143,16 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
 @app.post("/api/send")
 async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
     try:
-        # Generate Screenshot (takes time, optional)
+        # Use existing screenshot
         image_path = None
-        if req.website:
-            image_path = await generate_audit_screenshot(req.website, req.company)
+        if req.company:
+            safe_name = "".join([c if c.isalnum() else "_" for c in req.company.lower()])
+            candidate_path = f"screenshots/{safe_name}_audit.jpg"
+            if os.path.exists(candidate_path):
+                image_path = candidate_path
 
         success = ses.send_email(req.email, req.subject, req.body, image_path=image_path)
         
-        if image_path:
-            try:
-                os.remove(image_path)
-            except:
-                pass
-                
         if success:
             def save_send_to_sheets():
                 try:
@@ -171,6 +167,10 @@ async def send_email(req: SendRequest, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=500, detail="Failed to send via SES")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Mount screenshots folder
+os.makedirs("screenshots", exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
 
 # Mount Vite frontend (for production deployment on Railway)
 frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")

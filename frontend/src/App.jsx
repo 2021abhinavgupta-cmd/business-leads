@@ -256,6 +256,11 @@ function App() {
 
                     <div className="email-draft">
                       <h4><FileText size={16} /> Drafted Email</h4>
+                      {lead.auditData.image_url && (
+                        <div style={{ marginBottom: '16px', textAlign: 'center' }}>
+                          <img src={lead.auditData.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
+                        </div>
+                      )}
                       <p className="target-email"><strong>To:</strong> {lead.auditData.email || 'Email not found (will fail)'}</p>
                       <p className="subject"><strong>Subject:</strong> {lead.auditData.subject}</p>
                       <textarea 
