@@ -77,6 +77,7 @@ class WebsiteData:
     homepage_text: str = ""
     company_context: str = ""
     technologies: list[str] = field(default_factory=list)
+    instagram_url: str = ""
     issues: list[str] = field(default_factory=list)
 
 
@@ -178,6 +179,7 @@ class WebsiteScraper:
             homepage_text=parsed["homepage_text"],
             company_context=company_context,
             technologies=technologies,
+            instagram_url=parsed.get("instagram_url", ""),
             issues=issues,
         )
 
@@ -335,6 +337,14 @@ class WebsiteScraper:
         # Homepage text (converted to LLM-ready Markdown, truncated to 3000 chars)
         homepage_text = markdown_text[:3000]
 
+        # Instagram link extraction
+        instagram_url = ""
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"]
+            if "instagram.com" in href.lower():
+                instagram_url = href
+                break
+
         return {
             "meta_title": meta_title,
             "meta_description": meta_description,
@@ -344,6 +354,7 @@ class WebsiteScraper:
             "has_contact": has_contact,
             "has_testimonials": has_testimonials,
             "has_blog": has_blog,
+            "instagram_url": instagram_url,
         }
 
     # ------------------------------------------------------------------

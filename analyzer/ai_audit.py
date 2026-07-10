@@ -138,7 +138,8 @@ class AIAuditor:
         else:
             ig_section = (
                 "INSTAGRAM DATA:\n"
-                "- No Instagram profile found (this is itself a problem)\n"
+                "- Instagram data was not available for analysis.\n"
+                "- IMPORTANT: Do NOT claim the company has no Instagram. They may have one that we couldn't analyze. Skip Instagram-related flaws entirely.\n"
             )
 
         # --- Website section ---

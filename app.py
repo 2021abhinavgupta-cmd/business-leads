@@ -101,10 +101,19 @@ async def audit_lead(req: AuditRequest, background_tasks: BackgroundTasks):
         # 2. Website Audit (using fully rendered HTML)
         web_data = await web_scraper.audit_website(req.website, html=html_content)
         
-        # 3. Instagram Data
+        # 3. Instagram Data — use handle from request, or auto-detect from website
+        ig_handle = req.instagram_handle
+        if not ig_handle and web_data.instagram_url:
+            # Extract handle from URL like https://instagram.com/hitchki
+            import re
+            match = re.search(r'instagram\.com/([A-Za-z0-9_.]+)', web_data.instagram_url)
+            if match:
+                ig_handle = match.group(1)
+                print(f"[Audit] Auto-detected Instagram handle from website: @{ig_handle}")
+        
         ig_data = None
-        if req.instagram_handle:
-            ig_data = ig_scraper.get_instagram_data(req.instagram_handle)
+        if ig_handle:
+            ig_data = ig_scraper.get_instagram_data(ig_handle)
 
         # 4. AI Audit (with visual critique)
         analysis = auditor.analyze_lead(req.company, ig_data, web_data, image_path=image_path)
