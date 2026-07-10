@@ -24,3 +24,4 @@ uvicorn
 markdownify
 googlesearch-python
 axe-playwright-python
+crawl4ai

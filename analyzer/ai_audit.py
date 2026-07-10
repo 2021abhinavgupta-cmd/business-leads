@@ -167,6 +167,18 @@ class AIAuditor:
                 f"- Page Transfer Size: {pt.get('transfer_size_kb', 'N/A')} KB\n"
             )
         
+        # --- Lighthouse Scores ---
+        lighthouse_section = ""
+        if getattr(web, 'lighthouse_scores', None) and web.lighthouse_scores:
+            ls = web.lighthouse_scores
+            lighthouse_section = (
+                f"LIGHTHOUSE AUDIT SCORES (Google Lighthouse):\n"
+                f"- Performance: {ls.get('performance', 'N/A')}/100\n"
+                f"- SEO: {ls.get('seo', 'N/A')}/100\n"
+                f"- Accessibility: {ls.get('accessibility', 'N/A')}/100\n"
+                f"- Best Practices: {ls.get('best_practices', 'N/A')}/100\n"
+            )
+        
         # --- Accessibility Violations (from axe-core) ---
         a11y_section = ""
         if getattr(web, 'accessibility_violations', None) and web.accessibility_violations:
@@ -206,6 +218,7 @@ class AIAuditor:
             f"{ig_section}\n"
             f"{web_section}\n"
             f"{perf_section}\n"
+            f"{lighthouse_section}\n"
             f"{a11y_section}\n"
             f"{broken_section}\n"
             f"{brand_context_section}\n"

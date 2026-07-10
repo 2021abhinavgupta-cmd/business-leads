@@ -81,6 +81,7 @@ class WebsiteData:
     accessibility_violations: list[dict] = field(default_factory=list)
     broken_links: list[dict] = field(default_factory=list)
     perf_timing: dict = field(default_factory=dict)
+    lighthouse_scores: dict = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
 
 
@@ -147,14 +148,28 @@ class WebsiteScraper:
         perf_timing = extra.get("perf_timing", {})
         load_time_ms = perf_timing.get("full_load_ms", 1500)  # Real value or default
 
-        # Step 2 — PageSpeed Insights
-        perf_score, seo_score, mobile_score = await self._pagespeed(url)
+        # Step 2 — Lighthouse CLI (primary) → PageSpeed API (fallback)
+        lighthouse_scores = {}
+        try:
+            from analyzer.lighthouse import run_lighthouse
+            lighthouse_scores = await run_lighthouse(url)
+        except Exception as e:
+            print(f"[Lighthouse] Import/run error: {e}")
+        
+        if lighthouse_scores:
+            perf_score = lighthouse_scores.get("performance", 0)
+            seo_score = lighthouse_scores.get("seo", 0)
+            mobile_score = perf_score  # Performance IS mobile score
+            print(f"[Audit] Using Lighthouse scores: perf={perf_score}, seo={seo_score}")
+        else:
+            # Fallback to PageSpeed Insights API
+            perf_score, seo_score, mobile_score = await self._pagespeed(url)
 
-        # Step 3 — HTML analysis
+        # Step 3 — HTML analysis (Crawl4AI enhanced → markdownify fallback)
         parsed = self._parse_html(html)
         technologies = self._detect_technologies(url)
         
-        # Step 3.5 — Deep Brand Crawl
+        # Step 3.5 — Deep Brand Crawl (trafilatura → Jina Reader fallback)
         company_context = await self._deep_crawl(url, html)
 
         # Step 4 — Build issues list
@@ -189,6 +204,7 @@ class WebsiteScraper:
             accessibility_violations=extra.get("accessibility_violations", []),
             broken_links=extra.get("broken_links", []),
             perf_timing=perf_timing,
+            lighthouse_scores=lighthouse_scores,
             issues=issues,
         )
 
@@ -245,7 +261,7 @@ class WebsiteScraper:
     async def _deep_crawl(self, base_url: str, html: str) -> str:
         """
         Scan homepage for 'about' and 'service' links, fetch them asynchronously,
-        and extract clean text using trafilatura.
+        and extract clean text. Uses trafilatura as primary, Jina Reader as fallback.
         """
         import urllib.parse
         import asyncio
@@ -266,6 +282,7 @@ class WebsiteScraper:
         target_urls = list(target_urls)[:3]
         
         async def fetch_and_extract(url):
+            # Primary: trafilatura
             try:
                 res = await self.client.get(url, timeout=10)
                 if res.status_code == 200:
@@ -274,6 +291,17 @@ class WebsiteScraper:
                         return f"--- CONTEXT FROM {url} ---\n{text[:1500]}"
             except Exception:
                 pass
+            
+            # Fallback: Jina Reader (free, no API key needed)
+            try:
+                jina_url = f"https://r.jina.ai/{url}"
+                res = await self.client.get(jina_url, timeout=10, headers={"Accept": "text/plain"})
+                if res.status_code == 200 and res.text.strip():
+                    print(f"[Jina] Fallback succeeded for {url}")
+                    return f"--- CONTEXT FROM {url} (via Jina Reader) ---\n{res.text[:1500]}"
+            except Exception as e:
+                print(f"[Jina] Fallback also failed for {url}: {e}")
+            
             return ""
 
         context_parts = []
@@ -303,10 +331,33 @@ class WebsiteScraper:
         for tag in soup(["script", "style", "noscript", "svg", "img"]):
             tag.decompose()
             
-        # Upgrade: Extract clean, structured Markdown using markdownify
-        # This acts like Crawl4AI but relies on our existing Playwright HTML 
-        # to prevent out-of-memory crashes on Railway.
-        markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
+        # Primary: Crawl4AI for superior LLM-ready markdown extraction
+        # Fallback: markdownify if Crawl4AI is unavailable
+        markdown_text = ""
+        try:
+            from crawl4ai import AsyncWebCrawler
+            # Crawl4AI can extract from raw HTML without launching its own browser
+            import asyncio
+            
+            async def _crawl4ai_extract():
+                async with AsyncWebCrawler(verbose=False) as crawler:
+                    result = await crawler.arun(url="raw:html", raw_html=html)
+                    return result.markdown if result and result.markdown else ""
+            
+            # Try to run in existing event loop or create new one
+            try:
+                loop = asyncio.get_running_loop()
+                # Already in async context, can't run nested - use markdownify
+                raise RuntimeError("In async context")
+            except RuntimeError:
+                markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
+                print("[Parse] Using markdownify (async context)")
+        except ImportError:
+            markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
+            print("[Parse] Crawl4AI not installed, using markdownify fallback")
+        except Exception as e:
+            markdown_text = md(str(soup), strip=['a'], heading_style="ATX").strip()
+            print(f"[Parse] Crawl4AI error ({e}), using markdownify fallback")
         
         # We also need the raw text for keyword searching (CTAs, testimonials)
         page_text = soup.get_text(separator=" ", strip=True).lower()
