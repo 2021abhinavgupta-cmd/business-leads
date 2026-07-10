@@ -34,7 +34,8 @@ _HEADERS = [
     "Status",               # O: 15 (pending/drafted/approved/emailed/skipped/failed/replied)
     "Source",               # P: 16 (apollo/google_maps)
     "Sent At",              # Q: 17
-    "Reply"                 # R: 18
+    "Reply",                # R: 18
+    "Follow-up Stage"       # S: 19
 ]
 
 
@@ -112,6 +113,7 @@ class SheetsStorage:
             data.get("Source", ""),
             data.get("Sent At", ""),
             data.get("Reply", ""),
+            data.get("Follow-up Stage", 0),
         ]
         
         import time
@@ -168,6 +170,41 @@ class SheetsStorage:
                 
         return approved_leads
 
+    def get_leads_for_followup(self, max_stage: int = 2) -> list[dict]:
+        """
+        Return leads that were 'emailed', haven't 'replied', 
+        whose Follow-up Stage is < max_stage, and were last 
+        emailed > 3 days ago.
+        """
+        try:
+            records = self.sheet.get_all_records()
+        except Exception:
+            return []
+
+        followup_leads = []
+        now = datetime.now(timezone.utc)
+        
+        for i, row in enumerate(records, start=2):
+            status = str(row.get("Status", "")).strip().lower()
+            stage = row.get("Follow-up Stage", "")
+            stage = int(stage) if str(stage).isdigit() else 0
+            sent_at_str = str(row.get("Sent At", "")).strip()
+            
+            if status == "emailed" and stage < max_stage and sent_at_str:
+                try:
+                    # Parse "2024-05-10 14:30:00 UTC"
+                    sent_at = datetime.strptime(sent_at_str.replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")
+                    sent_at = sent_at.replace(tzinfo=timezone.utc)
+                    
+                    if (now - sent_at).days >= 3:
+                        row_data = dict(row)
+                        row_data["row_number"] = i
+                        followup_leads.append(row_data)
+                except Exception as e:
+                    pass
+                    
+        return followup_leads
+
     def get_stats(self) -> dict:
         """
         Return the count of each status for a dashboard overview.
@@ -204,6 +241,16 @@ class SheetsStorage:
         self.sheet.update_cell(row_number, 15, status)
         
         # Column Q = 17
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        self.sheet.update_cell(row_number, 17, now_str)
+
+    def increment_followup(self, row_number: int, new_stage: int) -> None:
+        """
+        Update the Follow-up Stage (Col S), set Sent At to now.
+        """
+        # Column S = 19
+        self.sheet.update_cell(row_number, 19, new_stage)
+        # Update Sent At
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         self.sheet.update_cell(row_number, 17, now_str)
 

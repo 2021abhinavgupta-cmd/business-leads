@@ -169,6 +169,71 @@ class SESSender:
                 print(f"Unexpected error sending email: {e}")
                 return False
 
+    def generate_followup(self, contact_name: str, stage: int, your_name: str) -> str:
+        """
+        Generate a short, punchy follow-up email.
+        stage 1 = 3 days later, stage 2 = 6 days later.
+        """
+        if stage == 1:
+            body_lines = [
+                f"Hi {contact_name},\n",
+                "Just bumping this up to the top of your inbox. Did you get a chance to see the mobile website screenshot I attached?",
+                "I know you're busy, but this is causing a direct loss in conversions.\n",
+                "Let me know if you have 10 minutes this week.",
+                f"\nBest,\n{your_name}"
+            ]
+        else:
+            body_lines = [
+                f"Hi {contact_name},\n",
+                "I'll stop bugging you after this! Just wanted to follow up one last time regarding your mobile site.",
+                "If fixing these UI issues is a priority for this quarter, I'd love to show you how we'd tackle it.",
+                "Either way, wishing you a great week ahead.\n",
+                f"\nCheers,\n{your_name}"
+            ]
+            
+        return "\n".join(body_lines)
+
+    def send_followup(self, to_email: str, original_subject: str, body: str) -> bool:
+        """
+        Send a follow-up email threaded to the original.
+        """
+        subject = original_subject
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+            
+        retries = 1
+        for attempt in range(retries + 1):
+            try:
+                # Use raw email to inject basic threading headers (optional but helpful)
+                # For simplicity, we rely on Subject matching which Gmail handles well.
+                html_body = body.replace('\n', '<br>')
+                html_template = f"""
+                <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; color: #1a1a1a; line-height: 1.6;">
+                    {html_body}
+                </div>
+                """
+                
+                self.client.send_email(
+                    Source=self.from_email,
+                    Destination={"ToAddresses": [to_email]},
+                    Message={
+                        "Subject": {"Data": subject, "Charset": "UTF-8"},
+                        "Body": {
+                            "Html": {"Data": html_template, "Charset": "UTF-8"},
+                        },
+                    },
+                )
+                return True
+            except ClientError as e:
+                if attempt < retries:
+                    time.sleep(5)
+                    continue
+                print(f"SES Error sending follow-up: {e}")
+                return False
+            except Exception as e:
+                print(f"Unexpected error in follow-up: {e}")
+                return False
+
     def check_ses_quota(self) -> dict:
         """
         Get the remaining SES daily sending quota.

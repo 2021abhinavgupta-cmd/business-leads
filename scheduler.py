@@ -6,7 +6,7 @@ import asyncio
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from main import run_batch
+from main import run_batch, run_followups
 from scrapers.google_maps import GoogleMapsScraper
 from scrapers.shopify_dork import ShopifyDorkScraper
 from scrapers.startup_dork import StartupDorkScraper
@@ -75,6 +75,13 @@ def start_scheduler():
         lambda: asyncio.run(run_batch()),
         CronTrigger(day_of_week="mon-fri", hour=10, minute=0),
         name="run_batch_weekdays"
+    )
+    
+    # 2) Send follow-ups Mon-Fri at 9:00 AM IST
+    scheduler.add_job(
+        lambda: asyncio.run(run_followups()),
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=0),
+        name="run_followups_weekdays"
     )
     
     # 2) Ingest new leads every Sunday at 8:00 PM IST

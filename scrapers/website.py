@@ -189,9 +189,6 @@ class WebsiteScraper:
             (performance_score, seo_score, mobile_score)
             Each score is 0-100. Returns (0, 0, 0) on failure.
         """
-        # DISABLED: Google PageSpeed API takes 15-20 seconds, causing Railway to return 502 Bad Gateway.
-        return 0, 0, 0
-
         try:
             response = await self.client.get(
                 PAGESPEED_URL,

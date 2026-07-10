@@ -158,6 +158,34 @@ async def run_batch():
     stats = sheets.get_stats()
     print(f"\nBatch done! Current CRM stats: {stats}")
 
+async def run_followups():
+    """Run follow-up drip campaigns."""
+    print("--- Starting Follow-up Batch ---")
+    
+    leads = sheets.get_leads_for_followup(max_stage=2)
+    print(f"Leads ready for follow-up: {len(leads)}")
+    
+    for lead in leads:
+        company = lead.get("Company", "")
+        contact = lead.get("Contact Name", "")
+        email = lead.get("Email", "")
+        subject = lead.get("Email Subject", "")
+        stage = lead.get("Follow-up Stage", 0)
+        
+        if not email or not subject:
+            continue
+            
+        new_stage = int(stage) + 1
+        print(f"Sending Follow-up {new_stage} to {company} ({email})")
+        
+        body = ses.generate_followup(contact, new_stage, YOUR_NAME)
+        success = ses.send_followup(email, subject, body)
+        
+        if success and "row_number" in lead:
+            sheets.increment_followup(lead["row_number"], new_stage)
+            
+    print("--- Follow-up Batch Complete ---")
+
 
 if __name__ == "__main__":
     asyncio.run(run_batch())
