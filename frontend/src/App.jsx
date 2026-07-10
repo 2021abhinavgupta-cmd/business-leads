@@ -63,6 +63,18 @@ function App() {
     }
   }, [currentView]);
 
+  // Globally fetch costs on mount and periodically so the total cost pill is always accurate
+  useEffect(() => {
+    const fetchCosts = () => {
+      axios.get(`${API_BASE}/api/costs?t=${Date.now()}`).then(res => setCostLogs(res.data.costs)).catch(console.error);
+    };
+    fetchCosts();
+    const interval = setInterval(fetchCosts, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const totalAllTime = costLogs.reduce((acc, log) => acc + log.cost, 0);
+
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoadingSearch(true);
@@ -209,14 +221,6 @@ function App() {
     <>
       <header className="header">
         <p className="subtitle">Automated Web Scraping, AI Auditing & Outreach</p>
-        
-        {/* Session Cost Dashboard */}
-        <div style={{ position: 'absolute', top: '24px', right: '32px', background: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(10px)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} onClick={() => setCurrentView('cost')}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Session Cost</span>
-            <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#10b981' }}>${sessionTotalCost.toFixed(5)}</span>
-          </div>
-        </div>
       </header>
 
       <form className="search-box glass" onSubmit={handleSearch}>
@@ -424,7 +428,6 @@ function App() {
   );
 
   const renderCost = () => {
-    const totalAllTime = costLogs.reduce((acc, log) => acc + log.cost, 0);
     return (
       <div className="glass" style={{ padding: '24px' }}>
         <h2><DollarSign style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Lifetime Cost Dashboard</h2>
@@ -500,6 +503,15 @@ function App() {
           >
             <Clock size={18} /> History
           </button>
+          
+          {/* Global Total Cost Pill in Navbar */}
+          <div 
+            style={{ marginLeft: '16px', background: 'rgba(16, 185, 129, 0.1)', padding: '6px 16px', borderRadius: '50px', border: '1px solid rgba(16, 185, 129, 0.3)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+            onClick={() => setCurrentView('cost')}
+          >
+            <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Cost</span>
+            <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#10b981' }}>${totalAllTime.toFixed(5)}</span>
+          </div>
         </div>
       </nav>
 
