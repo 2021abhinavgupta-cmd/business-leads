@@ -277,7 +277,7 @@ class AIAuditor:
 
         try:
             model = genai.GenerativeModel(
-                "gemini-3-flash",
+                "gemini-3.5-flash",
                 generation_config=genai.types.GenerationConfig(
                     response_mime_type="application/json",
                 ),
@@ -344,7 +344,8 @@ class AIAuditor:
                 cost = 0.0002
                 
             return response.choices[0].message.content, cost
-        except Exception:
+        except Exception as e:
+            print(f"OpenAI error: {e}")
             return None
 
     def _call_anthropic(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
@@ -391,7 +392,8 @@ class AIAuditor:
                 cost = 0.0006
                 
             return message.content[0].text, cost
-        except Exception:
+        except Exception as e:
+            print(f"Anthropic error: {e}")
             return None
 
     def _call_openrouter(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
