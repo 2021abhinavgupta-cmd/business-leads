@@ -8,14 +8,18 @@ Uses free external services:
     - Fallback generic email patterns
 """
 
+import json
 import re
 import time
 from urllib.parse import urlparse, urljoin
 
+import anthropic
 import httpx
 from ddgs import DDGS
 from googlesearch import search as google_search
 from email_validator import validate_email, EmailNotValidError
+
+import config
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,6 +51,13 @@ class DecisionMaker:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+        # Last-resort strategy only — costs real tokens, so only wired up if
+        # a key is present and only ever called after every free strategy
+        # below has already failed.
+        if config.ANTHROPIC_API_KEY:
+            self._anthropic_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        else:
+            self._anthropic_client = None
 
     # ------------------------------------------------------------------
     # 1. Instagram handle discovery
@@ -97,7 +108,11 @@ class DecisionMaker:
 
         Strategy order:
             1. Custom website scraper looking for public emails.
-            2. Fallback to generic email patterns.
+            2. LinkedIn OSINT (CEO/founder name + guessed email).
+            3. General OSINT email dork.
+            4. Claude web_fetch (last resort, real API cost — only tried
+               once every free strategy above has failed).
+            5. Fallback to generic email patterns.
 
         Args:
             company_name: Business name.
@@ -147,8 +162,27 @@ class DecisionMaker:
                 "title": ""
             }
 
-        # Strategy 4 — generic email patterns
-        return self._fallback_patterns(domain, generic_name)
+        # Strategy 4 — Claude web_fetch (last resort, real API cost — only
+        # reached when the three free strategies above all came up empty,
+        # e.g. a JS-obfuscated email or contact info buried off the homepage)
+        claude_result = self._find_via_claude_web_fetch(company_name, website)
+        claude_cost = claude_result.get("cost", 0.0)
+
+        if claude_result.get("email"):
+            return {
+                "name": claude_result.get("name") or generic_name,
+                "email": claude_result["email"],
+                "title": "Founder / CEO" if claude_result.get("name") else "",
+                "cost": claude_cost,
+            }
+
+        # Strategy 5 — generic email patterns. Still surface claude_cost here
+        # if the web_fetch call above was actually made but came up empty —
+        # a "miss" still spent real tokens and needs to show up in costs.
+        result = self._fallback_patterns(domain, generic_name)
+        if claude_cost:
+            result["cost"] = claude_cost
+        return result
 
     # ------------------------------------------------------------------
     # Custom Website Scraper for Emails
@@ -337,6 +371,98 @@ class DecisionMaker:
                     except Exception:
                         pass
         return ""
+
+    # ------------------------------------------------------------------
+    # Claude web_fetch (last resort — real API cost)
+    # ------------------------------------------------------------------
+
+    def _find_via_claude_web_fetch(self, company_name: str, website: str) -> dict:
+        """
+        Last-resort contact discovery: has Claude itself fetch and read the
+        site via Anthropic's web_fetch server tool, and pull out a contact
+        email and (if named anywhere) a decision maker's name.
+
+        Only ever called after the free scraper + LinkedIn OSINT + email-dork
+        strategies above have all failed — e.g. a JS-obfuscated email, or
+        contact info buried on a page our regex-based scraper didn't check.
+        This costs real Anthropic API tokens (~$0.002-0.01/call), so it's
+        deliberately gated to the failure path rather than run on every lead.
+
+        web_fetch cannot render JavaScript (static HTML/text/PDF only), so
+        this still won't help on a fully client-rendered contact page — it's
+        a targeted patch for the "static HTML but regex-unfriendly" gap, not
+        a general scraping upgrade.
+        """
+        if not self._anthropic_client:
+            return {}
+
+        try:
+            response = self._anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                tools=[{"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2}],
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Fetch {website} and, if there's an obvious contact/about page linked from it, "
+                        f"fetch that too. Find the best real contact email address for the business "
+                        f"\"{company_name}\", and the name of the founder/CEO/owner if one is mentioned "
+                        "anywhere on the page. Reply with ONLY valid JSON, no markdown, no explanation, "
+                        'in exactly this shape: {"email": "...", "name": "..."}. Use an empty string for '
+                        "whichever you cannot find. Never invent or guess an email or name that isn't "
+                        "literally written on the page."
+                    ),
+                }],
+            )
+        except Exception as e:
+            print(f"[DecisionMaker] Claude web_fetch failed for {company_name}: {e}")
+            return {}
+
+        # Pricing: Claude Haiku 4.5, $0.25/1M input tokens, $1.25/1M output
+        # tokens — web_fetch's fetched page content counts as input tokens,
+        # so this can run noticeably higher than a plain text-only call.
+        try:
+            cost = (response.usage.input_tokens * 0.25 / 1_000_000) + (response.usage.output_tokens * 1.25 / 1_000_000)
+        except Exception:
+            cost = 0.005  # fallback estimate — a couple of fetched pages' worth of tokens
+
+        # The final text reply (after any web_fetch tool-use turns) is the
+        # last text block in the response content array.
+        raw_text = ""
+        for block in response.content:
+            if block.type == "text":
+                raw_text = block.text
+
+        parsed = self._parse_claude_json(raw_text)
+        if not parsed:
+            return {"cost": cost}
+
+        email = (parsed.get("email") or "").strip().lower()
+        name = (parsed.get("name") or "").strip()
+
+        if email:
+            if _is_junk_email(email):
+                email = ""
+            else:
+                try:
+                    email = validate_email(email, check_deliverability=False).normalized
+                except EmailNotValidError:
+                    email = ""
+
+        return {"email": email, "name": name, "cost": cost}
+
+    @staticmethod
+    def _parse_claude_json(raw: str) -> dict | None:
+        """Strip markdown fences and parse the first {...} block, same pattern as analyzer/ai_audit.py."""
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        try:
+            return json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError:
+            return None
 
     # ------------------------------------------------------------------
     # Fallback generic patterns

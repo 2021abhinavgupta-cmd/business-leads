@@ -234,6 +234,10 @@ async def audit_lead(
         contact = dm.get("name", "")
         email = dm.get("email", "")
 
+        dm_cost = dm.get("cost", 0.0)
+        if dm_cost:
+            await asyncio.to_thread(db.log_cost, "AI Web Fetch", dm_cost, description=f"Contact discovery for {req.company}")
+
         # Generate Draft
         YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")
         subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME)
