@@ -31,11 +31,12 @@ _HEADERS = [
     "Flaw 2",               # L: 12
     "Email Subject",        # M: 13
     "Email Body",           # N: 14
-    "Status",               # O: 15 (pending/drafted/approved/emailed/skipped/failed/replied)
+    "Status",               # O: 15 (pending/drafted/approved/emailed/skipped/failed/replied/unsubscribed)
     "Source",               # P: 16 (apollo/google_maps)
     "Sent At",              # Q: 17
     "Reply",                # R: 18
-    "Follow-up Stage"       # S: 19
+    "Follow-up Stage",      # S: 19
+    "Message ID"            # T: 20 (RFC Message-ID of the initial send, for follow-up threading)
 ]
 
 
@@ -61,20 +62,33 @@ class SheetsStorage:
             self.gc = gspread.service_account(filename=_CREDENTIALS_FILE)
 
         self.sheet = self.gc.open_by_key(config.GOOGLE_SHEETS_ID).sheet1
+        self.init_sheet()
 
     # ------------------------------------------------------------------
     # Initialization & Insertion
     # ------------------------------------------------------------------
 
     def init_sheet(self) -> None:
-        """Add headers if the sheet is completely empty."""
+        """
+        Add headers if the sheet is completely empty, or backfill any header
+        columns appended to _HEADERS after this sheet was first created (e.g.
+        "Message ID") so older sheets self-heal instead of silently writing
+        to an unlabeled column.
+        """
         try:
             first_row = self.sheet.row_values(1)
-            if not first_row:
-                self.sheet.append_row(_HEADERS)
         except Exception:
-            # If the sheet is empty, row_values might raise an exception
+            first_row = []
+
+        if not first_row:
             self.sheet.append_row(_HEADERS)
+            return
+
+        if len(first_row) < len(_HEADERS):
+            missing = _HEADERS[len(first_row):]
+            start_col = len(first_row) + 1
+            cell_range = f"{gspread.utils.rowcol_to_a1(1, start_col)}:{gspread.utils.rowcol_to_a1(1, len(_HEADERS))}"
+            self.sheet.update(cell_range, [missing])
 
     def add_lead(self, data: dict) -> None:
         """
@@ -114,6 +128,7 @@ class SheetsStorage:
             data.get("Sent At", ""),
             data.get("Reply", ""),
             data.get("Follow-up Stage", 0),
+            data.get("Message ID", ""),
         ]
         
         import time
@@ -270,6 +285,22 @@ class SheetsStorage:
         # Column O = 15
         self.sheet.update_cell(row_number, 15, "replied")
 
+    def mark_unsubscribed(self, row_number: int) -> None:
+        """
+        Update the lead's status to "unsubscribed" so run_batch/run_followups
+        skip it going forward (both only pick up "pending"/"emailed" rows).
+        """
+        # Column O = 15
+        self.sheet.update_cell(row_number, 15, "unsubscribed")
+
+    def set_message_id(self, row_number: int, message_id: str) -> None:
+        """
+        Store the RFC Message-ID of the email just sent (Col T) so a later
+        follow-up can thread against it via In-Reply-To/References.
+        """
+        # Column T = 20
+        self.sheet.update_cell(row_number, 20, message_id)
+
     def find_row_by_website(self, website: str) -> int:
         """
         Find the row number for a given website URL.
@@ -279,10 +310,27 @@ class SheetsStorage:
             # Website is in Column D (index 4)
             websites = self.sheet.col_values(4)
             target = website.lower().strip().rstrip('/')
-            
+
             for i, w in enumerate(websites):
                 if w.lower().strip().rstrip('/') == target:
                     return i + 1  # +1 because gspread is 1-indexed
+            return None
+        except Exception:
+            return None
+
+    def find_row_by_email(self, email: str) -> int:
+        """
+        Find the row number for a given email address.
+        Returns the row number (1-indexed) or None if not found.
+        """
+        try:
+            # Email is in Column C (index 3)
+            emails = self.sheet.col_values(3)
+            target = email.lower().strip()
+
+            for i, e in enumerate(emails):
+                if e.lower().strip() == target:
+                    return i + 1
             return None
         except Exception:
             return None

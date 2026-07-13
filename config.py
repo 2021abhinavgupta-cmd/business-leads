@@ -20,6 +20,12 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 # === Email ===
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
+# Public base URL of this deployment (e.g. "https://myapp.up.railway.app"),
+# used to build a one-click HTTPS unsubscribe link for the List-Unsubscribe
+# header (RFC 8058). If unset, outgoing emails still carry a mailto:
+# unsubscribe fallback, just without one-click support.
+APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
+
 # === Google Sheets ===
 GOOGLE_SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID")
 

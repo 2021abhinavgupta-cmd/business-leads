@@ -8,11 +8,14 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.application import MIMEApplication
+from email.utils import make_msgid, formatdate
+from urllib.parse import quote
 
 import boto3
 from botocore.exceptions import ClientError
 
 import config
+from storage import db
 
 
 class SESSender:
@@ -26,6 +29,28 @@ class SESSender:
             aws_secret_access_key=config.AWS_SECRET_KEY,
         )
         self.from_email = config.FROM_EMAIL
+
+    def _msgid_domain(self) -> str:
+        return (self.from_email or "").split("@")[-1] or "localhost"
+
+    def _unsubscribe_headers(self, to_email: str) -> dict:
+        """
+        Build List-Unsubscribe (+ List-Unsubscribe-Post) headers per RFC 2369 /
+        RFC 8058. Gmail/Yahoo bulk-sender rules require this header; without
+        it, mail is far more likely to land in spam regardless of content.
+        Always includes a mailto: fallback; adds a one-click HTTPS link (and
+        the List-Unsubscribe-Post flag that unlocks Gmail's one-click button)
+        only if APP_BASE_URL is configured, since that URL must be a live,
+        unauthenticated endpoint (see app.py's /unsubscribe route).
+        """
+        targets = [f"<mailto:{self.from_email}?subject=Unsubscribe>"]
+        headers = {}
+        if config.APP_BASE_URL:
+            url = f"{config.APP_BASE_URL}/unsubscribe?email={quote(to_email, safe='')}"
+            targets.append(f"<{url}>")
+            headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        headers["List-Unsubscribe"] = ", ".join(targets)
+        return headers
 
     def generate_email(
         self, company: str, contact_name: str, analysis: dict, your_name: str
@@ -71,33 +96,50 @@ class SESSender:
         body = "\n".join(body_lines)
         return subject, body
 
-    def send_email(self, to_email: str, subject: str, body: str, image_path: str = None) -> bool:
+    def send_email(self, to_email: str, subject: str, body: str, image_path: str = None):
         """
-        Send an email using AWS SES. If image_path is provided, sends as a MIME multipart
-        raw email with the image embedded inline.
+        Send an email using AWS SES, always as a multipart/mixed raw MIME
+        message so it carries both a plain-text part (spam filters weight a
+        missing text/plain alternative heavily) and List-Unsubscribe headers
+        (required by Gmail/Yahoo bulk-sender rules). If image_path is given,
+        the screenshot is embedded inline as a related part.
 
         Args:
             to_email: The recipient's email address.
             subject: The email subject.
-            body: The HTML email body.
+            body: The plain-text email body (also used to derive the HTML part).
             image_path: Optional path to an image to embed.
 
         Returns:
-            True if the email was successfully accepted by SES, False otherwise.
+            The RFC Message-ID (str, truthy) if SES accepted the email,
+            False otherwise (send failed or the recipient is suppressed).
         """
+        if db.is_suppressed(to_email):
+            print(f"Skipping {to_email}: on the unsubscribe/suppression list")
+            return False
+
         retries = 1
-        
+        unsub_headers = self._unsubscribe_headers(to_email)
+
         for attempt in range(retries + 1):
             try:
+                message_id = make_msgid(domain=self._msgid_domain())
+                msg = MIMEMultipart('mixed')
+                msg['Subject'] = subject
+                msg['From'] = self.from_email
+                msg['To'] = to_email
+                msg['Date'] = formatdate(localtime=True)
+                msg['Message-ID'] = message_id
+                for header, value in unsub_headers.items():
+                    msg[header] = value
+
+                # Convert plain text body to HTML for the email layout
+                html_body = body.replace('\n', '<br>')
+
+                alt = MIMEMultipart('alternative')
+                alt.attach(MIMEText(body, 'plain', 'utf-8'))
+
                 if image_path and os.path.exists(image_path):
-                    msg = MIMEMultipart('related')
-                    msg['Subject'] = subject
-                    msg['From'] = self.from_email
-                    msg['To'] = to_email
-                    
-                    # Convert plain text body to HTML for the email layout
-                    html_body = body.replace('\n', '<br>')
-                    
                     # Professional HTML Layout for the Email
                     html_with_img = f"""
                     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
@@ -111,48 +153,47 @@ class SESSender:
                         </div>
                     </div>
                     """
-                    msg_alternative = MIMEMultipart('alternative')
-                    msg.attach(msg_alternative)
-                    msg_alternative.attach(MIMEText(html_with_img, 'html'))
-                    
+                    alt.attach(MIMEText(html_with_img, 'html', 'utf-8'))
+
+                    related = MIMEMultipart('related')
+                    related.attach(alt)
+
                     with open(image_path, 'rb') as f:
                         img_data = f.read()
-                    
+
                     img = MIMEImage(img_data)
                     img.add_header('Content-ID', '<audit_img>')
                     img.add_header('Content-Disposition', 'inline')
-                    msg.attach(img)
-                    
-                    self.client.send_raw_email(
-                        Source=self.from_email,
-                        Destinations=[to_email],
-                        RawMessage={'Data': msg.as_string()}
-                    )
+                    related.attach(img)
+
+                    msg.attach(related)
                 else:
-                    # Fallback to standard plain text / basic HTML
-                    self.client.send_email(
-                        Source=self.from_email,
-                        Destination={"ToAddresses": [to_email]},
-                        Message={
-                            "Subject": {"Data": subject, "Charset": "UTF-8"},
-                            "Body": {
-                                "Html": {"Data": body, "Charset": "UTF-8"},
-                            },
-                        },
-                    )
-                return True
-                
+                    html_plain = f"""
+                    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
+                        {html_body}
+                    </div>
+                    """
+                    alt.attach(MIMEText(html_plain, 'html', 'utf-8'))
+                    msg.attach(alt)
+
+                self.client.send_raw_email(
+                    Source=self.from_email,
+                    Destinations=[to_email],
+                    RawMessage={'Data': msg.as_string()}
+                )
+                return message_id
+
             except ClientError as e:
                 error_code = e.response.get("Error", {}).get("Code", "")
                 error_message = e.response.get("Error", {}).get("Message", "")
-                
+
                 if "Daily message quota exceeded" in error_message or "LimitExceeded" in error_code:
                     raise Exception(f"SES Daily sending quota exceeded: {error_message}") from e
-                
+
                 if error_code == "MessageRejected":
                     print(f"Message rejected by SES: {error_message}")
                     return False
-                    
+
                 if error_code == "Throttling":
                     if attempt < retries:
                         time.sleep(5)
@@ -160,10 +201,10 @@ class SESSender:
                     else:
                         print(f"Throttling error after retry: {error_message}")
                         return False
-                        
+
                 print(f"SES ClientError ({error_code}): {error_message}")
                 return False
-                
+
             except Exception as e:
                 print(f"Unexpected error sending email: {e}")
                 return False
@@ -192,35 +233,52 @@ class SESSender:
             
         return "\n".join(body_lines)
 
-    def send_followup(self, to_email: str, original_subject: str, body: str) -> bool:
+    def send_followup(self, to_email: str, original_subject: str, body: str, in_reply_to: str = "") -> bool:
         """
-        Send a follow-up email threaded to the original.
+        Send a follow-up email, threaded to the original via real
+        In-Reply-To/References headers (not just a matching "Re:" subject —
+        that alone doesn't make Gmail/Outlook group it as one thread; it
+        just makes an unrelated new message look like a spoofed reply,
+        which reads worse to spam filters than an honest new email).
         """
+        if db.is_suppressed(to_email):
+            print(f"Skipping follow-up to {to_email}: on the unsubscribe/suppression list")
+            return False
+
         subject = original_subject
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
-            
+
+        unsub_headers = self._unsubscribe_headers(to_email)
         retries = 1
         for attempt in range(retries + 1):
             try:
-                # Use raw email to inject basic threading headers (optional but helpful)
-                # For simplicity, we rely on Subject matching which Gmail handles well.
                 html_body = body.replace('\n', '<br>')
                 html_template = f"""
                 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; color: #1a1a1a; line-height: 1.6;">
                     {html_body}
                 </div>
                 """
-                
-                self.client.send_email(
+
+                msg = MIMEMultipart('alternative')
+                msg['Subject'] = subject
+                msg['From'] = self.from_email
+                msg['To'] = to_email
+                msg['Date'] = formatdate(localtime=True)
+                msg['Message-ID'] = make_msgid(domain=self._msgid_domain())
+                if in_reply_to:
+                    msg['In-Reply-To'] = in_reply_to
+                    msg['References'] = in_reply_to
+                for header, value in unsub_headers.items():
+                    msg[header] = value
+
+                msg.attach(MIMEText(body, 'plain', 'utf-8'))
+                msg.attach(MIMEText(html_template, 'html', 'utf-8'))
+
+                self.client.send_raw_email(
                     Source=self.from_email,
-                    Destination={"ToAddresses": [to_email]},
-                    Message={
-                        "Subject": {"Data": subject, "Charset": "UTF-8"},
-                        "Body": {
-                            "Html": {"Data": html_template, "Charset": "UTF-8"},
-                        },
-                    },
+                    Destinations=[to_email],
+                    RawMessage={'Data': msg.as_string()}
                 )
                 return True
             except ClientError as e:

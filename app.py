@@ -3,8 +3,9 @@ import os
 import random
 import time
 from collections import defaultdict, deque
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -297,7 +298,8 @@ async def send_email(
             if os.path.exists(candidate_path):
                 image_path = candidate_path
 
-        success = await asyncio.to_thread(ses.send_email, req.email, req.subject, req.body, image_path=image_path)
+        message_id = await asyncio.to_thread(ses.send_email, req.email, req.subject, req.body, image_path=image_path)
+        success = bool(message_id)
 
         if success:
             def save_send_to_sheets():
@@ -305,13 +307,14 @@ async def send_email(
                     row = sheets.find_row_by_website(req.website)
                     if row:
                         sheets.update_status(row, "emailed")
+                        sheets.set_message_id(row, message_id)
                 except Exception as e:
                     print(f"Error updating send status in sheets: {e}")
             background_tasks.add_task(save_send_to_sheets)
 
             # Log exact costs and email history
             await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
-            await asyncio.to_thread(db.log_email, req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body)
+            await asyncio.to_thread(db.log_email, req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body, message_id=message_id)
 
             # Remove from drafts since it's sent
             await asyncio.to_thread(db.delete_draft_by_website, req.website)
@@ -321,6 +324,33 @@ async def send_email(
             raise HTTPException(status_code=500, detail="Failed to send via SES")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Deliberately unauthenticated (no require_api_key/rate_limit) and public at a
+# stable path — this is what SESSender._unsubscribe_headers() puts in the
+# List-Unsubscribe header, and RFC 8058 one-click unsubscribe requires mail
+# clients to be able to POST here with no auth and no confirmation step.
+@app.api_route("/unsubscribe", methods=["GET", "POST"])
+async def unsubscribe(request: Request, email: str = ""):
+    if not email:
+        raise HTTPException(status_code=400, detail="Missing email")
+
+    await asyncio.to_thread(db.add_suppression, email, "list-unsubscribe")
+    try:
+        row = await asyncio.to_thread(sheets.find_row_by_email, email)
+        if row:
+            await asyncio.to_thread(sheets.mark_unsubscribed, row)
+    except Exception as e:
+        print(f"Error marking unsubscribed in sheets: {e}")
+
+    if request.method == "POST":
+        # One-click (RFC 8058): mail client, not the user, does this POST — no body needed.
+        return {"status": "unsubscribed"}
+
+    return HTMLResponse(
+        "<html><body style='font-family: sans-serif; padding: 40px; text-align: center;'>"
+        "<p>You've been unsubscribed and won't receive further emails from us.</p>"
+        "</body></html>"
+    )
 
 @app.get("/api/costs")
 async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):

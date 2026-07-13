@@ -35,7 +35,7 @@ def init_db():
         body TEXT
     )
     """)
-    
+
     # Email Drafts Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS email_drafts (
@@ -49,7 +49,20 @@ def init_db():
         image_url TEXT
     )
     """)
-    
+
+    # Email Suppressions Table — unsubscribed / bounced / complained addresses.
+    # Checked before every send (SESSender.send_email/send_followup) so we
+    # never re-email someone who opted out, which is both a deliverability
+    # risk (spam complaints tank sender reputation) and a compliance one
+    # (CAN-SPAM/List-Unsubscribe-Post requires honoring opt-outs).
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS email_suppressions (
+        email TEXT PRIMARY KEY,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        reason TEXT
+    )
+    """)
+
     # ONE-TIME CLEANUP: Remove historical Google Maps API costs since it is now free.
     # Guarded by PRAGMA user_version so this DELETE runs once ever, not on every
     # init_db() call (init_db() is called from every public function in this module).
@@ -58,6 +71,13 @@ def init_db():
     if schema_version < 1:
         cursor.execute("DELETE FROM cost_logs WHERE category = 'Google Maps API'")
         cursor.execute("PRAGMA user_version = 1")
+
+    # Add message_id to email_history for follow-up threading (In-Reply-To/
+    # References headers) — added after the table already existed in the wild,
+    # so it's a migration, not part of the CREATE TABLE above.
+    if schema_version < 2:
+        cursor.execute("ALTER TABLE email_history ADD COLUMN message_id TEXT")
+        cursor.execute("PRAGMA user_version = 2")
 
     conn.commit()
     conn.close()
@@ -73,16 +93,36 @@ def log_cost(category: str, cost: float, description: str = ""):
     conn.commit()
     conn.close()
 
-def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str):
+def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = ""):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body) VALUES (?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, sender_email, subject, body)
+        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, sender_email, subject, body, message_id)
     )
     conn.commit()
     conn.close()
+
+def add_suppression(email: str, reason: str = "unsubscribe"):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO email_suppressions (email, reason) VALUES (?, ?)",
+        (email.strip().lower(), reason)
+    )
+    conn.commit()
+    conn.close()
+
+def is_suppressed(email: str) -> bool:
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM email_suppressions WHERE email = ?", (email.strip().lower(),))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
 
 def get_costs():
     init_db()

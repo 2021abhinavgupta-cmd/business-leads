@@ -40,7 +40,8 @@ async def send_approved_emails():
         if website:
             image_path, _html_content, _extra_audit_data = await generate_audit_screenshot(website, company)
 
-        success = ses.send_email(email, subject, body, image_path=image_path)
+        message_id = ses.send_email(email, subject, body, image_path=image_path)
+        success = bool(message_id)
 
         if image_path:
             try:
@@ -50,6 +51,7 @@ async def send_approved_emails():
 
         if success:
             sheets.update_status(row_number, "emailed")
+            sheets.set_message_id(row_number, message_id)
             print(f"  [SUCCESS] Emailed {company}")
         else:
             sheets.update_status(row_number, "failed_error")

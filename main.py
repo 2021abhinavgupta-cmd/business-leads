@@ -170,15 +170,16 @@ async def run_followups():
         email = lead.get("Email", "")
         subject = lead.get("Email Subject", "")
         stage = lead.get("Follow-up Stage", 0)
-        
+        original_message_id = lead.get("Message ID", "")
+
         if not email or not subject:
             continue
-            
+
         new_stage = int(stage) + 1
         print(f"Sending Follow-up {new_stage} to {company} ({email})")
-        
+
         body = ses.generate_followup(contact, new_stage, YOUR_NAME)
-        success = ses.send_followup(email, subject, body)
+        success = ses.send_followup(email, subject, body, in_reply_to=original_message_id)
         
         if success and "row_number" in lead:
             sheets.increment_followup(lead["row_number"], new_stage)
