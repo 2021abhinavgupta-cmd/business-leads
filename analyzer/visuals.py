@@ -193,8 +193,21 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
 
                 page = await context.new_page()
 
-                # Navigate and wait for page load (increased timeout for better accuracy)
-                response = await page.goto(url, timeout=60000, wait_until="load")
+                # wait_until="domcontentloaded" fires as soon as the page itself is
+                # parsed and usable — NOT "load", which waits for every single
+                # resource (analytics beacons, chat widgets, ad iframes, web fonts)
+                # to finish, and never fires within any reasonable timeout on a lot
+                # of real small-business sites even though the site is fine and
+                # loads instantly for an actual visitor. Live-verified: a site that
+                # curl'd back in 2.5s was being reported as fully "unreachable"
+                # (0/100 scores, "your website is down" email) purely because one
+                # hung third-party script kept the "load" event from ever firing.
+                # A generous timeout is still kept as a safety net for genuinely
+                # slow/dead servers — Playwright runs through a single shared
+                # browser (see _PLAYWRIGHT_SEMAPHORE below), so a truly unbounded
+                # wait on one bad site would freeze every other lead queued behind
+                # it, not just fail the one lead.
+                response = await page.goto(url, timeout=90000, wait_until="domcontentloaded")
 
                 # Response headers, reused for the security-headers check — this is
                 # the request we're already making for the screenshot, so capturing
@@ -241,7 +254,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 for extra_url in extra_urls:
                     label = _page_label(extra_url)
                     try:
-                        await page.goto(extra_url, timeout=30000, wait_until="load")
+                        await page.goto(extra_url, timeout=45000, wait_until="domcontentloaded")
                         try:
                             await page.wait_for_load_state("networkidle", timeout=3000)
                         except Exception:
@@ -261,7 +274,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # site will actually hit, since most traffic is from phones.
                 mobile_screenshot_bytes = None
                 try:
-                    await page.goto(final_url, timeout=30000, wait_until="load")
+                    await page.goto(final_url, timeout=45000, wait_until="domcontentloaded")
                     await page.set_viewport_size({"width": 390, "height": 844})
                     try:
                         await page.wait_for_load_state("networkidle", timeout=3000)
