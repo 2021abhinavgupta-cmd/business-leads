@@ -1,6 +1,7 @@
 """
-AI Audit module — analyses leads using a Claude Haiku → Gemini → GPT-4o-mini
-fallback chain and returns structured flaw reports.
+AI Audit module — analyses leads using a Claude Haiku → Gemini 3 Flash →
+GPT-4o-mini → OpenRouter (free) fallback chain and returns structured flaw
+reports.
 
 The prompt is populated with real Instagram + Website data so the AI
 produces specific, number-backed audit results rather than generic advice.
@@ -48,6 +49,15 @@ class AIAuditor:
         else:
             self._anthropic_client = None
 
+        # Configure OpenRouter (free-tier fallback, OpenAI-compatible endpoint)
+        if config.OPENROUTER_API_KEY:
+            self._openrouter_client = openai.OpenAI(
+                api_key=config.OPENROUTER_API_KEY,
+                base_url="https://openrouter.ai/api/v1",
+            )
+        else:
+            self._openrouter_client = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -82,11 +92,12 @@ class AIAuditor:
             except Exception as e:
                 print(f"Failed to read image for AI audit: {e}")
 
-        # Fallback chain: Claude Haiku → Gemini → GPT-4o-mini
+        # Fallback chain: Claude Haiku → Gemini → GPT-4o-mini → OpenRouter (free)
         for call_fn in (
             self._call_anthropic,
             self._call_gemini,
             self._call_openai,
+            self._call_openrouter,
         ):
             result = call_fn(prompt, base64_image)
             if result is None:
@@ -231,13 +242,19 @@ class AIAuditor:
 
     def _call_gemini(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
         """
-        Call Google Gemini Flash (``gemini-2.0-flash``).
+        Call Google Gemini (``gemini-3-flash``), forcing native JSON output
+        so we don't rely on regex-stripping markdown fences from the reply.
         """
         if not config.GEMINI_API_KEY:
             return None
 
         try:
-            model = genai.GenerativeModel("gemini-2.0-flash")
+            model = genai.GenerativeModel(
+                "gemini-3-flash",
+                generation_config=genai.types.GenerationConfig(
+                    response_mime_type="application/json",
+                ),
+            )
             content = [prompt]
             if base64_image:
                 content.append({
@@ -245,15 +262,15 @@ class AIAuditor:
                     "data": base64_image
                 })
             response = model.generate_content(content)
-            
-            # Pricing: $0.075/1M input, $0.30/1M output
+
+            # Pricing (paid tier fallback if free quota exhausted): ~$0.075/1M input, $0.30/1M output
             try:
                 inp = response.usage_metadata.prompt_token_count
                 out = response.usage_metadata.candidates_token_count
                 cost = (inp * 0.075 / 1_000_000) + (out * 0.30 / 1_000_000)
             except Exception:
                 cost = 0.0001 # fallback estimate
-                
+
             return response.text, cost
         except Exception as e:
             print(f"Gemini error: {e}")
@@ -278,6 +295,7 @@ class AIAuditor:
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": content}],
                 temperature=0.7,
+                response_format={"type": "json_object"},
             )
             
             # Pricing: $0.150/1M input, $0.60/1M output
@@ -294,7 +312,7 @@ class AIAuditor:
 
     def _call_anthropic(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
         """
-        Call Anthropic Claude Haiku.
+        Call Anthropic Claude Haiku 4.5.
         """
         if not self._anthropic_client:
             return None
@@ -313,7 +331,7 @@ class AIAuditor:
             content.append({"type": "text", "text": prompt})
 
             message = self._anthropic_client.messages.create(
-                model="claude-3-5-haiku-latest",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": content}],
             )
@@ -328,6 +346,37 @@ class AIAuditor:
                 
             return message.content[0].text, cost
         except Exception:
+            return None
+
+    def _call_openrouter(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
+        """
+        Call a free-tier OpenRouter model (``google/gemma-4-31b-it:free``).
+
+        Last resort: only reached if Claude, Gemini, and GPT-4o-mini all
+        fail or run out of quota — the free-tier model is weaker than the
+        paid providers above, but a weaker audit beats no audit at all.
+        """
+        if not self._openrouter_client:
+            return None
+
+        try:
+            content = [{"type": "text", "text": prompt}]
+            if base64_image:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
+
+            response = self._openrouter_client.chat.completions.create(
+                model="google/gemma-4-31b-it:free",
+                messages=[{"role": "user", "content": content}],
+                temperature=0.7,
+                response_format={"type": "json_object"},
+            )
+
+            return response.choices[0].message.content, 0.0  # free tier
+        except Exception as e:
+            print(f"OpenRouter error: {e}")
             return None
 
     # ------------------------------------------------------------------
