@@ -15,6 +15,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import extruct
 import httpx
@@ -201,6 +202,8 @@ class WebsiteScraper:
         readability_score = self._check_readability(parsed["homepage_text"])
         security_flaws = self._check_security_headers(extra.get("response_headers", {}), has_ssl)
         seo_page = await self._run_pyseoanalyzer(url)
+        robots_blocked = await self._check_robots_disallow_all(url)
+        missing_alt_count = self._check_missing_alt_images(html)
 
         # Step 4 — Reconcile every signal above into one ranked flaw list,
         # instead of feeding the AI prompt raw, unreconciled tool output.
@@ -223,6 +226,13 @@ class WebsiteScraper:
             broken_links=extra.get("broken_links", []),
             font_families=extra.get("font_families", []),
             stretched_images=extra.get("stretched_images", 0),
+            robots_blocked=robots_blocked,
+            missing_alt_count=missing_alt_count,
+            console_errors=extra.get("console_errors", []),
+            mixed_content_urls=extra.get("mixed_content_urls", []),
+            mobile_horizontal_overflow=extra.get("mobile_horizontal_overflow", False),
+            duplicate_title_pages=extra.get("duplicate_title_pages", []),
+            duplicate_meta_pages=extra.get("duplicate_meta_pages", []),
         )
 
         return WebsiteData(
@@ -577,6 +587,56 @@ class WebsiteScraper:
             print(f"[Extruct] Structured data check failed: {e}")
             return False
 
+    async def _check_robots_disallow_all(self, url: str) -> bool:
+        """
+        Fetch /robots.txt and check for a blanket "Disallow: /" under a
+        User-agent block that applies to us (User-agent: *). This is a much
+        bigger and more common SEO killer than the <meta name="robots"
+        content="noindex"> check above — it silently removes the entire site
+        from Google, and unlike the meta tag most site owners never notice
+        because the page itself renders completely normally in a browser.
+        """
+        try:
+            parsed = urlparse(self._normalise_url(url))
+            robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+            response = await self.client.get(robots_url, timeout=5)
+            if response.status_code != 200:
+                return False
+            lines = response.text.splitlines()
+        except Exception:
+            return False
+
+        applies_to_us = False
+        for line in lines:
+            line = line.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().lower()
+            value = value.strip()
+            if key == "user-agent":
+                applies_to_us = value == "*"
+            elif key == "disallow" and applies_to_us and value == "/":
+                return True
+        return False
+
+    @staticmethod
+    def _check_missing_alt_images(html: str) -> int:
+        """
+        Count <img> tags missing the alt attribute ENTIRELY — not alt="",
+        which is the correct WCAG pattern for decorative images and must not
+        be flagged. This is deliberately narrower than pyseoanalyzer's own
+        "missing alt tag" warning, which is filtered out in _build_flaws
+        below precisely because it false-positives on alt="" images (see the
+        comment there) — this check exists to recover that signal properly
+        instead of just discarding it.
+        """
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            return sum(1 for img in soup.find_all("img") if img.get("alt") is None)
+        except Exception:
+            return 0
+
     @staticmethod
     def _check_readability(text: str) -> float | None:
         """Flesch Reading Ease score of the homepage copy, or None if there's too little text to score meaningfully."""
@@ -673,6 +733,13 @@ class WebsiteScraper:
         broken_links: list[dict],
         font_families: list[str] | None = None,
         stretched_images: int = 0,
+        robots_blocked: bool = False,
+        missing_alt_count: int = 0,
+        console_errors: list[str] | None = None,
+        mixed_content_urls: list[str] | None = None,
+        mobile_horizontal_overflow: bool = False,
+        duplicate_title_pages: list[str] | None = None,
+        duplicate_meta_pages: list[str] | None = None,
     ) -> list[Flaw]:
         """
         Reconcile every audit signal (Lighthouse/PageSpeed, HTML parsing,
@@ -807,6 +874,34 @@ class WebsiteScraper:
                 "high" if count > 5 else "medium",
                 f"{count} broken link(s)/image(s) found on the homepage, e.g. {example}",
             ))
+
+        if robots_blocked:
+            flaws.append(Flaw("seo", "critical", "robots.txt blocks ALL search engines from crawling the site (\"Disallow: /\" under \"User-agent: *\") — the site is likely invisible on Google entirely, even though it renders completely normally in a browser so nobody would notice by just looking at it."))
+
+        if missing_alt_count >= 1:
+            plural = "s" if missing_alt_count > 1 else ""
+            flaws.append(Flaw("accessibility", "medium", f"{missing_alt_count} image{plural} missing an alt attribute entirely (not just an empty alt for decorative images) — screen reader users get no description at all, and it hurts image SEO."))
+
+        if console_errors:
+            count = len(console_errors)
+            example = console_errors[0][:150]
+            flaws.append(Flaw("tech", "high" if count >= 5 else "medium", f"{count} JavaScript error(s) detected while the page loaded (e.g. \"{example}\") — often means a broken button, form, or other interactive feature that visitors can't actually use."))
+
+        if mixed_content_urls:
+            count = len(mixed_content_urls)
+            example = mixed_content_urls[0]
+            flaws.append(Flaw("security", "high", f"{count} resource(s) loaded over insecure HTTP on an HTTPS page (mixed content), e.g. {example} — browsers show a partial \"Not Secure\" warning and may silently block the resource."))
+
+        if mobile_horizontal_overflow:
+            flaws.append(Flaw("performance", "high", "Page requires horizontal scrolling on a mobile phone screen — some content is wider than the viewport, a jarring experience for the majority of visitors who are on mobile."))
+
+        if duplicate_title_pages and len(set(duplicate_title_pages)) >= 2:
+            pages = ", ".join(sorted(set(duplicate_title_pages)))
+            flaws.append(Flaw("seo", "medium", f"Multiple pages ({pages}) share the exact same page title — search engines can't tell them apart, which hurts rankings for both."))
+
+        if duplicate_meta_pages and len(set(duplicate_meta_pages)) >= 2:
+            pages = ", ".join(sorted(set(duplicate_meta_pages)))
+            flaws.append(Flaw("seo", "low", f"Multiple pages ({pages}) share the exact same meta description — Google may show a generic or duplicate snippet in search results for one of them."))
 
         return rank_flaws(flaws)
 

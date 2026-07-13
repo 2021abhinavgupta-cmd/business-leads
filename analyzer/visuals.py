@@ -127,15 +127,29 @@ def _page_label(url: str) -> str:
 async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes) -> dict:
     """
     Run every per-page check (accessibility, broken links, fonts, stretched
-    images) against whatever page is currently loaded in *page*. Violations
-    and broken links get tagged with *label* when it's not the homepage, so
-    the AI prompt (and the human reading the email) knows which page a flaw
-    came from.
+    images, title/meta-description) against whatever page is currently
+    loaded in *page*. Violations and broken links get tagged with *label*
+    when it's not the homepage, so the AI prompt (and the human reading the
+    email) knows which page a flaw came from.
     """
     violations, visual_flaw = await _run_axe_audit(page)
     broken_links = await _check_broken_assets(page, context)
     font_families = await _check_font_consistency(page)
     stretched_images = await _check_stretched_images(page)
+
+    try:
+        title = await page.title()
+    except Exception:
+        title = ""
+    try:
+        meta_description = await page.evaluate(
+            """() => {
+                const tag = document.querySelector('meta[name="description"]');
+                return tag ? tag.content.trim() : '';
+            }"""
+        )
+    except Exception:
+        meta_description = ""
 
     if label != "/":
         for v in violations:
@@ -151,7 +165,24 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
         "broken_links": broken_links,
         "font_families": font_families,
         "stretched_images": stretched_images,
+        "title": title,
+        "meta_description": meta_description,
     }
+
+
+def _find_duplicate_page_labels(pages_checked: list[dict], key: str) -> list[str]:
+    """
+    Return the page labels that share an identical (non-empty) *key* value
+    with at least one other crawled page — e.g. two pages with the exact
+    same <title>, a common thin-SEO mistake that's only detectable now that
+    multiple pages get crawled per lead.
+    """
+    from collections import Counter
+
+    pairs = [(p["label"], (p.get(key) or "").strip()) for p in pages_checked]
+    pairs = [(label, value) for label, value in pairs if value]
+    counts = Counter(value for _, value in pairs)
+    return [label for label, value in pairs if counts[value] > 1]
 
 
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
@@ -175,6 +206,10 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         - response_headers: dict of HTTP response headers from the homepage load (for security-header checks)
         - pages_audited: list of page paths that were actually crawled
         - mobile_image_path: path to the separate mobile-viewport screenshot, or None if it failed
+        - console_errors: JS console error messages captured across every page visited
+        - mixed_content_urls: HTTP resource URLs loaded on an HTTPS page
+        - mobile_horizontal_overflow: True if the homepage requires horizontal scrolling at 390px width
+        - duplicate_title_pages / duplicate_meta_pages: page labels sharing an identical title/meta description
 
     Returns (None, None, None) on failure.
     """
@@ -192,6 +227,22 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 )
 
                 page = await context.new_page()
+
+                # Listeners persist for the page's whole lifetime, so attaching
+                # them once here captures console errors and mixed-content
+                # requests across the homepage, every extra page crawled below,
+                # AND the mobile-viewport revisit — no need to re-attach.
+                console_errors: list[str] = []
+                page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" and len(console_errors) < 10 else None)
+
+                mixed_content_urls: set[str] = set()
+                def _track_mixed_content(request):
+                    try:
+                        if request.url.startswith("http://") and page.url.startswith("https://"):
+                            mixed_content_urls.add(request.url)
+                    except Exception:
+                        pass
+                page.on("request", _track_mixed_content)
 
                 # wait_until="domcontentloaded" fires as soon as the page itself is
                 # parsed and usable — NOT "load", which waits for every single
@@ -272,7 +323,14 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # mobile-only problems (overflow, unreadable font, tap targets
                 # too close together) that most visitors to a small-business
                 # site will actually hit, since most traffic is from phones.
+                # Also runs axe-core AGAIN at mobile width — WCAG's tap-target
+                # rules behave differently at 390px than at 1280px, so this
+                # catches mobile-specific violations the desktop pass misses —
+                # plus a direct horizontal-overflow check, which desktop can
+                # never trigger at 1280px on a responsive site.
                 mobile_screenshot_bytes = None
+                mobile_horizontal_overflow = False
+                mobile_violations: list[dict] = []
                 try:
                     await page.goto(final_url, timeout=45000, wait_until="domcontentloaded")
                     await page.set_viewport_size({"width": 390, "height": 844})
@@ -282,8 +340,19 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                         pass
                     await page.wait_for_timeout(500)
                     mobile_screenshot_bytes = await page.screenshot(full_page=False)
+
+                    try:
+                        mobile_horizontal_overflow = await page.evaluate(
+                            "() => document.documentElement.scrollWidth > window.innerWidth + 5"
+                        )
+                    except Exception:
+                        pass
+
+                    mobile_violations, _ = await _run_axe_audit(page)
+                    for v in mobile_violations:
+                        v["help"] = f"{v.get('help', '')} (on mobile view)"
                 except Exception as e:
-                    print(f"[Visuals] Mobile screenshot failed (non-critical): {e}")
+                    print(f"[Visuals] Mobile screenshot/checks failed (non-critical): {e}")
 
                 await browser.close()
 
@@ -326,12 +395,15 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
         # Aggregate signals across every page audited, most severe first.
-        all_violations = [v for p in pages_checked for v in p["violations"]]
+        all_violations = [v for p in pages_checked for v in p["violations"]] + mobile_violations
         all_violations.sort(key=lambda v: _SEVERITY_RANK.get(v.get("impact", ""), 4))
 
         all_broken_links = [l for p in pages_checked for l in p["broken_links"]]
         all_font_families = sorted({f for p in pages_checked for f in p["font_families"]})
         total_stretched_images = sum(p["stretched_images"] for p in pages_checked)
+
+        duplicate_title_pages = _find_duplicate_page_labels(pages_checked, "title")
+        duplicate_meta_pages = _find_duplicate_page_labels(pages_checked, "meta_description")
 
         extra_audit_data = {
             "accessibility_violations": all_violations[:15],
@@ -341,6 +413,11 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "visual_flaw_context": visual_flaw_context,
             "font_families": all_font_families,
             "stretched_images": total_stretched_images,
+            "console_errors": console_errors,
+            "mixed_content_urls": sorted(mixed_content_urls)[:5],
+            "mobile_horizontal_overflow": bool(mobile_horizontal_overflow),
+            "duplicate_title_pages": duplicate_title_pages,
+            "duplicate_meta_pages": duplicate_meta_pages,
             "final_url": final_url,
             "pages_audited": [p["label"] for p in pages_checked],
             "mobile_image_path": mobile_filepath,
