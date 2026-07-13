@@ -151,11 +151,15 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
     except Exception:
         meta_description = ""
 
-    if label != "/":
-        for v in violations:
-            v["help"] = f"{v.get('help', '')} (on {label} page)"
-        for l in broken_links:
-            l["found_on"] = label
+    # Tag with the source page via a clean separate key (not baked into
+    # "help"/appended to the text) so violations/links found on multiple
+    # pages can be consolidated into one entry later instead of appearing
+    # as N near-duplicate flaws — see _consolidate_by_id in
+    # generate_audit_screenshot below.
+    for v in violations:
+        v["page"] = label
+    for l in broken_links:
+        l["found_on"] = label
 
     return {
         "label": label,
@@ -168,6 +172,34 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
         "title": title,
         "meta_description": meta_description,
     }
+
+
+def _consolidate_by_key(items: list[dict], key: str, page_field: str) -> list[dict]:
+    """
+    Merge items (accessibility violations or broken links) that are the SAME
+    underlying issue found on multiple pages into ONE entry with a combined
+    "pages" list, instead of one near-duplicate entry per page. Without
+    this, the same violation/link on N pages occupies N slots in the
+    top-15 severity-ranked list the AI picks its "2-3 most severe" flaws
+    from — live-observed exactly this on a real site: "Links must have
+    discernible text" appeared 3 separate times (homepage, /about-us,
+    mobile view) for what is really one fix.
+    """
+    merged: dict = {}
+    order: list = []
+    for item in items:
+        k = item.get(key) or item.get("help", "")
+        if k not in merged:
+            merged[k] = dict(item)
+            merged[k]["pages"] = []
+            order.append(k)
+        entry = merged[k]
+        page = item.get(page_field)
+        if page and page not in entry["pages"]:
+            entry["pages"].append(page)
+        if "nodes_count" in item:
+            entry["nodes_count"] = max(entry.get("nodes_count", 0), item.get("nodes_count", 0))
+    return [merged[k] for k in order]
 
 
 def _find_duplicate_page_labels(pages_checked: list[dict], key: str) -> list[str]:
@@ -350,7 +382,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
 
                     mobile_violations, _ = await _run_axe_audit(page)
                     for v in mobile_violations:
-                        v["help"] = f"{v.get('help', '')} (on mobile view)"
+                        v["page"] = "mobile view"
                 except Exception as e:
                     print(f"[Visuals] Mobile screenshot/checks failed (non-critical): {e}")
 
@@ -395,10 +427,20 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
         # Aggregate signals across every page audited, most severe first.
-        all_violations = [v for p in pages_checked for v in p["violations"]] + mobile_violations
+        # Consolidated by id/url first — the same violation or broken link
+        # found on multiple pages becomes ONE entry with a combined page
+        # list, not N near-duplicate entries crowding the top-15 the AI
+        # picks its "2-3 most severe" flaws from.
+        all_violations = _consolidate_by_key(
+            [v for p in pages_checked for v in p["violations"]] + mobile_violations,
+            key="id", page_field="page",
+        )
         all_violations.sort(key=lambda v: _SEVERITY_RANK.get(v.get("impact", ""), 4))
 
-        all_broken_links = [l for p in pages_checked for l in p["broken_links"]]
+        all_broken_links = _consolidate_by_key(
+            [l for p in pages_checked for l in p["broken_links"]],
+            key="url", page_field="found_on",
+        )
         all_font_families = sorted({f for p in pages_checked for f in p["font_families"]})
         total_stretched_images = sum(p["stretched_images"] for p in pages_checked)
 

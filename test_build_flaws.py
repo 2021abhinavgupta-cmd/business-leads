@@ -64,17 +64,25 @@ def test_noindexed_is_critical():
 
 def test_axe_violation_severity_mapping():
     violations = [
-        {"impact": "critical", "help": "Critical issue", "nodes_count": 1},
-        {"impact": "serious", "help": "Serious issue", "nodes_count": 2},
-        {"impact": "moderate", "help": "Moderate issue", "nodes_count": 3},
-        {"impact": "minor", "help": "Minor issue", "nodes_count": 4},
+        {"impact": "critical", "help": "Critical issue", "nodes_count": 1, "pages": ["/"]},
+        {"impact": "serious", "help": "Serious issue", "nodes_count": 2, "pages": ["/"]},
+        {"impact": "moderate", "help": "Moderate issue", "nodes_count": 3, "pages": ["/"]},
+        {"impact": "minor", "help": "Minor issue", "nodes_count": 4, "pages": ["/"]},
     ]
     flaws = _build(accessibility_violations=violations)
     by_desc = {f.description: f.severity for f in flaws}
-    assert by_desc["[CRITICAL] Critical issue (1 instance(s) on the page)"] == "critical"
-    assert by_desc["[SERIOUS] Serious issue (2 instance(s) on the page)"] == "high"
-    assert by_desc["[MODERATE] Moderate issue (3 instance(s) on the page)"] == "medium"
-    assert by_desc["[MINOR] Minor issue (4 instance(s) on the page)"] == "low"
+    assert by_desc["[CRITICAL] Critical issue (1 instance(s))"] == "critical"
+    assert by_desc["[SERIOUS] Serious issue (2 instance(s))"] == "high"
+    assert by_desc["[MODERATE] Moderate issue (3 instance(s))"] == "medium"
+    assert by_desc["[MINOR] Minor issue (4 instance(s))"] == "low"
+
+
+def test_axe_violation_consolidated_across_pages_shows_page_list():
+    violation = {"impact": "serious", "help": "Links must have discernible text", "nodes_count": 2, "pages": ["/", "/about-us", "mobile view"]}
+    flaws = _build(accessibility_violations=[violation])
+    matches = [f for f in flaws if "Links must have discernible text" in f.description]
+    assert len(matches) == 1
+    assert "across /, /about-us, mobile view" in matches[0].description
 
 
 def test_broken_links_aggregate_to_one_flaw():

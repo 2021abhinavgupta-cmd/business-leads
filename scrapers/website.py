@@ -999,19 +999,32 @@ class WebsiteScraper:
         # accessibility number is dropped from the prompt entirely).
         for violation in accessibility_violations[:5]:
             impact = violation.get("impact", "minor")
+            # Consolidated across pages by analyzer/visuals.py's
+            # _consolidate_by_key — "pages" lists every page this exact
+            # violation was found on, instead of one duplicate Flaw per page.
+            pages = [p for p in (violation.get("pages") or []) if p]
+            if len(pages) > 1:
+                page_note = f" across {', '.join(pages)}"
+            elif pages and pages[0] != "/":
+                page_note = f" on the {pages[0]} page"
+            else:
+                page_note = ""
             flaws.append(Flaw(
                 "accessibility",
                 _AXE_SEVERITY_MAP.get(impact, "low"),
-                f"[{impact.upper()}] {violation.get('help', '')} ({violation.get('nodes_count', 0)} instance(s) on the page)",
+                f"[{impact.upper()}] {violation.get('help', '')} ({violation.get('nodes_count', 0)} instance(s){page_note})",
             ))
 
         if broken_links:
+            # Consolidated by URL across pages (see _consolidate_by_key) —
+            # count is now distinct broken URLs, not one entry per page it
+            # happens to appear on.
             count = len(broken_links)
             example = broken_links[0].get("url", "")
             flaws.append(Flaw(
                 "content",
                 "high" if count > 5 else "medium",
-                f"{count} broken link(s)/image(s) found on the homepage, e.g. {example}",
+                f"{count} broken link(s)/image(s) found across the pages we checked, e.g. {example}",
             ))
 
         if robots_blocked:
