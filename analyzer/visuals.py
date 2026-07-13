@@ -2,6 +2,9 @@ import hashlib
 import os
 import asyncio
 from io import BytesIO
+from urllib.parse import urljoin, urlparse
+
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw
 
@@ -14,6 +17,15 @@ os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 # Global Semaphore to limit Playwright concurrency to 1.
 # This prevents Out of Memory (OOM) crashes on Railway's 500MB instances.
 _PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
+
+# Beyond the homepage, also crawl up to this many internal about/services/
+# contact-style pages so accessibility, broken-link, and visual checks
+# aren't limited to just the homepage. Kept small (each page adds a full
+# Playwright navigation + axe-core run) to stay within Railway's 500MB
+# instance budget alongside the single-browser semaphore above.
+_EXTRA_PAGE_KEYWORDS = ['about', 'service', 'pricing', 'contact', 'product', 'work', 'solution']
+_MAX_EXTRA_PAGES = 2
+_SEVERITY_RANK = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
 
 
 def normalise_url(url: str) -> str:
@@ -34,34 +46,104 @@ def make_screenshot_filename(company_name: str, url: str) -> str:
     return f"{safe_name}_{url_hash}_audit.jpg"
 
 
+def _discover_extra_urls(html: str, base_url: str) -> list[str]:
+    """
+    Find up to _MAX_EXTRA_PAGES internal about/services/contact-style links
+    on the homepage worth auditing too, so accessibility/broken-link/visual
+    checks aren't limited to just the homepage.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    base_netloc = urlparse(base_url).netloc
+
+    found = []
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"].lower()
+        if not any(kw in href for kw in _EXTRA_PAGE_KEYWORDS):
+            continue
+        full_url = urljoin(base_url, anchor["href"])
+        if urlparse(full_url).netloc != base_netloc:
+            continue
+        normalised = full_url.split("#")[0].rstrip("/")
+        if normalised in seen or normalised == base_url.rstrip("/"):
+            continue
+        seen.add(normalised)
+        found.append(full_url)
+        if len(found) >= _MAX_EXTRA_PAGES:
+            break
+    return found
+
+
+def _page_label(url: str) -> str:
+    path = urlparse(url).path.rstrip("/")
+    return path if path else "/"
+
+
+async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes) -> dict:
+    """
+    Run every per-page check (accessibility, broken links, fonts, stretched
+    images) against whatever page is currently loaded in *page*. Violations
+    and broken links get tagged with *label* when it's not the homepage, so
+    the AI prompt (and the human reading the email) knows which page a flaw
+    came from.
+    """
+    violations, visual_flaw = await _run_axe_audit(page)
+    broken_links = await _check_broken_assets(page, context)
+    font_families = await _check_font_consistency(page)
+    stretched_images = await _check_stretched_images(page)
+
+    if label != "/":
+        for v in violations:
+            v["help"] = f"{v.get('help', '')} (on {label} page)"
+        for l in broken_links:
+            l["found_on"] = label
+
+    return {
+        "label": label,
+        "screenshot_bytes": screenshot_bytes,
+        "violations": violations,
+        "visual_flaw": visual_flaw,
+        "broken_links": broken_links,
+        "font_families": font_families,
+        "stretched_images": stretched_images,
+    }
+
+
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
     """
-    Takes a mobile screenshot of the URL, runs accessibility + broken link audits,
-    and returns a tuple of (filepath, html_content, extra_audit_data).
-    
+    Takes a mobile screenshot of the URL, runs accessibility + broken link
+    audits across the homepage plus up to _MAX_EXTRA_PAGES internal pages
+    (about/services/contact-style links found on the homepage), and returns
+    a tuple of (filepath, html_content, extra_audit_data).
+
+    The attached screenshot is whichever audited page had the most severe
+    accessibility violation with a valid bounding box, falling back to the
+    homepage if no page had one.
+
     extra_audit_data contains:
-        - accessibility_violations: list of axe-core violations
-        - broken_links: list of broken URLs found on the page
-        - perf_timing: dict with real browser timing metrics
-        - response_headers: dict of HTTP response headers from the page load (for security-header checks)
-    
+        - accessibility_violations: list of axe-core violations across all audited pages
+        - broken_links: list of broken URLs found across all audited pages
+        - perf_timing: dict with real browser timing metrics (homepage only)
+        - response_headers: dict of HTTP response headers from the homepage load (for security-header checks)
+        - pages_audited: list of page paths that were actually crawled
+
     Returns (None, None, None) on failure.
     """
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
-        
+
     try:
         async with _PLAYWRIGHT_SEMAPHORE:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                
+
                 context = await browser.new_context(
                     viewport={'width': 1280, 'height': 800},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
-                
+
                 page = await context.new_page()
-                
+
                 # Navigate and wait for page load (increased timeout for better accuracy)
                 response = await page.goto(url, timeout=60000, wait_until="load")
 
@@ -91,54 +173,87 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
 
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
-                
+
                 # --- 2. Grab fully rendered HTML ---
                 html_content = await page.content()
-                
+
                 # --- 3. Capture real performance timing from the browser ---
                 perf_timing = await _get_performance_timing(page)
-                
-                # --- 4. Run axe-core accessibility audit ---
-                accessibility_violations, visual_flaw = await _run_axe_audit(page)
-                
-                # --- 5. Check for broken links/images ---
-                broken_links = await _check_broken_assets(page, context)
 
-                # --- 6. Visual polish checks (typography consistency, stretched images) ---
-                font_families = await _check_font_consistency(page)
-                stretched_images = await _check_stretched_images(page)
+                # --- 4. Run every per-page check on the homepage ---
+                pages_checked = [await _audit_current_page(page, context, "/", screenshot_bytes)]
+
+                # --- 5. Crawl a few internal pages and run the same checks on them ---
+                extra_urls = _discover_extra_urls(html_content, final_url)
+                for extra_url in extra_urls:
+                    label = _page_label(extra_url)
+                    try:
+                        await page.goto(extra_url, timeout=30000, wait_until="load")
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(500)
+                        extra_screenshot = await page.screenshot(full_page=False)
+                        pages_checked.append(await _audit_current_page(page, context, label, extra_screenshot))
+                    except Exception as e:
+                        # A slow/broken subpage shouldn't sink the whole audit —
+                        # just skip it and keep whatever pages did succeed.
+                        print(f"[Visuals] Skipping extra page {extra_url}: {e}")
 
                 await browser.close()
-            
-        # Draw analysis box on the image
-        img = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
-        
+
+        # Pick whichever audited page has the most severe visual flaw (red-box
+        # evidence) to attach to the email — falls back to the homepage if no
+        # page had a violation with a usable bounding box.
+        best = pages_checked[0]
+        for candidate in pages_checked[1:]:
+            if candidate["visual_flaw"] and (
+                not best["visual_flaw"]
+                or _SEVERITY_RANK.get(candidate["visual_flaw"].get("impact"), 4)
+                < _SEVERITY_RANK.get(best["visual_flaw"].get("impact"), 4)
+            ):
+                best = candidate
+
+        # Draw analysis box on the chosen image
+        img = Image.open(BytesIO(best["screenshot_bytes"])).convert("RGB")
+
         visual_flaw_context = ""
-        if visual_flaw:
+        if best["visual_flaw"]:
             draw = ImageDraw.Draw(img)
-            box = visual_flaw["box"]
+            box = best["visual_flaw"]["box"]
             # Pad the box slightly for better visibility
             pad = 5
             padded_box = [max(0, box[0]-pad), max(0, box[1]-pad), box[2]+pad, box[3]+pad]
             draw.rectangle(padded_box, outline="red", width=4)
-            visual_flaw_context = f"The red box in the screenshot highlights an accessibility flaw: {visual_flaw['description']}."
-        
+            page_note = f" on the {best['label']} page" if best["label"] != "/" else ""
+            visual_flaw_context = f"The red box in the screenshot highlights an accessibility flaw{page_note}: {best['visual_flaw']['description']}."
+
         filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
-        
+
+        # Aggregate signals across every page audited, most severe first.
+        all_violations = [v for p in pages_checked for v in p["violations"]]
+        all_violations.sort(key=lambda v: _SEVERITY_RANK.get(v.get("impact", ""), 4))
+
+        all_broken_links = [l for p in pages_checked for l in p["broken_links"]]
+        all_font_families = sorted({f for p in pages_checked for f in p["font_families"]})
+        total_stretched_images = sum(p["stretched_images"] for p in pages_checked)
+
         extra_audit_data = {
-            "accessibility_violations": accessibility_violations,
-            "broken_links": broken_links,
+            "accessibility_violations": all_violations[:15],
+            "broken_links": all_broken_links[:15],
             "perf_timing": perf_timing,
             "response_headers": response_headers,
             "visual_flaw_context": visual_flaw_context,
-            "font_families": font_families,
-            "stretched_images": stretched_images,
+            "font_families": all_font_families,
+            "stretched_images": total_stretched_images,
             "final_url": final_url,
+            "pages_audited": [p["label"] for p in pages_checked],
         }
-        
+
         return filepath, html_content, extra_audit_data
-        
+
     except Exception as e:
         print(f"Failed to generate visual evidence for {url}: {e}")
         return None, None, None
@@ -213,7 +328,8 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
                             
                         visual_flaw = {
                             "box": [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
-                            "description": v["help"]
+                            "description": v["help"],
+                            "impact": v.get("impact", "minor"),
                         }
                         break
                 except Exception:
