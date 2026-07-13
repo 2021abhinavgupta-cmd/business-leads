@@ -210,6 +210,9 @@ class WebsiteScraper:
             seo_score=seo_score,
             mobile_score=mobile_score,
             best_practices_score=lighthouse_scores.get("best_practices", 0),
+            lcp_ms=lighthouse_scores.get("lcp_ms"),
+            cls=lighthouse_scores.get("cls"),
+            tbt_ms=lighthouse_scores.get("tbt_ms"),
             has_ssl=has_ssl,
             parsed=parsed,
             has_structured_data=has_structured_data,
@@ -285,16 +288,20 @@ class WebsiteScraper:
             response.raise_for_status()
             data = response.json()
 
-            categories = data.get("lighthouseResult", {}).get("categories", {})
+            lighthouse_result = data.get("lighthouseResult", {})
+            categories = lighthouse_result.get("categories", {})
             if not categories:
                 print(f"[PageSpeed API] Response for {url} had no lighthouseResult.categories — raw keys: {list(data.keys())}")
                 return {}
+
+            from analyzer.lighthouse import _extract_core_web_vitals
 
             return {
                 "performance": int((categories.get("performance", {}).get("score") or 0) * 100),
                 "seo": int((categories.get("seo", {}).get("score") or 0) * 100),
                 "accessibility": int((categories.get("accessibility", {}).get("score") or 0) * 100),
                 "best_practices": int((categories.get("best-practices", {}).get("score") or 0) * 100),
+                **_extract_core_web_vitals(lighthouse_result.get("audits", {})),
             }
         except Exception as e:
             body = getattr(getattr(e, "response", None), "text", "")[:300]
@@ -653,6 +660,9 @@ class WebsiteScraper:
         seo_score: int,
         mobile_score: int,
         best_practices_score: int,
+        lcp_ms: int | None = None,
+        cls: float | None = None,
+        tbt_ms: int | None = None,
         has_ssl: bool,
         parsed: dict,
         has_structured_data: bool,
@@ -687,6 +697,22 @@ class WebsiteScraper:
 
         if best_practices_score and best_practices_score < _LOW_SEO_SCORE:
             flaws.append(Flaw("tech", "medium", f"Lighthouse best-practices score is low ({best_practices_score}/100) — likely outdated libraries, console errors, or missing image dimensions."))
+
+        # Core Web Vitals — real units, not just the opaque 0-100 performance
+        # score above, so the AI can quote exact numbers per the prompt's
+        # "quote the exact number" instruction (see analyzer/ai_audit.py).
+        # Thresholds are Google's own "good" cutoffs.
+        if lcp_ms is not None and lcp_ms > 2500:
+            sev = "critical" if lcp_ms > 4000 else "high"
+            flaws.append(Flaw("performance", sev, f"Largest Contentful Paint takes {lcp_ms / 1000:.1f}s to render (Google's 'good' threshold is 2.5s) — the main hero content is visibly slow to appear."))
+
+        if cls is not None and cls > 0.1:
+            sev = "high" if cls > 0.25 else "medium"
+            flaws.append(Flaw("performance", sev, f"Cumulative Layout Shift score is {cls:.2f} (Google's 'good' threshold is 0.10) — page content visibly jumps around while loading, which can cause visitors to mis-click."))
+
+        if tbt_ms is not None and tbt_ms > 200:
+            sev = "high" if tbt_ms > 600 else "medium"
+            flaws.append(Flaw("performance", sev, f"Total Blocking Time is {tbt_ms}ms (Google's 'good' threshold is 200ms) — the page is unresponsive to clicks/taps for a noticeable stretch while it loads."))
 
         if not has_ssl:
             flaws.append(Flaw("security", "critical", "Website does not use HTTPS. Visitors see a \"Not Secure\" warning in the browser."))

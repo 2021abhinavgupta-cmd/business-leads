@@ -64,6 +64,7 @@ async def process_single_lead(lead: dict) -> str:
     # Step 3: Generate Visual Evidence & Scrape HTML (Playwright)
     print(f"  Generating visual evidence & scraping for {website}...")
     image_path, html_content, extra_audit_data = await generate_audit_screenshot(website, company)
+    mobile_image_path = (extra_audit_data or {}).get("mobile_image_path")
 
     # Step 4: Find decision maker if name or email missing (using Playwright HTML)
     if (not contact or not email) and website:
@@ -80,7 +81,24 @@ async def process_single_lead(lead: dict) -> str:
     print(f"  Web: speed={web_data.page_speed_score}, seo={web_data.seo_score}")
 
     # Step 6: AI Analysis
-    analysis = auditor.analyze_lead(company, ig_data, web_data, image_path=image_path)
+    # "Rating"/"Reviews Count" only come from Google Maps leads and can be
+    # "N/A" (the Playwright OSINT fallback in scrapers/google_maps.py has no
+    # rating data) — guard against feeding that literal string to the prompt
+    # or crashing int() on a non-numeric value.
+    raw_rating = str(lead.get("Rating", "")).strip()
+    rating = raw_rating if raw_rating.replace(".", "", 1).isdigit() else ""
+    try:
+        reviews_count = int(lead.get("Reviews Count") or 0)
+    except (TypeError, ValueError):
+        reviews_count = 0
+
+    analysis = auditor.analyze_lead(
+        company, ig_data, web_data,
+        image_path=image_path,
+        mobile_image_path=mobile_image_path,
+        rating=rating,
+        reviews_count=reviews_count,
+    )
     if not analysis:
         print(f"  AI audit failed for {company}")
         return "failed_ai_error"
@@ -97,13 +115,14 @@ async def process_single_lead(lead: dict) -> str:
     if "row_number" in lead:
         sheets.save_draft(lead["row_number"], subject, body)
         
-    # Clean up the screenshot file to save space
-    if image_path:
-        try:
-            os.remove(image_path)
-        except OSError:
-            pass
-            
+    # Clean up the screenshot files to save space
+    for path in (image_path, mobile_image_path):
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     return "drafted"
 
 

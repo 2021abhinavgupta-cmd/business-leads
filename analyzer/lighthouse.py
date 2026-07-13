@@ -36,6 +36,29 @@ async def run_lighthouse(url: str) -> dict:
     return {}
 
 
+def _extract_core_web_vitals(audits: dict) -> dict:
+    """
+    Pull the raw Core Web Vitals numbers (not just the 0-100 category score)
+    out of Lighthouse's audits object, so flaw text can quote real units
+    ("LCP takes 4.2s") instead of just an opaque score. Keys map 1:1 to what
+    scrapers/website.py._build_flaws expects; any missing/malformed audit
+    just yields None for that key rather than failing the whole parse.
+    """
+    def _numeric(audit_id):
+        value = audits.get(audit_id, {}).get("numericValue")
+        return value if isinstance(value, (int, float)) else None
+
+    lcp = _numeric("largest-contentful-paint")
+    cls = _numeric("cumulative-layout-shift")
+    tbt = _numeric("total-blocking-time")
+
+    return {
+        "lcp_ms": round(lcp) if lcp is not None else None,
+        "cls": round(cls, 3) if cls is not None else None,
+        "tbt_ms": round(tbt) if tbt is not None else None,
+    }
+
+
 def _run_lighthouse_cli(url: str) -> dict:
     """Run lighthouse from node_modules."""
     try:
@@ -115,18 +138,20 @@ def _execute_lighthouse(binary: str, url: str, use_npx: bool = False) -> dict:
         if os.path.exists(output_path):
             with open(output_path, "r") as f:
                 data = json.load(f)
-            
+
             os.unlink(output_path)  # Clean up
-            
-            categories = data.get("lighthouseResult", data).get("categories", {})
-            
+
+            result = data.get("lighthouseResult", data)
+            categories = result.get("categories", {})
+
             scores = {
                 "performance": int((categories.get("performance", {}).get("score") or 0) * 100),
                 "seo": int((categories.get("seo", {}).get("score") or 0) * 100),
                 "accessibility": int((categories.get("accessibility", {}).get("score") or 0) * 100),
                 "best_practices": int((categories.get("best-practices", {}).get("score") or 0) * 100),
+                **_extract_core_web_vitals(result.get("audits", {})),
             }
-            
+
             print(f"[Lighthouse] Scores: {scores}")
             return scores
         

@@ -1,9 +1,11 @@
 import hashlib
 import os
 import asyncio
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image, ImageDraw
@@ -44,6 +46,49 @@ def make_screenshot_filename(company_name: str, url: str) -> str:
     safe_name = "".join(c if c.isalnum() else "_" for c in company_name.lower())
     url_hash = hashlib.md5(normalise_url(url).encode()).hexdigest()[:8]
     return f"{safe_name}_{url_hash}_audit.jpg"
+
+
+async def _discover_extra_urls_via_sitemap(base_url: str) -> list[str]:
+    """
+    Try /sitemap.xml first for page discovery — catches real pages that
+    aren't linked from the homepage nav (old blog posts, footer-only pages,
+    pages behind a hamburger menu JS never renders for us), which the
+    anchor-keyword scan below would miss entirely.
+    """
+    parsed = urlparse(base_url)
+    sitemap_url = f"{parsed.scheme}://{parsed.netloc}/sitemap.xml"
+
+    try:
+        async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+            response = await client.get(sitemap_url)
+            if response.status_code != 200:
+                return []
+            root = ET.fromstring(response.content)
+    except Exception:
+        return []
+
+    base_netloc = parsed.netloc
+    found = []
+    seen = set()
+    # Namespace-agnostic match on tag name — sitemap XML namespaces vary
+    # (and sitemap index files nest <sitemap><loc> instead of <url><loc>),
+    # so matching any element literally named "loc" covers both shapes.
+    for elem in root.iter():
+        if not elem.tag.endswith("loc") or not elem.text:
+            continue
+        loc = elem.text.strip()
+        if not any(kw in loc.lower() for kw in _EXTRA_PAGE_KEYWORDS):
+            continue
+        if urlparse(loc).netloc != base_netloc:
+            continue
+        normalised = loc.split("#")[0].rstrip("/")
+        if normalised in seen or normalised == base_url.rstrip("/"):
+            continue
+        seen.add(normalised)
+        found.append(loc)
+        if len(found) >= _MAX_EXTRA_PAGES:
+            break
+    return found
 
 
 def _discover_extra_urls(html: str, base_url: str) -> list[str]:
@@ -111,14 +156,17 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
 
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
     """
-    Takes a mobile screenshot of the URL, runs accessibility + broken link
+    Takes a desktop screenshot of the URL, runs accessibility + broken link
     audits across the homepage plus up to _MAX_EXTRA_PAGES internal pages
-    (about/services/contact-style links found on the homepage), and returns
-    a tuple of (filepath, html_content, extra_audit_data).
+    (discovered via sitemap.xml, falling back to about/services/contact-style
+    links found on the homepage), and returns a tuple of (filepath,
+    html_content, extra_audit_data). Also captures a separate real
+    mobile-viewport (390x844) screenshot of the homepage for the AI to
+    compare against, since desktop screenshots miss mobile-only problems.
 
-    The attached screenshot is whichever audited page had the most severe
-    accessibility violation with a valid bounding box, falling back to the
-    homepage if no page had one.
+    The attached (desktop) screenshot is whichever audited page had the most
+    severe accessibility violation with a valid bounding box, falling back
+    to the homepage if no page had one.
 
     extra_audit_data contains:
         - accessibility_violations: list of axe-core violations across all audited pages
@@ -126,6 +174,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         - perf_timing: dict with real browser timing metrics (homepage only)
         - response_headers: dict of HTTP response headers from the homepage load (for security-header checks)
         - pages_audited: list of page paths that were actually crawled
+        - mobile_image_path: path to the separate mobile-viewport screenshot, or None if it failed
 
     Returns (None, None, None) on failure.
     """
@@ -184,7 +233,11 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 pages_checked = [await _audit_current_page(page, context, "/", screenshot_bytes)]
 
                 # --- 5. Crawl a few internal pages and run the same checks on them ---
-                extra_urls = _discover_extra_urls(html_content, final_url)
+                # Sitemap.xml first (catches real pages the nav doesn't link to);
+                # falls back to scanning the homepage's own anchor tags.
+                extra_urls = await _discover_extra_urls_via_sitemap(final_url)
+                if not extra_urls:
+                    extra_urls = _discover_extra_urls(html_content, final_url)
                 for extra_url in extra_urls:
                     label = _page_label(extra_url)
                     try:
@@ -200,6 +253,24 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                         # A slow/broken subpage shouldn't sink the whole audit —
                         # just skip it and keep whatever pages did succeed.
                         print(f"[Visuals] Skipping extra page {extra_url}: {e}")
+
+                # --- 6. A real mobile-viewport screenshot, separate from the
+                # desktop one above. Desktop screenshots systematically miss
+                # mobile-only problems (overflow, unreadable font, tap targets
+                # too close together) that most visitors to a small-business
+                # site will actually hit, since most traffic is from phones.
+                mobile_screenshot_bytes = None
+                try:
+                    await page.goto(final_url, timeout=30000, wait_until="load")
+                    await page.set_viewport_size({"width": 390, "height": 844})
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(500)
+                    mobile_screenshot_bytes = await page.screenshot(full_page=False)
+                except Exception as e:
+                    print(f"[Visuals] Mobile screenshot failed (non-critical): {e}")
 
                 await browser.close()
 
@@ -232,6 +303,15 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
 
+        mobile_filepath = None
+        if mobile_screenshot_bytes:
+            mobile_img = Image.open(BytesIO(mobile_screenshot_bytes)).convert("RGB")
+            mobile_filepath = os.path.join(
+                SCREENSHOTS_DIR,
+                make_screenshot_filename(company_name, url).replace("_audit.jpg", "_mobile.jpg"),
+            )
+            mobile_img.save(mobile_filepath, format="JPEG", quality=85)
+
         # Aggregate signals across every page audited, most severe first.
         all_violations = [v for p in pages_checked for v in p["violations"]]
         all_violations.sort(key=lambda v: _SEVERITY_RANK.get(v.get("impact", ""), 4))
@@ -250,6 +330,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "stretched_images": total_stretched_images,
             "final_url": final_url,
             "pages_audited": [p["label"] for p in pages_checked],
+            "mobile_image_path": mobile_filepath,
         }
 
         return filepath, html_content, extra_audit_data

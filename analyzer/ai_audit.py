@@ -67,30 +67,32 @@ class AIAuditor:
         company: str,
         ig: InstagramData | None,
         web: WebsiteData,
-        image_path: str | None = None
+        image_path: str | None = None,
+        mobile_image_path: str | None = None,
+        rating: str = "",
+        reviews_count: int = 0,
     ) -> dict | None:
         """
         Analyse a lead's digital presence via an AI fallback chain.
 
         Args:
-            company: Business name.
-            ig:      Instagram analytics (may be ``None`` if unavailable).
-            web:     Website audit data.
+            company:            Business name.
+            ig:                 Instagram analytics (may be ``None`` if unavailable).
+            web:                Website audit data.
+            image_path:         Desktop screenshot (with red-box flaw overlay if found).
+            mobile_image_path:  Separate real mobile-viewport screenshot, if captured.
+            rating:              Google Business rating (e.g. "4.8"), if the lead came from Maps.
+            reviews_count:       Google Business review count, if the lead came from Maps.
 
         Returns:
             A dict with keys ``flaws``, ``overall_score``,
             ``email_subject``, ``opening_line`` — or ``None`` if every
             AI provider fails.
         """
-        prompt = self._build_prompt(company, ig, web, bool(image_path))
+        prompt = self._build_prompt(company, ig, web, bool(image_path), bool(mobile_image_path), rating, reviews_count)
 
-        base64_image = None
-        if image_path:
-            try:
-                with open(image_path, "rb") as image_file:
-                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-            except Exception as e:
-                print(f"Failed to read image for AI audit: {e}")
+        base64_image = self._encode_image(image_path)
+        base64_mobile_image = self._encode_image(mobile_image_path)
 
         # Fallback chain: Claude Haiku → Gemini → GPT-4o-mini → OpenRouter (free)
         for call_fn in (
@@ -99,7 +101,7 @@ class AIAuditor:
             self._call_openai,
             self._call_openrouter,
         ):
-            result = call_fn(prompt, base64_image)
+            result = call_fn(prompt, base64_image, base64_mobile_image)
             if result is None:
                 continue
                 
@@ -111,6 +113,17 @@ class AIAuditor:
 
         print(f"[AIAuditor] All AI providers failed or returned unparseable output for '{company}' — check API keys/quotas.")
         return None
+
+    @staticmethod
+    def _encode_image(image_path: str | None) -> str | None:
+        if not image_path:
+            return None
+        try:
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode('utf-8')
+        except Exception as e:
+            print(f"Failed to read image for AI audit: {e}")
+            return None
 
     def should_contact(self, audit_result: dict) -> bool:
         """
@@ -128,7 +141,10 @@ class AIAuditor:
         company: str,
         ig: InstagramData | None,
         web: WebsiteData,
-        has_image: bool = False
+        has_image: bool = False,
+        has_mobile_image: bool = False,
+        rating: str = "",
+        reviews_count: int = 0,
     ) -> str:
         """
         Assemble the audit prompt using real data from *ig* and *web*.
@@ -201,12 +217,21 @@ class AIAuditor:
                 f"{web.visual_flaw_context}\n"
             )
 
+        # --- Google Business rating (Maps-sourced leads only) — a
+        # personalization hook, not a flaw: a strong rating with a weak
+        # website is a compelling contrast ("great reviews but the site
+        # doesn't reflect it"), so keep it distinct from FLAWS DETECTED.
+        rating_section = ""
+        if rating:
+            rating_section = f"GOOGLE BUSINESS RATING: {rating}/5 stars from {reviews_count} reviews.\n"
+
         return (
             f"You are a sharp, conversational digital marketing consultant auditing "
             f"{company}.\n\n"
             f"{ig_section}\n"
             f"{web_section}\n"
             f"{perf_section}\n"
+            f"{rating_section}\n"
             f"{flaws_section}\n"
             f"{brand_context_section}\n"
             f"{visual_flaw_section}\n"
@@ -220,8 +245,10 @@ class AIAuditor:
             "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot (e.g., 'I attached a screenshot of your site—the red box highlights a button that is completely invisible to screen readers, which is hurting your SEO').\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
-            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! Look beyond just the red box (if present) — actually study the screenshot for general visual polish: inconsistent or clashing fonts, mismatched colors, cluttered/unbalanced layout, low-quality or stretched/blurry images, awkward spacing. You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...' or 'the fonts in your hero section and navigation don't match, which looks inconsistent').\n" if has_image else "") +
-            "\n"
+            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image! Look beyond just the red box (if present) — actually study the screenshot for general visual polish: inconsistent or clashing fonts, mismatched colors, cluttered/unbalanced layout, low-quality or stretched/blurry images, awkward spacing. You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...' or 'the fonts in your hero section and navigation don't match, which looks inconsistent').\n" if has_image else "")
+            + ("A SECOND image is also attached showing the site on an actual MOBILE PHONE screen. Compare it against the desktop screenshot and look specifically for mobile only problems: text or buttons cut off or overlapping, horizontal scrolling, tiny unreadable font, a hamburger menu that looks broken, a hero image that doesn't adapt. If you spot a mobile specific issue, make ONE of your flaws about it and say explicitly that it is how the site looks on a phone (e.g. 'on your phone, the navigation menu overlaps your logo').\n" if has_mobile_image else "")
+            + ("If GOOGLE BUSINESS RATING is 4 stars or higher, use it as a personalization hook, e.g. contrast their strong reputation with a website flaw ('you've clearly got happy customers, X reviews at Y stars, but the website doesn't reflect that trust'). Do not mention the rating if it is below 4 stars or reviews_count is under 10, it is not a strong enough signal to reference.\n" if rating else "")
+            + "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"
             "Use this exact structure:\n"
             "{\n"
@@ -240,7 +267,7 @@ class AIAuditor:
     # Provider calls
     # ------------------------------------------------------------------
 
-    def _call_gemini(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
+    def _call_gemini(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
         """
         Call Google Gemini (``gemini-3-flash``), forcing native JSON output
         so we don't rely on regex-stripping markdown fences from the reply.
@@ -261,6 +288,11 @@ class AIAuditor:
                     "mime_type": "image/jpeg",
                     "data": base64_image
                 })
+            if base64_mobile_image:
+                content.append({
+                    "mime_type": "image/jpeg",
+                    "data": base64_mobile_image
+                })
             response = model.generate_content(content)
 
             # Pricing (paid tier fallback if free quota exhausted): ~$0.075/1M input, $0.30/1M output
@@ -276,7 +308,7 @@ class AIAuditor:
             print(f"Gemini error: {e}")
             return None
 
-    def _call_openai(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
+    def _call_openai(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
         """
         Call OpenAI GPT-4o-mini.
         """
@@ -289,6 +321,11 @@ class AIAuditor:
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
+            if base64_mobile_image:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_mobile_image}"}
                 })
 
             response = self._openai_client.chat.completions.create(
@@ -310,7 +347,7 @@ class AIAuditor:
         except Exception:
             return None
 
-    def _call_anthropic(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
+    def _call_anthropic(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
         """
         Call Anthropic Claude Haiku 4.5.
         """
@@ -326,6 +363,15 @@ class AIAuditor:
                         "type": "base64",
                         "media_type": "image/jpeg",
                         "data": base64_image
+                    }
+                })
+            if base64_mobile_image:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64_mobile_image
                     }
                 })
             content.append({"type": "text", "text": prompt})
@@ -348,7 +394,7 @@ class AIAuditor:
         except Exception:
             return None
 
-    def _call_openrouter(self, prompt: str, base64_image: str | None = None) -> tuple[str, float] | None:
+    def _call_openrouter(self, prompt: str, base64_image: str | None = None, base64_mobile_image: str | None = None) -> tuple[str, float] | None:
         """
         Call a free-tier OpenRouter model (``google/gemma-4-31b-it:free``).
 
@@ -365,6 +411,11 @@ class AIAuditor:
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                })
+            if base64_mobile_image:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_mobile_image}"}
                 })
 
             response = self._openrouter_client.chat.completions.create(
