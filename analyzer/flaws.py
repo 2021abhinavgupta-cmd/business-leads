@@ -23,7 +23,7 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 @dataclass
 class Flaw:
-    category: str  # performance | seo | accessibility | security | content | tech
+    category: str  # performance | seo | accessibility | security | content | tech | conversion
     severity: str  # critical | high | medium | low
     description: str
 

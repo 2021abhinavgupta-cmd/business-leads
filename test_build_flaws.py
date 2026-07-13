@@ -19,6 +19,10 @@ _BASE_PARSED = {
     "has_og_tags": True,
     "has_viewport_meta": True,
     "has_favicon": True,
+    "has_click_to_call": True,
+    "has_whatsapp_link": True,
+    "has_booking_widget": True,
+    "has_menu_or_pricing": True,
 }
 
 _BASE_KWARGS = dict(
@@ -30,6 +34,7 @@ _BASE_KWARGS = dict(
     has_ssl=True,
     parsed=_BASE_PARSED,
     has_structured_data=True,
+    has_business_schema=True,
     readability_score=70.0,
     security_flaws=[],
     seo_page={},
@@ -121,3 +126,39 @@ def test_seo_analyzer_anchor_warnings_filtered_out():
     descriptions = [f.description for f in flaws]
     assert not any("Anchor missing title tag" in d for d in descriptions)
     assert any("Description is too short" in d for d in descriptions)
+
+
+def test_no_booking_widget_flagged():
+    flaws = _build(parsed={**_BASE_PARSED, "has_booking_widget": False})
+    assert any(f.category == "conversion" and "booking" in f.description for f in flaws)
+
+
+def test_no_click_to_call_or_whatsapp_flagged():
+    flaws = _build(parsed={**_BASE_PARSED, "has_click_to_call": False, "has_whatsapp_link": False})
+    assert any(f.category == "conversion" and "click-to-call" in f.description for f in flaws)
+
+
+def test_click_to_call_alone_suppresses_conversion_flaw():
+    # Either click-to-call OR WhatsApp is enough — shouldn't need both.
+    flaws = _build(parsed={**_BASE_PARSED, "has_click_to_call": True, "has_whatsapp_link": False})
+    assert not any("click-to-call" in f.description for f in flaws)
+
+
+def test_no_menu_or_pricing_flagged():
+    flaws = _build(parsed={**_BASE_PARSED, "has_menu_or_pricing": False})
+    assert any(f.category == "conversion" and "pricing" in f.description for f in flaws)
+
+
+def test_business_schema_type_missing_flagged_as_low():
+    flaws = _build(has_structured_data=True, has_business_schema=False)
+    matches = [f for f in flaws if "doesn't use a business type" in f.description]
+    assert len(matches) == 1
+    assert matches[0].severity == "low"
+
+
+def test_business_schema_check_skipped_when_no_structured_data_at_all():
+    # The generic "no structured data" flaw already covers this case —
+    # shouldn't also fire the more specific business-schema-type flaw.
+    flaws = _build(has_structured_data=False, has_business_schema=False)
+    assert not any("doesn't use a business type" in f.description for f in flaws)
+    assert any("No structured data" in f.description for f in flaws)

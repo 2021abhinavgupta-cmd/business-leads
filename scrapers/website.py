@@ -47,6 +47,25 @@ _TESTIMONIAL_KEYWORDS = [
 
 _BLOG_PATHS = ["/blog", "/news", "/articles"]
 
+# Business/conversion signals — these matter to the business owner reading
+# the email (can a customer actually book/call/see prices?) independent of
+# any technical score, which is what an audit that only surfaces Lighthouse/
+# axe-core numbers misses entirely.
+_BOOKING_PLATFORM_SIGNATURES = [
+    "opentable", "resy.com", "sevenrooms", "exploretock", "tock.com",
+    "reserve.google.com", "calendly.com", "acuityscheduling.com",
+    "squareup.com/appointments", "setmore.com", "booksy.com", "cal.com",
+    "bookatable", "yelp.com/reservations",
+]
+_MENU_PRICING_KEYWORDS = ["menu", "pricing", "price list", "our prices"]
+_BUSINESS_SCHEMA_TYPES = {
+    "localbusiness", "restaurant", "foodestablishment", "store",
+    "professionalservice", "organization", "product", "menu",
+    "cafeorcoffeeshop", "bar", "hotel", "beautysalon", "dentist",
+    "medicalbusiness", "homeandconstructionbusiness", "autorepair",
+    "realestateagent", "attorney", "accountingservice",
+}
+
 _PHONE_PATTERN = re.compile(
     r"(\+?\d{1,4}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}"
 )
@@ -199,6 +218,7 @@ class WebsiteScraper:
         # Step 3.6 — Additional flaw signals: structured data, readability,
         # security headers, and a real crawl-based SEO pass (pyseoanalyzer).
         has_structured_data = self._check_structured_data(html)
+        has_business_schema = self._check_business_schema_type(html) if has_structured_data else False
         readability_score = self._check_readability(parsed["homepage_text"])
         security_flaws = self._check_security_headers(extra.get("response_headers", {}), has_ssl)
         seo_page = await self._run_pyseoanalyzer(url)
@@ -219,6 +239,7 @@ class WebsiteScraper:
             has_ssl=has_ssl,
             parsed=parsed,
             has_structured_data=has_structured_data,
+            has_business_schema=has_business_schema,
             readability_score=readability_score,
             security_flaws=security_flaws,
             seo_page=seo_page,
@@ -452,6 +473,38 @@ class WebsiteScraper:
                 has_blog = True
                 break
 
+        # --- Business/conversion signals — matter to the owner reading the
+        # email regardless of any technical score. ---
+
+        # Click-to-call / click-to-WhatsApp — <a> tags survive the earlier
+        # decompose() (only script/style/noscript/svg/img were removed), so
+        # scanning soup anchors is safe here.
+        has_click_to_call = False
+        has_whatsapp_link = False
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].lower()
+            if href.startswith("tel:"):
+                has_click_to_call = True
+            if "wa.me/" in href or "api.whatsapp.com" in href:
+                has_whatsapp_link = True
+
+        # Reservation/booking widget — checked against the RAW html string,
+        # not soup, because booking platforms are almost always embedded via
+        # <script src="..."> or <iframe src="...">, both of which were
+        # already decompose()'d above.
+        html_lower = html.lower()
+        has_booking_widget = any(sig in html_lower for sig in _BOOKING_PLATFORM_SIGNATURES)
+
+        # Menu/pricing visibility — link text or href suggesting a menu or
+        # price list exists somewhere on the site.
+        has_menu_or_pricing = False
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].lower()
+            link_text = anchor.get_text(strip=True).lower()
+            if any(kw in href or kw in link_text for kw in _MENU_PRICING_KEYWORDS):
+                has_menu_or_pricing = True
+                break
+
         # Homepage text (converted to LLM-ready Markdown, truncated to 3000 chars).
         # Crawl4AI's own markdown output keeps raw [text](url) link syntax (unlike
         # the markdownify fallback, which strips anchors via strip=['a']) — strip
@@ -510,6 +563,10 @@ class WebsiteScraper:
             "has_og_tags": has_og_tags,
             "has_viewport_meta": has_viewport_meta,
             "has_favicon": has_favicon,
+            "has_click_to_call": has_click_to_call,
+            "has_whatsapp_link": has_whatsapp_link,
+            "has_booking_widget": has_booking_widget,
+            "has_menu_or_pricing": has_menu_or_pricing,
         }
 
     # ------------------------------------------------------------------
@@ -586,6 +643,34 @@ class WebsiteScraper:
         except Exception as e:
             print(f"[Extruct] Structured data check failed: {e}")
             return False
+
+    @staticmethod
+    def _check_business_schema_type(html: str) -> bool:
+        """
+        True if structured data is present AND uses a business-relevant
+        @type (LocalBusiness, Restaurant, Organization, Product, etc) rather
+        than only generic types like WebSite/BreadcrumbList that don't power
+        Google's local rich results (star ratings, hours, price range shown
+        directly in the search snippet). Only meaningful to call when
+        _check_structured_data already returned True — a site with zero
+        structured data is already covered by that separate flaw.
+        """
+        try:
+            data = extruct.extract(html, syntaxes=["json-ld", "microdata"])
+        except Exception:
+            return False
+
+        types_found = set()
+        for entry in data.get("json-ld", []):
+            raw_type = entry.get("@type")
+            values = raw_type if isinstance(raw_type, list) else [raw_type]
+            types_found.update(str(t).lower() for t in values if t)
+        for entry in data.get("microdata", []):
+            raw_type = entry.get("type")
+            values = raw_type if isinstance(raw_type, list) else [raw_type]
+            types_found.update(str(t).rsplit("/", 1)[-1].lower() for t in values if t)
+
+        return bool(types_found & _BUSINESS_SCHEMA_TYPES)
 
     async def _check_robots_disallow_all(self, url: str) -> bool:
         """
@@ -740,6 +825,7 @@ class WebsiteScraper:
         mobile_horizontal_overflow: bool = False,
         duplicate_title_pages: list[str] | None = None,
         duplicate_meta_pages: list[str] | None = None,
+        has_business_schema: bool = False,
     ) -> list[Flaw]:
         """
         Reconcile every audit signal (Lighthouse/PageSpeed, HTML parsing,
@@ -816,6 +902,8 @@ class WebsiteScraper:
 
         if not has_structured_data:
             flaws.append(Flaw("seo", "medium", "No structured data (Schema.org/JSON-LD) found — missing out on rich results (ratings, business info) in Google search."))
+        elif not has_business_schema:
+            flaws.append(Flaw("seo", "low", "Structured data is present but doesn't use a business type like LocalBusiness/Restaurant/Organization — missing out on rich results (star ratings, hours, price range) shown directly in the Google search snippet."))
 
         if readability_score is not None and readability_score < _LOW_READABILITY_SCORE:
             flaws.append(Flaw("content", "medium", f"Homepage copy scores {readability_score:.0f}/100 on the Flesch Reading Ease scale (very difficult to read) — simplifying the language could improve conversion."))
@@ -832,6 +920,20 @@ class WebsiteScraper:
         if stretched_images >= 1:
             plural = "s are" if stretched_images > 1 else " is"
             flaws.append(Flaw("content", "medium", f"{stretched_images} image{plural} displayed larger than their native resolution and will look blurry/pixelated to visitors."))
+
+        # --- Business/conversion flaws — matter to the owner reading the
+        # email regardless of technical score, and were previously entirely
+        # absent (the audit only ever measured performance/SEO/accessibility/
+        # security, never "can a customer actually convert on this page"). ---
+
+        if not parsed.get("has_booking_widget"):
+            flaws.append(Flaw("conversion", "low", "No online reservation or booking widget detected (no OpenTable, Resy, Calendly, or similar) — customers have to call or email to book instead of completing it in one click, which loses conversions."))
+
+        if not parsed.get("has_click_to_call") and not parsed.get("has_whatsapp_link"):
+            flaws.append(Flaw("conversion", "medium", "No click-to-call or WhatsApp link found anywhere on the page — mobile visitors have to manually copy and dial your number instead of tapping to call, unnecessary friction that loses easy conversions."))
+
+        if not parsed.get("has_menu_or_pricing"):
+            flaws.append(Flaw("conversion", "medium", "No menu or pricing information findable on the site — visitors have to contact you just to find out what you charge, which is friction most people won't bother with."))
 
         word_count = seo_page.get("word_count")
         if word_count is not None and word_count < _THIN_CONTENT_WORDS:
