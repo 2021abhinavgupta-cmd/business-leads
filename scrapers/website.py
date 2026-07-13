@@ -746,8 +746,17 @@ class WebsiteScraper:
 
         # pyseoanalyzer's "Anchor missing title tag" warnings are extremely
         # numerous on most sites and not a meaningful flaw on their own —
-        # filtered out to avoid drowning out real signal.
-        seo_warnings = [w for w in seo_page.get("warnings", []) if "Anchor missing title tag" not in w]
+        # filtered out to avoid drowning out real signal. "Image missing alt
+        # tag" is also filtered: live-verified it fires on images with
+        # alt="" (explicitly empty), which is the *correct* WCAG pattern for
+        # decorative images, not a bug — axe-core (our authoritative a11y
+        # signal) correctly did not flag the same images. It also dumps the
+        # raw <img> tag (full srcset included) into the warning text, which
+        # is unreadable noise even on the rare case it's right.
+        seo_warnings = [
+            w for w in seo_page.get("warnings", [])
+            if "Anchor missing title tag" not in w and "Image missing alt tag" not in w
+        ]
         for warning in seo_warnings[:5]:
             flaws.append(Flaw("seo", "medium", warning))
 

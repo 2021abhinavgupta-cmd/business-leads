@@ -245,8 +245,20 @@ async def _check_font_consistency(page) -> list:
             const seen = new Set();
             const els = document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, a, button, span, li, label');
             for (const el of els) {
+                // Skip elements with no visible text — an empty heading or an
+                // icon-only span's "font" isn't a typography signal.
+                if (!el.textContent || !el.textContent.trim()) continue;
+                // Skip screen-reader-only elements (skip-links etc) — visible
+                // to nobody sighted, so irrelevant to visual typography.
+                // Common utility class names; live-verified a real site's
+                // skip-link ("visually-hidden") slips past a geometry-only
+                // check since off-screen-positioning techniques (left:
+                // -9999px) don't shrink the bounding box like clip-based
+                // ones do.
+                if (/sr-only|screen-reader|visually-?hidden/i.test(el.className)) continue;
                 const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
+                // Skip zero-size AND the classic 1px clip-based hidden technique.
+                if (rect.width <= 2 || rect.height <= 2) continue;
                 const family = getComputedStyle(el).fontFamily;
                 if (family) seen.add(family.split(',')[0].replace(/['"]/g, '').trim());
             }
@@ -299,25 +311,35 @@ async def _check_broken_assets(page, context) -> list:
             return [...links.slice(0, 15), ...images.slice(0, 10)];
         }""")
         
-        # Check each asset with a HEAD request (fast, no body download)
+        # Check each asset with a HEAD request first (fast, no body download).
+        # Some servers/WAFs specifically reject or rate-limit HEAD probes from
+        # automated tools while GET works fine for real visitors — live-
+        # observed this exact flakiness (same site, same code: 6 "broken"
+        # links on one run, 0 on the next) — so a HEAD failure retries once
+        # via GET before being trusted as a genuinely broken link.
         for asset in assets:
+            status = None
             try:
                 response = await context.request.head(asset["url"], timeout=10000)
                 status = response.status
-                if status >= 400:
-                    broken.append({
-                        "type": asset["type"],
-                        "url": asset["url"],
-                        "text": asset["text"],
-                        "status": status
-                    })
             except Exception:
-                # Timeout or unreachable = broken
+                status = None
+
+            if status is not None and status < 400:
+                continue
+
+            try:
+                response = await context.request.get(asset["url"], timeout=10000)
+                status = response.status
+            except Exception:
+                status = "unreachable"
+
+            if status == "unreachable" or (isinstance(status, int) and status >= 400):
                 broken.append({
                     "type": asset["type"],
                     "url": asset["url"],
                     "text": asset["text"],
-                    "status": "unreachable"
+                    "status": status
                 })
         
         print(f"[Links] Checked {len(assets)} assets, found {len(broken)} broken.")
