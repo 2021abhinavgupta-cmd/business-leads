@@ -109,10 +109,44 @@ class AIAuditor:
             parsed = self._parse_json(raw)
             if parsed is not None:
                 parsed["ai_cost"] = cost
+                self._check_number_hallucination(parsed, prompt, company)
                 return parsed
 
         print(f"[AIAuditor] All AI providers failed or returned unparseable output for '{company}' — check API keys/quotas.")
         return None
+
+    # Numbers that show up in nearly every generated email regardless of
+    # source data (call-duration boilerplate, list positions) — excluded
+    # from the hallucination check below so they don't drown out real
+    # mismatches with constant noise.
+    _BOILERPLATE_NUMBERS = {"10", "1", "2", "3"}
+
+    @staticmethod
+    def _check_number_hallucination(parsed: dict, prompt: str, company: str) -> None:
+        """
+        Free, log-only sanity check: the prompt instructs the AI to quote
+        exact numbers from the real data it was given, but nothing actually
+        verifies it did that instead of inventing a plausible-sounding one.
+        Compares against the FULL rendered *prompt* text (not just
+        web.flaws) so scores/timing numbers mentioned elsewhere in the
+        prompt — e.g. WEBSITE DATA's page_speed_score — aren't false
+        positives; a number only counts as suspicious if it appears nowhere
+        in anything the AI was actually shown.
+
+        Doesn't block or retry sending — too many legitimate false
+        positives are still possible (a number split across sentences, a
+        rounded figure) — but logs a warning so a hallucinated stat is
+        visible before a real business owner receives a specific,
+        checkable number that's wrong.
+        """
+        source_numbers = set(re.findall(r"\d+(?:\.\d+)?", prompt))
+
+        email_text = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        email_numbers = set(re.findall(r"\d+(?:\.\d+)?", email_text))
+
+        suspicious = (email_numbers - source_numbers) - AIAuditor._BOILERPLATE_NUMBERS
+        if suspicious:
+            print(f"[AIAuditor] WARNING: email for '{company}' cites number(s) {sorted(suspicious)} not found anywhere in the source prompt — possible hallucination, review before sending.")
 
     @staticmethod
     def _encode_image(image_path: str | None) -> str | None:
