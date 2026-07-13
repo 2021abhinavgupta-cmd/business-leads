@@ -18,6 +18,7 @@ import google.generativeai as genai
 import openai
 
 import config
+from analyzer.flaws import compute_score
 from scrapers.instagram import InstagramData
 from scrapers.website import WebsiteData
 
@@ -110,6 +111,14 @@ class AIAuditor:
             if parsed is not None:
                 parsed["ai_cost"] = cost
                 self._check_number_hallucination(parsed, prompt, company)
+                # overall_score drives should_contact()/the skip-if-too-good
+                # decision, but as returned by the AI it's pure self-report
+                # with no real connection to the flaw data it was given.
+                # Replace it with a deterministic score computed from the
+                # actual measured flaws — keep the AI's original under a
+                # separate key for visibility, not because anything reads it.
+                parsed["ai_reported_score"] = parsed.get("overall_score")
+                parsed["overall_score"] = compute_score(getattr(web, "flaws", None) or [])
                 return parsed
 
         print(f"[AIAuditor] All AI providers failed or returned unparseable output for '{company}' — check API keys/quotas.")

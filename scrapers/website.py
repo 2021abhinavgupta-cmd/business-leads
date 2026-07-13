@@ -291,7 +291,44 @@ class WebsiteScraper:
 
     async def _pagespeed(self, url: str) -> dict:
         """
-        Query Google PageSpeed Insights for *url*.
+        Query Google PageSpeed Insights for *url* twice (concurrently, so it
+        doesn't cost extra wall-clock time) and average the numeric results.
+
+        PageSpeed scores have real run-to-run variance from network/server
+        crawling noise, not just the site's own actual performance —
+        live-observed the exact same site scoring 26/100 on one run and
+        32/100 on another within this same session. A single run can catch
+        a fluke (cold CDN cache, momentary load spike) and an email will
+        still quote it as a precise, checkable fact. Falls back to
+        whichever single run succeeded if the other fails/returns empty,
+        rather than losing data over one flaky call.
+        """
+        first, second = await asyncio.gather(
+            self._pagespeed_once(url), self._pagespeed_once(url)
+        )
+        if not first:
+            return second
+        if not second:
+            return first
+
+        averaged: dict = {}
+        for key in set(first) | set(second):
+            v1, v2 = first.get(key), second.get(key)
+            if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                averaged[key] = (v1 + v2) / 2
+            else:
+                averaged[key] = v1 if v1 is not None else v2
+
+        for key in ("performance", "seo", "accessibility", "best_practices", "lcp_ms", "tbt_ms"):
+            if averaged.get(key) is not None:
+                averaged[key] = round(averaged[key])
+
+        return averaged
+
+    async def _pagespeed_once(self, url: str) -> dict:
+        """
+        Single PageSpeed Insights call — see _pagespeed() above, which
+        always calls this twice and averages to smooth run-to-run noise.
 
         Returns:
             Dict with keys: performance, seo, accessibility, best_practices (each 0-100)

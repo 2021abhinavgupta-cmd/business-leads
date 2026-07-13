@@ -31,3 +31,22 @@ class Flaw:
 def rank(flaws: list[Flaw]) -> list[Flaw]:
     """Sort flaws most-severe first."""
     return sorted(flaws, key=lambda f: _SEVERITY_ORDER.get(f.severity, 4))
+
+
+_SEVERITY_PENALTY = {"critical": 25, "high": 12, "medium": 5, "low": 2}
+
+
+def compute_score(flaws: list[Flaw]) -> int:
+    """
+    Deterministic 0-100 health score computed directly from the real,
+    measured flaw list — the same start-at-100, subtract-by-severity
+    approach a human auditor would use manually. Used instead of trusting
+    the AI's self-reported overall_score, which has no actual connection to
+    the data it was given and can vary run-to-run on identical input, even
+    though it's the single signal that gates whether a lead gets contacted
+    at all (see analyzer/ai_audit.py:should_contact).
+    """
+    score = 100
+    for flaw in flaws:
+        score -= _SEVERITY_PENALTY.get(flaw.severity, 0)
+    return max(0, min(100, score))
