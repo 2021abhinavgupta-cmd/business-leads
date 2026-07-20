@@ -14,20 +14,57 @@ import os
 
 async def run_lighthouse(url: str) -> dict:
     """
-    Run Lighthouse CLI on a URL and return structured scores.
+    Run Lighthouse CLI on *url* TWICE and average the numeric results, then
+    return structured scores.
+
+    Lighthouse has real run-to-run variance from the same lab-simulation
+    noise as PageSpeed Insights (see WebsiteScraper._pagespeed's docstring
+    for a live-observed example on that API) — a single run can catch a
+    fluke and an email still quotes it as a precise, checkable fact. Runs
+    SEQUENTIALLY, not concurrently — each run launches its own headless
+    Chrome via chrome-launcher, and Railway's 500MB instances already run
+    Playwright under a hard concurrency-1 semaphore (see analyzer/visuals.py)
+    specifically to avoid OOM from two Chrome processes alive at once; this
+    trades extra wall-clock time for the same memory safety instead.
 
     Returns:
         Dict with keys: performance, seo, accessibility, best_practices (each 0-100)
         Returns empty dict on failure.
     """
-    # Try local Lighthouse CLI first (installed via package.json).
+    first = await _run_lighthouse_once(url)
+    second = await _run_lighthouse_once(url)
+
+    if not first:
+        return second
+    if not second:
+        return first
+
+    averaged: dict = {}
+    for key in set(first) | set(second):
+        v1, v2 = first.get(key), second.get(key)
+        if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+            averaged[key] = (v1 + v2) / 2
+        else:
+            averaged[key] = v1 if v1 is not None else v2
+
+    for key in ("performance", "seo", "accessibility", "best_practices", "lcp_ms", "tbt_ms"):
+        if averaged.get(key) is not None:
+            averaged[key] = round(averaged[key])
+    if averaged.get("cls") is not None:
+        averaged["cls"] = round(averaged["cls"], 3)
+
+    print(f"[Lighthouse] Averaged scores from 2 runs: {averaged}")
+    return averaged
+
+
+async def _run_lighthouse_once(url: str) -> dict:
+    """One Lighthouse pass: local CLI (installed via package.json) first, npx as fallback."""
     # Both helpers shell out via blocking subprocess.run, so run them in a
     # worker thread — otherwise a 120s Lighthouse run blocks the event loop.
     scores = await asyncio.to_thread(_run_lighthouse_cli, url)
     if scores:
         return scores
 
-    # Try npx as fallback
     scores = await asyncio.to_thread(_run_lighthouse_npx, url)
     if scores:
         return scores

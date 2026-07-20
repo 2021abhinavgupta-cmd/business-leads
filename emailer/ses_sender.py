@@ -112,7 +112,14 @@ class SESSender:
 
         Returns:
             The RFC Message-ID (str, truthy) if SES accepted the email,
-            False otherwise (send failed or the recipient is suppressed).
+            False if the recipient is on the suppression list.
+
+        Raises:
+            Exception: if SES rejects or fails the send (e.g. account still
+            in sandbox mode and the recipient isn't a verified identity) —
+            the real SES error message is preserved instead of being
+            swallowed, since a bare False gave no way to tell "suppressed"
+            apart from "AWS rejected it for some other reason."
         """
         if db.is_suppressed(to_email):
             print(f"Skipping {to_email}: on the unsubscribe/suppression list")
@@ -127,6 +134,7 @@ class SESSender:
                 msg = MIMEMultipart('mixed')
                 msg['Subject'] = subject
                 msg['From'] = self.from_email
+                msg['Reply-To'] = self.from_email
                 msg['To'] = to_email
                 msg['Date'] = formatdate(localtime=True)
                 msg['Message-ID'] = message_id
@@ -192,7 +200,7 @@ class SESSender:
 
                 if error_code == "MessageRejected":
                     print(f"Message rejected by SES: {error_message}")
-                    return False
+                    raise Exception(f"SES rejected the message: {error_message}") from e
 
                 if error_code == "Throttling":
                     if attempt < retries:
@@ -200,14 +208,14 @@ class SESSender:
                         continue
                     else:
                         print(f"Throttling error after retry: {error_message}")
-                        return False
+                        raise Exception(f"SES throttled the send after retry: {error_message}") from e
 
                 print(f"SES ClientError ({error_code}): {error_message}")
-                return False
+                raise Exception(f"SES error ({error_code}): {error_message}") from e
 
             except Exception as e:
                 print(f"Unexpected error sending email: {e}")
-                return False
+                raise
 
     def generate_followup(self, contact_name: str, stage: int, your_name: str) -> str:
         """
@@ -263,6 +271,7 @@ class SESSender:
                 msg = MIMEMultipart('alternative')
                 msg['Subject'] = subject
                 msg['From'] = self.from_email
+                msg['Reply-To'] = self.from_email
                 msg['To'] = to_email
                 msg['Date'] = formatdate(localtime=True)
                 msg['Message-ID'] = make_msgid(domain=self._msgid_domain())

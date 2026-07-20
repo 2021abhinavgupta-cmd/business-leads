@@ -27,6 +27,39 @@ from scrapers.website import WebsiteData
 # ---------------------------------------------------------------------------
 CONTACT_THRESHOLD = 70
 
+# Low, near-deterministic temperature — this task is "quote exact numbers
+# and facts from the data you were given" not creative writing, so we want
+# the least-random output the provider allows rather than the typical
+# chat-assistant default (which for Anthropic is 1.0, uncomfortably high for
+# a fact-citation task). Kept just above 0 rather than exactly 0 so email
+# copy still reads naturally instead of robotically repetitive.
+_AI_TEMPERATURE = 0.2
+
+# JSON Schema shared by every provider that supports enforced structured
+# output (Anthropic tool-use, Gemini response_schema, OpenAI json_schema
+# strict mode) — guarantees the exact shape _parse_json expects instead of
+# relying on regex-stripping a freeform text reply, which is what used to
+# cause every one of _parse_json's silent-failure paths.
+_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "flaws": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "paragraph": {"type": "string"},
+                },
+                "required": ["paragraph"],
+            },
+        },
+        "overall_score": {"type": "integer"},
+        "email_subject": {"type": "string"},
+        "opening_line": {"type": "string"},
+    },
+    "required": ["flaws", "overall_score", "email_subject", "opening_line"],
+}
+
 
 class AIAuditor:
     """Run AI-powered audits on lead data with provider fallback."""
@@ -111,6 +144,9 @@ class AIAuditor:
             if parsed is not None:
                 parsed["ai_cost"] = cost
                 self._check_number_hallucination(parsed, prompt, company)
+                self._verify_grounding(parsed, prompt, company)
+                self._check_spam_trigger_words(parsed, company)
+                self._check_body_length(parsed, company, has_image=bool(image_path))
                 # overall_score drives should_contact()/the skip-if-too-good
                 # decision, but as returned by the AI it's pure self-report
                 # with no real connection to the flaw data it was given.
@@ -156,6 +192,173 @@ class AIAuditor:
         suspicious = (email_numbers - source_numbers) - AIAuditor._BOILERPLATE_NUMBERS
         if suspicious:
             print(f"[AIAuditor] WARNING: email for '{company}' cites number(s) {sorted(suspicious)} not found anywhere in the source prompt — possible hallucination, review before sending.")
+
+    # Classic spam-filter trigger words/phrases (case insensitive substring
+    # match) — the prompt already instructs the AI to avoid these, this is
+    # the same belt-and-suspenders pattern as _check_number_hallucination /
+    # _verify_grounding: a prevention instruction can be ignored, so also
+    # detect after the fact and log a warning before a flagged email goes out.
+    _SPAM_TRIGGER_WORDS = [
+        "free", "guarantee", "guaranteed", "click here", "buy now",
+        "act now", "limited time", "no obligation", "risk free",
+        "cash bonus", "$$$", "100% free", "% off", "congratulations",
+        "winner", "urgent", "don't delete", "dear friend", "act immediately",
+        "best price", "no cost", "cash",
+    ]
+
+    @staticmethod
+    def _check_spam_trigger_words(parsed: dict, company: str) -> None:
+        """
+        Log-only scan of the generated subject + flaw paragraphs + opening
+        line for classic spam-filter trigger words/phrases and ALL CAPS
+        shouting, both of which independently hurt inbox placement
+        regardless of sender reputation. Doesn't block/retry sending, same
+        rationale as the other two checks above this one.
+        """
+        subject = parsed.get("email_subject", "") or ""
+        opening = parsed.get("opening_line", "") or ""
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        full_text = f"{subject} {opening} {paragraphs}"
+        lower_text = full_text.lower()
+
+        hits = [w for w in AIAuditor._SPAM_TRIGGER_WORDS if w in lower_text]
+
+        all_caps_words = [
+            w for w in re.findall(r"\b[A-Za-z]{3,}\b", full_text)
+            if w.isupper()
+        ]
+
+        if hits or all_caps_words:
+            parts = []
+            if hits:
+                parts.append(f"trigger word(s) {hits}")
+            if all_caps_words:
+                parts.append(f"ALL CAPS word(s) {all_caps_words}")
+            print(f"[AIAuditor] WARNING: email for '{company}' contains {' and '.join(parts)} — spam-filter risk, review before sending.")
+
+    # Below this, an embedded screenshot dominates the message and the
+    # text:image ratio itself reads as spammy to some filters regardless of
+    # what the text actually says.
+    _MIN_BODY_WORD_COUNT = 40
+
+    @staticmethod
+    def _check_body_length(parsed: dict, company: str, has_image: bool) -> None:
+        """
+        Log-only: flags a body that's too short relative to the embedded
+        screenshot it ships with. Only meaningful when an image is actually
+        attached — a short text-only email isn't the same spam signal.
+        """
+        if not has_image:
+            return
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        opening = parsed.get("opening_line", "") or ""
+        word_count = len(f"{opening} {paragraphs}".split())
+        if word_count < AIAuditor._MIN_BODY_WORD_COUNT:
+            print(f"[AIAuditor] WARNING: email for '{company}' is only {word_count} words with an embedded screenshot attached — low text:image ratio can itself look spammy, review before sending.")
+
+    def _verify_grounding(self, parsed: dict, prompt: str, company: str) -> None:
+        """
+        Free-form-claim counterpart to _check_number_hallucination above:
+        that regex check only catches invented *numbers*, but a claim like
+        "you don't have a mobile version of your site" when you do isn't
+        numeric and slides right past it. Fires one more cheap, low-
+        temperature LLM call asking a simple yes/no per flaw paragraph:
+        "is this claim grounded in the source data, or invented?" — an
+        LLM-as-judge pass, independent of which provider generated the
+        copy (fixed preference order below, not necessarily the same one).
+
+        Log-only, exactly like the hallucination check: too many legitimate
+        borderline judgment calls (a fair inference vs. a fabrication) to
+        safely auto-block or auto-retry on, but a flagged claim should be
+        visible before a real business owner receives a specific, checkable
+        claim about their own site that's wrong.
+        """
+        flaws = parsed.get("flaws", [])
+        if not flaws:
+            return
+
+        claims = "\n".join(f"{i+1}. {f.get('paragraph', '')}" for i, f in enumerate(flaws))
+        judge_prompt = (
+            "You are a strict fact checker. Below is SOURCE DATA about a business's "
+            "website/social media, followed by a list of numbered CLAIMS written about "
+            "that business.\n\n"
+            f"SOURCE DATA:\n{prompt[:6000]}\n\n"
+            f"CLAIMS:\n{claims}\n\n"
+            "For each claim number, decide if it is factually grounded in SOURCE DATA "
+            "(a fair paraphrase or reasonable inference counts as grounded) or if it "
+            "states something not supported by SOURCE DATA (fabricated/invented).\n"
+            'Return ONLY valid JSON: {"unsupported": [claim numbers that are NOT grounded]}. '
+            "Empty array if all claims are grounded. No markdown, no explanation."
+        )
+
+        try:
+            raw = self._call_judge(judge_prompt)
+            if not raw:
+                return
+            result = self._parse_json_loose(raw)
+            unsupported = result.get("unsupported") if result else None
+            if unsupported:
+                flagged = [claims.splitlines()[i - 1] for i in unsupported if 0 < i <= len(flaws)]
+                print(f"[AIAuditor] WARNING: grounding check flagged {len(flagged)} claim(s) for '{company}' as possibly unsupported by source data — review before sending: {flagged}")
+        except Exception as e:
+            print(f"[AIAuditor] Grounding verification skipped (non-critical): {e}")
+
+    def _call_judge(self, judge_prompt: str) -> str | None:
+        """
+        Cheapest available text-only call for the grounding check above —
+        fixed preference order (Gemini Flash, then Haiku, then GPT-4o-mini),
+        independent of which provider actually generated the audit copy
+        being checked, since a model re-checking its own output is a weaker
+        signal than a second opinion. Falls through silently (returns None)
+        if nothing is configured — the grounding check is a bonus safety
+        net, not something the audit should ever fail over.
+        """
+        if config.GEMINI_API_KEY:
+            try:
+                model = genai.GenerativeModel(
+                    "gemini-3.5-flash",
+                    generation_config=genai.types.GenerationConfig(
+                        response_mime_type="application/json", temperature=0.0,
+                    ),
+                )
+                return model.generate_content(judge_prompt).text
+            except Exception:
+                pass
+        if self._anthropic_client:
+            try:
+                message = self._anthropic_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=256,
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": judge_prompt}],
+                )
+                return message.content[0].text
+            except Exception:
+                pass
+        if self._openai_client:
+            try:
+                response = self._openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": judge_prompt}],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _parse_json_loose(raw: str) -> dict | None:
+        """Same tolerant parsing as _parse_json but without the required-keys check — used for the judge's smaller {"unsupported": [...]} shape."""
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        try:
+            return json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _encode_image(image_path: str | None) -> str | None:
@@ -282,6 +485,7 @@ class AIAuditor:
             "Pick 2 or 3 of the most severe items from FLAWS DETECTED above (already ranked worst-first) and write about THOSE — don't go hunting for problems yourself, the list is already reconciled and prioritized.\n"
             "Be direct, casual, and extremely friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
             "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response. For example, use '10 minute call' instead of '10-minute call'.\n"
+            "CRITICAL INSTRUCTION: NEVER use spam trigger words/phrases anywhere in the subject or body — this includes but is not limited to: free, guarantee/guaranteed, click here, buy now, act now, limited time, no obligation, risk free, cash, $$$, 100% (or any percent-off claim), congratulations, winner, urgent, don't delete, dear friend. NEVER write in ALL CAPS (not even a single word) or use excessive exclamation marks (!!!). Write like a real person emailing a peer, not a marketing blast.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If a flaw includes a specific number (score, ms, word count), QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
             "If any [ACCESSIBILITY] flaws are in the list, mention the specific violation by name.\n"
@@ -323,6 +527,8 @@ class AIAuditor:
                 "gemini-3.5-flash",
                 generation_config=genai.types.GenerationConfig(
                     response_mime_type="application/json",
+                    response_schema=_RESPONSE_JSON_SCHEMA,
+                    temperature=_AI_TEMPERATURE,
                 ),
             )
             content = [prompt]
@@ -374,8 +580,30 @@ class AIAuditor:
             response = self._openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": content}],
-                temperature=0.7,
-                response_format={"type": "json_object"},
+                temperature=_AI_TEMPERATURE,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "audit_result",
+                        "strict": True,
+                        "schema": {
+                            **_RESPONSE_JSON_SCHEMA,
+                            "additionalProperties": False,
+                            "properties": {
+                                **_RESPONSE_JSON_SCHEMA["properties"],
+                                "flaws": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"paragraph": {"type": "string"}},
+                                        "required": ["paragraph"],
+                                        "additionalProperties": False,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
             )
             
             # Pricing: $0.150/1M input, $0.60/1M output
@@ -420,12 +648,24 @@ class AIAuditor:
                 })
             content.append({"type": "text", "text": prompt})
 
+            # Forced tool-use instead of freeform text — Anthropic guarantees
+            # the tool_use block's "input" matches input_schema, which is
+            # what _RESPONSE_JSON_SCHEMA is doing here. Removes an entire
+            # class of _parse_json failures (markdown fences, leading prose,
+            # truncated JSON) for this provider specifically.
             message = self._anthropic_client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
+                temperature=_AI_TEMPERATURE,
+                tools=[{
+                    "name": "submit_audit_result",
+                    "description": "Submit the structured audit result.",
+                    "input_schema": _RESPONSE_JSON_SCHEMA,
+                }],
+                tool_choice={"type": "tool", "name": "submit_audit_result"},
                 messages=[{"role": "user", "content": content}],
             )
-            
+
             # Pricing: $0.25/1M input, $1.25/1M output
             try:
                 inp = message.usage.input_tokens
@@ -433,8 +673,12 @@ class AIAuditor:
                 cost = (inp * 0.25 / 1_000_000) + (out * 1.25 / 1_000_000)
             except Exception:
                 cost = 0.0006
-                
-            return message.content[0].text, cost
+
+            tool_use = next((b for b in message.content if b.type == "tool_use"), None)
+            if tool_use is None:
+                print("Anthropic error: no tool_use block in response")
+                return None
+            return json.dumps(tool_use.input), cost
         except Exception as e:
             print(f"Anthropic error: {e}")
             return None
@@ -466,7 +710,7 @@ class AIAuditor:
             response = self._openrouter_client.chat.completions.create(
                 model="google/gemma-4-31b-it:free",
                 messages=[{"role": "user", "content": content}],
-                temperature=0.7,
+                temperature=_AI_TEMPERATURE,
                 response_format={"type": "json_object"},
             )
 

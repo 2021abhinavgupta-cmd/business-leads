@@ -9,3 +9,4 @@ data/
 screenshots/
 *.db
 .pytest_cache/
+warmup_recipients.txt

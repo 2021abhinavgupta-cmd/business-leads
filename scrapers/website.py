@@ -225,6 +225,36 @@ class WebsiteScraper:
         robots_blocked = await self._check_robots_disallow_all(url)
         missing_alt_count = self._check_missing_alt_images(html)
 
+        # Step 3.7 — HTML validity + a second, independent accessibility
+        # engine. Both run sequentially here (i.e. after Playwright's own
+        # browser has already closed — audit_website always runs after
+        # generate_audit_screenshot returns, see app.py), so Pa11y's own
+        # browser launch never overlaps with Playwright's on Railway's
+        # 500MB instances.
+        try:
+            from analyzer.html_validate import run_html_validate
+            html_validate_result = await run_html_validate(html)
+        except Exception as e:
+            print(f"[HTMLValidate] Import/run error: {e}")
+            html_validate_result = {}
+        try:
+            from analyzer.pa11y_check import run_pa11y
+            pa11y_issues = await run_pa11y(url)
+        except Exception as e:
+            print(f"[Pa11y] Import/run error: {e}")
+            pa11y_issues = []
+
+        # Real, in-browser Core Web Vitals (analyzer/visuals.py, via
+        # PerformanceObserver) beat Lighthouse's lab-simulated equivalents
+        # when both are available — prefer real, fall back to lab per-metric
+        # rather than all-or-nothing, since either source can independently
+        # come back empty (Lighthouse unavailable, or the observer had
+        # nothing buffered yet on a very fast/simple page).
+        real_wv = extra.get("real_web_vitals") or {}
+        lcp_ms = real_wv.get("lcp_ms") if real_wv.get("lcp_ms") is not None else lighthouse_scores.get("lcp_ms")
+        cls = real_wv.get("cls") if real_wv.get("cls") is not None else lighthouse_scores.get("cls")
+        tbt_ms = real_wv.get("tbt_ms") if real_wv.get("tbt_ms") is not None else lighthouse_scores.get("tbt_ms")
+
         # Step 4 — Reconcile every signal above into one ranked flaw list,
         # instead of feeding the AI prompt raw, unreconciled tool output.
         flaws = self._build_flaws(
@@ -233,9 +263,9 @@ class WebsiteScraper:
             seo_score=seo_score,
             mobile_score=mobile_score,
             best_practices_score=lighthouse_scores.get("best_practices", 0),
-            lcp_ms=lighthouse_scores.get("lcp_ms"),
-            cls=lighthouse_scores.get("cls"),
-            tbt_ms=lighthouse_scores.get("tbt_ms"),
+            lcp_ms=lcp_ms,
+            cls=cls,
+            tbt_ms=tbt_ms,
             has_ssl=has_ssl,
             parsed=parsed,
             has_structured_data=has_structured_data,
@@ -254,6 +284,8 @@ class WebsiteScraper:
             mobile_horizontal_overflow=extra.get("mobile_horizontal_overflow", False),
             duplicate_title_pages=extra.get("duplicate_title_pages", []),
             duplicate_meta_pages=extra.get("duplicate_meta_pages", []),
+            html_validate_result=html_validate_result,
+            pa11y_issues=pa11y_issues,
         )
 
         return WebsiteData(
@@ -863,6 +895,8 @@ class WebsiteScraper:
         duplicate_title_pages: list[str] | None = None,
         duplicate_meta_pages: list[str] | None = None,
         has_business_schema: bool = False,
+        html_validate_result: dict | None = None,
+        pa11y_issues: list[dict] | None = None,
     ) -> list[Flaw]:
         """
         Reconcile every audit signal (Lighthouse/PageSpeed, HTML parsing,
@@ -1054,6 +1088,27 @@ class WebsiteScraper:
         if duplicate_meta_pages and len(set(duplicate_meta_pages)) >= 2:
             pages = ", ".join(sorted(set(duplicate_meta_pages)))
             flaws.append(Flaw("seo", "low", f"Multiple pages ({pages}) share the exact same meta description — Google may show a generic or duplicate snippet in search results for one of them."))
+
+        # HTML validity (analyzer/html_validate.py) — a concrete, checkable
+        # signal not previously covered by anything else in this pipeline.
+        # Threshold set well above zero: a handful of validation errors is
+        # extremely common on real-world sites and not worth an email over;
+        # double digits starts to indicate genuinely sloppy markup.
+        error_count = (html_validate_result or {}).get("error_count", 0)
+        if error_count > 10:
+            messages = (html_validate_result or {}).get("messages", [])
+            example = messages[0] if messages else ""
+            flaws.append(Flaw("tech", "medium", f"{error_count} HTML validation errors detected (e.g. \"{example}\") — invalid markup can render inconsistently across browsers and confuses screen readers/search crawlers."))
+
+        # Pa11y (analyzer/pa11y_check.py) — a second, independent
+        # accessibility engine alongside axe-core above. Reported as its
+        # own supplementary flaw rather than merged/deduped with the
+        # axe-core violations, since the two tools' rule codes don't have a
+        # reliable 1:1 mapping to cross-reference honestly.
+        if pa11y_issues:
+            count = len(pa11y_issues)
+            example = pa11y_issues[0].get("message", "")
+            flaws.append(Flaw("accessibility", "medium", f"A second accessibility scan (Pa11y, different rule engine than the axe-core scan above) found {count} issue(s), e.g. \"{example}\"."))
 
         return rank_flaws(flaws)
 

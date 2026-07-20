@@ -170,3 +170,36 @@ def test_business_schema_check_skipped_when_no_structured_data_at_all():
     flaws = _build(has_structured_data=False, has_business_schema=False)
     assert not any("doesn't use a business type" in f.description for f in flaws)
     assert any("No structured data" in f.description for f in flaws)
+
+
+def test_html_validate_errors_below_threshold_not_flagged():
+    # A handful of validation errors is extremely common on real sites —
+    # only double digits is worth an email over.
+    flaws = _build(html_validate_result={"error_count": 5, "messages": ["some error"]})
+    assert not any("HTML validation" in f.description for f in flaws)
+
+
+def test_html_validate_errors_above_threshold_flagged():
+    flaws = _build(html_validate_result={"error_count": 25, "messages": ["<img> is missing required \"alt\" attribute (wcag/h37)"]})
+    matches = [f for f in flaws if "HTML validation" in f.description]
+    assert len(matches) == 1
+    assert matches[0].severity == "medium"
+    assert matches[0].category == "tech"
+    assert "25 HTML validation errors" in matches[0].description
+    assert "wcag/h37" in matches[0].description
+
+
+def test_pa11y_issues_flagged_as_supplementary_accessibility_signal():
+    issues = [{"code": "WCAG2AA.Principle1", "message": "Element missing text alternative", "selector": "img"}]
+    flaws = _build(pa11y_issues=issues)
+    matches = [f for f in flaws if "second accessibility scan" in f.description]
+    assert len(matches) == 1
+    assert matches[0].category == "accessibility"
+    assert matches[0].severity == "medium"
+    assert "1 issue(s)" in matches[0].description
+    assert "Element missing text alternative" in matches[0].description
+
+
+def test_no_pa11y_issues_not_flagged():
+    flaws = _build(pa11y_issues=[])
+    assert not any("second accessibility scan" in f.description for f in flaws)

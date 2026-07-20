@@ -325,7 +325,7 @@ async def send_email(
 
             return {"status": "success"}
         else:
-            raise HTTPException(status_code=500, detail="Failed to send via SES")
+            raise HTTPException(status_code=400, detail=f"{req.email} is on the unsubscribe/suppression list")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

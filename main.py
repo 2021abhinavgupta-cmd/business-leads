@@ -130,11 +130,22 @@ async def process_single_lead(lead: dict) -> str:
 # Batch Runner
 # ==============================================================================
 
+# Delay between sends within a batch, jittered — a fresh sending domain
+# blasting its whole daily quota back-to-back in seconds reads as automated
+# bulk mail to Gmail regardless of DAILY_EMAIL_LIMIT's cap on total volume;
+# spacing sends out looks like organic, human-paced outreach instead. Same
+# "looks automated" concern that's why scrapers/google_maps.py already
+# jitters its own delays. Only applies between successive real sends, not
+# every lead processed (skips/failures don't need to be throttled).
+_MIN_SEND_DELAY_SECONDS = 60
+_MAX_SEND_DELAY_SECONDS = 240
+
+
 async def run_batch():
     """Run a batch of emails for pending leads."""
     global emails_sent
     emails_sent = 0
-    
+
     print("--- Starting Lead Audit Bot Batch ---")
     
     # Check SES quota first
@@ -170,8 +181,13 @@ async def run_batch():
         
         if result == "emailed":
             emails_sent += 1
-            
-        print(f"  Result: {result} | Total sent today: {emails_sent}")
+            print(f"  Result: {result} | Total sent today: {emails_sent}")
+            if emails_sent < config.DAILY_EMAIL_LIMIT:
+                delay = random.uniform(_MIN_SEND_DELAY_SECONDS, _MAX_SEND_DELAY_SECONDS)
+                print(f"  Waiting {delay:.0f}s before next send (avoids a burst-of-mail pattern)...")
+                await asyncio.sleep(delay)
+        else:
+            print(f"  Result: {result} | Total sent today: {emails_sent}")
     
     stats = sheets.get_stats()
     print(f"\nBatch done! Current CRM stats: {stats}")

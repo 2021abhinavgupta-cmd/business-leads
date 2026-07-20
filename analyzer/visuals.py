@@ -258,6 +258,40 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
 
+                # Real, in-browser Core Web Vitals (not Lighthouse's lab-
+                # simulated ones) via PerformanceObserver, same primitives
+                # Google's own web-vitals JS library wraps — no dependency
+                # needed since these are native browser APIs. Registered as
+                # a context-level init script so it attaches before ANY
+                # page script runs on every navigation, which matters for
+                # LCP/CLS specifically since both can fire within the first
+                # few hundred ms of a real page load.
+                await context.add_init_script("""() => {
+                    window.__webVitals = { lcp: null, clsSum: 0, tbtMs: 0 };
+                    try {
+                        new PerformanceObserver((list) => {
+                            const entries = list.getEntries();
+                            const last = entries[entries.length - 1];
+                            if (last) window.__webVitals.lcp = last.startTime;
+                        }).observe({ type: 'largest-contentful-paint', buffered: true });
+                    } catch (e) {}
+                    try {
+                        new PerformanceObserver((list) => {
+                            for (const entry of list.getEntries()) {
+                                if (!entry.hadRecentInput) window.__webVitals.clsSum += entry.value;
+                            }
+                        }).observe({ type: 'layout-shift', buffered: true });
+                    } catch (e) {}
+                    try {
+                        new PerformanceObserver((list) => {
+                            for (const entry of list.getEntries()) {
+                                const blocking = entry.duration - 50;
+                                if (blocking > 0) window.__webVitals.tbtMs += blocking;
+                            }
+                        }).observe({ type: 'longtask', buffered: true });
+                    } catch (e) {}
+                }""")
+
                 page = await context.new_page()
 
                 # Listeners persist for the page's whole lifetime, so attaching
@@ -324,6 +358,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
 
                 # --- 3. Capture real performance timing from the browser ---
                 perf_timing = await _get_performance_timing(page)
+                real_web_vitals = await _get_real_web_vitals(page)
 
                 # --- 4. Run every per-page check on the homepage ---
                 pages_checked = [await _audit_current_page(page, context, "/", screenshot_bytes)]
@@ -463,6 +498,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
             "final_url": final_url,
             "pages_audited": [p["label"] for p in pages_checked],
             "mobile_image_path": mobile_filepath,
+            "real_web_vitals": real_web_vitals,
         }
 
         return filepath, html_content, extra_audit_data
@@ -492,6 +528,35 @@ async def _get_performance_timing(page) -> dict:
     except Exception as e:
         print(f"[Perf] Failed to extract timing: {e}")
     return {}
+
+
+async def _get_real_web_vitals(page) -> dict:
+    """
+    Read back the LCP/CLS/TBT accumulated by the PerformanceObserver init
+    script registered in generate_audit_screenshot(). These are real,
+    measured-in-browser numbers (the same primitives Google's own
+    web-vitals library uses), not Lighthouse's lab-simulated equivalents —
+    scrapers/website.py prefers these over lighthouse_scores' lcp_ms/cls/
+    tbt_ms when both are available, since a real measurement beats a
+    simulated one. Returns {} (falls back to Lighthouse entirely) if the
+    observers never attached (older browser, or the page navigated before
+    the init script's observers had anything to report).
+    """
+    try:
+        raw = await page.evaluate("() => window.__webVitals || null")
+        if not raw:
+            return {}
+        lcp = raw.get("lcp")
+        cls = raw.get("clsSum")
+        tbt = raw.get("tbtMs")
+        return {
+            "lcp_ms": round(lcp) if isinstance(lcp, (int, float)) else None,
+            "cls": round(cls, 3) if isinstance(cls, (int, float)) else None,
+            "tbt_ms": round(tbt) if isinstance(tbt, (int, float)) else None,
+        }
+    except Exception as e:
+        print(f"[Perf] Failed to read real web vitals: {e}")
+        return {}
 
 
 async def _run_axe_audit(page) -> tuple[list, dict | None]:

@@ -42,7 +42,13 @@ IG_USERNAME = os.getenv("IG_USERNAME")
 IG_PASSWORD = os.getenv("IG_PASSWORD")
 
 # === Limits & Settings ===
-DAILY_EMAIL_LIMIT = int(os.getenv("DAILY_EMAIL_LIMIT", "100"))
+# Default dropped from 100 to 15 (2026-07-20) then raised to 50 (2026-07-20,
+# same day) on explicit user request, ahead of any Postmaster Tools data
+# confirming reputation was actually improving — a faster ramp than the
+# originally recommended +20%/few days. Deliberately still overridable via
+# env var — if DAILY_EMAIL_LIMIT is already set in Railway, this code
+# default won't change production behavior until that's updated too.
+DAILY_EMAIL_LIMIT = int(os.getenv("DAILY_EMAIL_LIMIT", "50"))
 LEAD_SOURCE = os.getenv("LEAD_SOURCE", "maps").lower() # options: maps, ecommerce, startups, b2b
 
 # === API Auth ===

@@ -2,6 +2,8 @@
   "name": "lead-audit-bot",
   "private": true,
   "dependencies": {
-    "lighthouse": "^12.0.0"
+    "lighthouse": "^12.0.0",
+    "html-validate": "^8.24.0",
+    "pa11y": "^8.0.0"
   }
 }
