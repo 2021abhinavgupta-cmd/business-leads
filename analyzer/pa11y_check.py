@@ -37,8 +37,8 @@ def _run_sync(url: str) -> list[dict]:
     binary = os.path.join(_BASE_DIR, "node_modules", ".bin", "pa11y")
     try:
         result = subprocess.run(
-            [binary, "--reporter", "json", "--timeout", "20000", url],
-            capture_output=True, text=True, timeout=30,
+            [binary, "--reporter", "json", "--timeout", "40000", url],
+            capture_output=True, text=True, timeout=50,
         )
     except (OSError, subprocess.TimeoutExpired):
         # See analyzer/html_validate.py's matching comment — OSError (not
@@ -46,8 +46,8 @@ def _run_sync(url: str) -> list[dict]:
         # failure falls through to npx instead of being silently swallowed.
         try:
             result = subprocess.run(
-                ["npx", "--yes", "pa11y", "--reporter", "json", "--timeout", "20000", url],
-                capture_output=True, text=True, timeout=40,
+                ["npx", "--yes", "pa11y", "--reporter", "json", "--timeout", "40000", url],
+                capture_output=True, text=True, timeout=60,
             )
         except (OSError, subprocess.TimeoutExpired):
             return []

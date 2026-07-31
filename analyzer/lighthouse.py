@@ -169,7 +169,7 @@ def _execute_lighthouse(binary: str, url: str, use_npx: bool = False) -> dict:
             cmd,
             capture_output=True,
             text=True,
-            timeout=120  # 120 second timeout for 100% accuracy on slow sites
+            timeout=180  # generous timeout so slow-loading sites still get a real (not truncated) audit
         )
         
         if os.path.exists(output_path):

@@ -437,18 +437,18 @@ class WebsiteScraper:
         async def fetch_and_extract(url):
             # Primary: trafilatura
             try:
-                res = await self.client.get(url, timeout=10)
+                res = await self.client.get(url, timeout=20)
                 if res.status_code == 200:
                     text = trafilatura.extract(res.text)
                     if text:
                         return f"--- CONTEXT FROM {url} ---\n{text[:1500]}"
             except Exception:
                 pass
-            
+
             # Fallback: Jina Reader (free, no API key needed)
             try:
                 jina_url = f"https://r.jina.ai/{url}"
-                res = await self.client.get(jina_url, timeout=10, headers={"Accept": "text/plain"})
+                res = await self.client.get(jina_url, timeout=20, headers={"Accept": "text/plain"})
                 if res.status_code == 200 and res.text.strip():
                     print(f"[Jina] Fallback succeeded for {url}")
                     return f"--- CONTEXT FROM {url} (via Jina Reader) ---\n{res.text[:1500]}"
@@ -646,7 +646,7 @@ class WebsiteScraper:
         """Run Crawl4AI off-thread with a timeout; fall back to markdownify."""
         try:
             markdown_text = await asyncio.wait_for(
-                asyncio.to_thread(self._run_crawl4ai_sync, html), timeout=15
+                asyncio.to_thread(self._run_crawl4ai_sync, html), timeout=30
             )
             if markdown_text and len(markdown_text) > 20:
                 # Guard against Crawl4AI silently returning near-empty/placeholder
@@ -846,7 +846,7 @@ class WebsiteScraper:
         """
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._run_pyseoanalyzer_sync, url), timeout=15
+                asyncio.to_thread(self._run_pyseoanalyzer_sync, url), timeout=30
             )
         except asyncio.TimeoutError:
             print(f"[SEOAnalyzer] Timed out for {url}")
@@ -1132,7 +1132,7 @@ class WebsiteScraper:
         """
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._run_wappalyzer_sync, url), timeout=10
+                asyncio.to_thread(self._run_wappalyzer_sync, url), timeout=20
             )
         except asyncio.TimeoutError:
             print(f"[Wappalyzer] Timed out for {url}, skipping tech detection")
@@ -1143,7 +1143,7 @@ class WebsiteScraper:
 
     @staticmethod
     def _run_wappalyzer_sync(url: str) -> list[str]:
-        results = wappalyzer_analyze(url=url, scan_type="fast", timeout=8)
+        results = wappalyzer_analyze(url=url, scan_type="fast", timeout=18)
         techs = results.get(url) or next(iter(results.values()), {})
         return sorted(techs.keys())
 

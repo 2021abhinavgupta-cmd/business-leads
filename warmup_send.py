@@ -8,6 +8,7 @@ live in git history). One address per line, run manually as needed.
 import os
 import time
 import random
+import datetime
 
 from emailer.ses_sender import SESSender
 
@@ -53,7 +54,11 @@ SIGNOFFS = ["Kshitij", "Kshitij Gupta", "Best,\nKshitij"]
 
 
 def _build_email(seed: int) -> tuple[str, str]:
-    rng = random.Random(seed)
+    # Seed includes today's date so a same-day re-run (or the next scheduled
+    # day) doesn't resend byte-identical content to the same address —
+    # identical content twice looks bursty/spammy in its own right.
+    today = datetime.date.today().isoformat()
+    rng = random.Random(f"{today}-{seed}")
     subject = rng.choice(SUBJECTS)
     opener = rng.choice(OPENERS)
     score_line = rng.choice(SCORE_LINES).format(score=rng.randint(28, 54))

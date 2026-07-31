@@ -10,3 +10,4 @@ screenshots/
 *.db
 .pytest_cache/
 warmup_recipients.txt
+warmup_log.txt

@@ -217,7 +217,36 @@ def _find_duplicate_page_labels(pages_checked: list[dict], key: str) -> list[str
     return [label for label, value in pairs if counts[value] > 1]
 
 
+_AUDIT_SCREENSHOT_RETRIES = 2
+
+
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
+    """
+    Thin retry wrapper around _generate_audit_screenshot_once. A single
+    failure anywhere in that function's multi-page crawl (homepage + extra
+    pages + mobile revisit + axe-core + broken-link checks) used to hard-fail
+    the whole audit and report "Website is unreachable" even when the real
+    site was fine — live-verified 2026-07-20 against a real hotel-chain site
+    (itchotels.com) that returned a clean 200 and full HTML on a second,
+    isolated attempt seconds after the pipeline reported it as down. Large
+    sites behind Akamai/Cloudflare bot management are especially prone to
+    intermittently challenging a single headless-browser request without
+    the site actually being down. Retries once with a short delay before
+    giving up and reporting unreachable, same "transient blip, not a dead
+    site" assumption as SES's Throttling retry.
+    """
+    last_result = (None, None, None)
+    for attempt in range(_AUDIT_SCREENSHOT_RETRIES):
+        last_result = await _generate_audit_screenshot_once(url, company_name)
+        if last_result[1] is not None:  # html_content present = success
+            return last_result
+        if attempt < _AUDIT_SCREENSHOT_RETRIES - 1:
+            print(f"[Visuals] Audit attempt {attempt + 1} failed for {url} — retrying once (likely transient network/bot-detection blip, not a dead site)...")
+            await asyncio.sleep(5)
+    return last_result
+
+
+async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
     """
     Takes a desktop screenshot of the URL, runs accessibility + broken link
     audits across the homepage plus up to _MAX_EXTRA_PAGES internal pages
@@ -243,7 +272,8 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         - mobile_horizontal_overflow: True if the homepage requires horizontal scrolling at 390px width
         - duplicate_title_pages / duplicate_meta_pages: page labels sharing an identical title/meta description
 
-    Returns (None, None, None) on failure.
+    Returns (None, None, None) on failure. Called by generate_audit_screenshot
+    above, which retries this once before accepting a failure as real.
     """
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
@@ -266,7 +296,20 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # page script runs on every navigation, which matters for
                 # LCP/CLS specifically since both can fire within the first
                 # few hundred ms of a real page load.
-                await context.add_init_script("""() => {
+                #
+                # MUST be a bare script body, NOT wrapped in "() => { ... }".
+                # Playwright's add_init_script evaluates the string as a JS
+                # expression/statement — a lone arrow function expression is
+                # valid JS that just constructs a function value and never
+                # calls it, so the body silently never runs. Live-verified
+                # 2026-07-31: this was true on EVERY site tested, including
+                # example.com, not just one flaky site — window.__webVitals
+                # was always undefined, so _get_real_web_vitals always fell
+                # back to Lighthouse's throttled/simulated LCP number, which
+                # runs 5-10x higher than a real unthrottled page load. This
+                # is what produced a "hero content takes 17.5s" flaw on a
+                # site that a real visitor saw render in ~2s.
+                await context.add_init_script("""
                     window.__webVitals = { lcp: null, clsSum: 0, tbtMs: 0 };
                     try {
                         new PerformanceObserver((list) => {
@@ -290,7 +333,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                             }
                         }).observe({ type: 'longtask', buffered: true });
                     } catch (e) {}
-                }""")
+                """)
 
                 page = await context.new_page()
 
@@ -324,7 +367,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # browser (see _PLAYWRIGHT_SEMAPHORE below), so a truly unbounded
                 # wait on one bad site would freeze every other lead queued behind
                 # it, not just fail the one lead.
-                response = await page.goto(url, timeout=90000, wait_until="domcontentloaded")
+                response = await page.goto(url, timeout=120000, wait_until="domcontentloaded")
 
                 # Response headers, reused for the security-headers check — this is
                 # the request we're already making for the screenshot, so capturing
@@ -345,10 +388,10 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 # Best-effort wait for network activity to quiet down, then a fixed
                 # settle delay for CSS transitions — never fail the audit over this.
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
+                    await page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(2000)
 
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
@@ -372,12 +415,12 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 for extra_url in extra_urls:
                     label = _page_label(extra_url)
                     try:
-                        await page.goto(extra_url, timeout=45000, wait_until="domcontentloaded")
+                        await page.goto(extra_url, timeout=60000, wait_until="domcontentloaded")
                         try:
-                            await page.wait_for_load_state("networkidle", timeout=3000)
+                            await page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
                             pass
-                        await page.wait_for_timeout(500)
+                        await page.wait_for_timeout(1500)
                         extra_screenshot = await page.screenshot(full_page=False)
                         pages_checked.append(await _audit_current_page(page, context, label, extra_screenshot))
                     except Exception as e:
@@ -399,13 +442,13 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
                 mobile_horizontal_overflow = False
                 mobile_violations: list[dict] = []
                 try:
-                    await page.goto(final_url, timeout=45000, wait_until="domcontentloaded")
+                    await page.goto(final_url, timeout=60000, wait_until="domcontentloaded")
                     await page.set_viewport_size({"width": 390, "height": 844})
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=3000)
+                        await page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(1500)
                     mobile_screenshot_bytes = await page.screenshot(full_page=False)
 
                     try:
@@ -714,7 +757,7 @@ async def _check_broken_assets(page, context) -> list:
         for asset in assets:
             status = None
             try:
-                response = await context.request.head(asset["url"], timeout=10000)
+                response = await context.request.head(asset["url"], timeout=20000)
                 status = response.status
             except Exception:
                 status = None
@@ -723,7 +766,7 @@ async def _check_broken_assets(page, context) -> list:
                 continue
 
             try:
-                response = await context.request.get(asset["url"], timeout=10000)
+                response = await context.request.get(asset["url"], timeout=20000)
                 status = response.status
             except Exception:
                 status = "unreachable"
