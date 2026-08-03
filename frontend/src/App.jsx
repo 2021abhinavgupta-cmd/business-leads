@@ -122,8 +122,34 @@ function App() {
     setLeads(prev => {
       const newLeads = [...prev];
       newLeads[index].auditState = 'auditing';
+      newLeads[index].auditProgress = null;
       return newLeads;
     });
+
+    // An audit is a single long blocking POST (a couple of minutes now that
+    // the tool timeouts were raised for accuracy), so poll the server for
+    // which stage it's actually on rather than showing a bare spinner the
+    // whole time.
+    let pollTimer = null;
+    if (lead.Website) {
+      pollTimer = setInterval(async () => {
+        try {
+          const p = await axios.get(`${API_BASE}/api/audit/progress`, {
+            params: { website: lead.Website }
+          });
+          if (!p.data?.running) return;
+          setLeads(prev => {
+            const updated = [...prev];
+            if (updated[index]?.auditState === 'auditing') {
+              updated[index].auditProgress = p.data;
+            }
+            return updated;
+          });
+        } catch {
+          // Progress is cosmetic — never let a failed poll disturb the audit.
+        }
+      }, 1500);
+    }
 
     try {
       const res = await axios.post(`${API_BASE}/api/audit`, {
@@ -131,7 +157,7 @@ function App() {
         website: lead.Website,
         instagram_handle: lead['Instagram Handle']
       });
-      
+
       setLeads(prev => {
         const updatedLeads = [...prev];
         if (res.data.error) {
@@ -140,6 +166,7 @@ function App() {
           updatedLeads[index].auditState = 'done';
           updatedLeads[index].auditData = res.data;
         }
+        updatedLeads[index].auditProgress = null;
         return updatedLeads;
       });
     } catch (err) {
@@ -147,8 +174,11 @@ function App() {
       setLeads(prev => {
         const updatedLeads = [...prev];
         updatedLeads[index].auditState = 'failed';
+        updatedLeads[index].auditProgress = null;
         return updatedLeads;
       });
+    } finally {
+      if (pollTimer) clearInterval(pollTimer);
     }
   };
 
@@ -342,7 +372,32 @@ function App() {
               )}
 
               {!lead.Website && <p className="error-text">Cannot audit — no website found.</p>}
-              {lead.auditState === 'auditing' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Running analysis...</p></div>}
+              {lead.auditState === 'auditing' && (
+                <div className="auditing-state" style={{ flexDirection: 'column', gap: '10px' }}>
+                  <Loader2 className="spin" size={24} />
+                  {lead.auditProgress ? (
+                    <>
+                      <p style={{ margin: 0 }}>{lead.auditProgress.stage}</p>
+                      <div style={{ width: '100%', maxWidth: '320px' }}>
+                        <div style={{ height: '6px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%',
+                            width: `${((lead.auditProgress.stage_index + 1) / lead.auditProgress.total_stages) * 100}%`,
+                            background: '#3b82f6',
+                            borderRadius: '999px',
+                            transition: 'width 0.4s ease'
+                          }} />
+                        </div>
+                        <p style={{ fontSize: '12px', color: '#64748b', margin: '6px 0 0', textAlign: 'center' }}>
+                          Step {lead.auditProgress.stage_index + 1} of {lead.auditProgress.total_stages}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <p style={{ margin: 0 }}>Running analysis...</p>
+                  )}
+                </div>
+              )}
               {lead.auditState === 'failed' && (
                 <div className="auditing-state" style={{ flexDirection: 'column', gap: '8px' }}>
                   <p className="error-text">Audit failed.</p>
@@ -354,9 +409,30 @@ function App() {
               {lead.auditState === 'done' && lead.auditData && (
                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="audit-results">
                   <div className="stats-row">
-                    <div className="stat-box"><Zap size={16} /><span>Speed</span><strong>{lead.auditData.page_speed_score}/100</strong></div>
-                    <div className="stat-box"><BarChart size={16} /><span>SEO</span><strong>{lead.auditData.seo_score}/100</strong></div>
+                    {/* A 0 here means the measurement tool failed, not that the
+                        site genuinely scored zero — showing "0/100" made a
+                        failed measurement look like a catastrophic result. */}
+                    <div className="stat-box"><Zap size={16} /><span>Speed</span><strong>{lead.auditData.page_speed_score ? `${lead.auditData.page_speed_score}/100` : 'n/a'}</strong></div>
+                    <div className="stat-box"><BarChart size={16} /><span>SEO</span><strong>{lead.auditData.seo_score ? `${lead.auditData.seo_score}/100` : 'n/a'}</strong></div>
                   </div>
+                  {lead.auditData.signal_status && Object.values(lead.auditData.signal_status).some(s => s !== 'ok') && (
+                    <div style={{
+                      background: '#fffbeb',
+                      border: '1px solid #fde68a',
+                      borderRadius: '8px',
+                      padding: '10px 12px',
+                      margin: '0 0 12px',
+                      fontSize: '13px',
+                      color: '#92400e'
+                    }}>
+                      <strong>Partial coverage:</strong>{' '}
+                      {Object.entries(lead.auditData.signal_status)
+                        .filter(([, s]) => s !== 'ok')
+                        .map(([name]) => name.replace(/_/g, ' '))
+                        .join(', ')}{' '}
+                      returned no data. Flaws in those areas could not be detected on this run, so their absence does not mean the site is clean.
+                    </div>
+                  )}
                   <div className="email-draft">
                     <h4><FileText size={16} /> Drafted Email</h4>
                     {lead.auditData.image_url && (

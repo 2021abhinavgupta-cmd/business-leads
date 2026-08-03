@@ -110,6 +110,55 @@ def _audit_cache_set(website: str, data: dict) -> None:
     _audit_cache[_audit_cache_key(website)] = (time.monotonic(), data)
 
 
+# Live progress for an in-flight /api/audit run, keyed by the same
+# normalized URL as the cache above. /api/audit is one long blocking POST
+# (a full audit is a couple of minutes now that timeouts were raised for
+# accuracy), so the frontend otherwise has nothing to show but an
+# indeterminate spinner for the whole run. The frontend polls
+# /api/audit/progress to show which stage is actually running.
+#
+# In-memory only, same tradeoff as the rate limiter and the cache above:
+# fine for one Railway instance, would need Redis if this ever runs
+# multi-instance. Entries are set as the audit proceeds and dropped when
+# it finishes, with a TTL sweep so an audit that dies mid-run can't leak
+# a stale "still running" entry forever.
+_AUDIT_PROGRESS_TTL = 900
+_audit_progress: dict[str, tuple[float, dict]] = {}
+
+# Ordered stages, so the UI can render "step 3 of 6" without hardcoding
+# the pipeline shape in the frontend.
+AUDIT_STAGES = [
+    "Loading site & capturing screenshots",
+    "Running technical audit (speed, SEO, accessibility)",
+    "Checking social profiles",
+    "Writing the audit with AI",
+    "Finding the right contact",
+    "Saving draft",
+]
+
+
+def _progress_set(website: str, stage_index: int, note: str = "") -> None:
+    if not website:
+        return
+    # Opportunistic sweep — no background task needed for a dict this small.
+    now = time.monotonic()
+    for key, (ts, _) in list(_audit_progress.items()):
+        if now - ts > _AUDIT_PROGRESS_TTL:
+            _audit_progress.pop(key, None)
+
+    _audit_progress[_audit_cache_key(website)] = (now, {
+        "stage_index": stage_index,
+        "total_stages": len(AUDIT_STAGES),
+        "stage": AUDIT_STAGES[stage_index] if 0 <= stage_index < len(AUDIT_STAGES) else "",
+        "note": note,
+    })
+
+
+def _progress_clear(website: str) -> None:
+    if website:
+        _audit_progress.pop(_audit_cache_key(website), None)
+
+
 class SearchRequest(BaseModel):
     niche: str
     city: str
@@ -171,6 +220,23 @@ async def search_leads(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/audit/progress")
+async def audit_progress(
+    website: str,
+    _auth: None = Depends(require_api_key),
+    # Polled roughly once a second per in-flight audit, so it needs the same
+    # generous ceiling as the other poll endpoints (/api/costs etc), not
+    # /api/audit's strict 5/min.
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    """Current stage of an in-flight audit, or {"running": false} if none."""
+    entry = _audit_progress.get(_audit_cache_key(website))
+    if not entry:
+        return {"running": False}
+    _, data = entry
+    return {"running": True, **data}
+
+
 @app.post("/api/audit")
 async def audit_lead(
     req: AuditRequest,
@@ -196,6 +262,7 @@ async def audit_lead(
             return {"error": "SES quota exceeded."}
 
         # 1. Grab Screenshot, HTML, and run Playwright-based audits (axe-core, broken links, perf timing)
+        _progress_set(req.website, 0)
         image_path = None
         html_content = None
         extra_audit_data = None
@@ -203,9 +270,11 @@ async def audit_lead(
             image_path, html_content, extra_audit_data = await generate_audit_screenshot(req.website, req.company)
 
         # 2. Website Audit (using fully rendered HTML + Playwright audit data)
+        _progress_set(req.website, 1)
         web_data = await web_scraper.audit_website(req.website, html=html_content, extra_audit_data=extra_audit_data)
 
         # 3. Instagram Data — use handle from request, or auto-detect from website
+        _progress_set(req.website, 2)
         ig_handle = req.instagram_handle
         if not ig_handle and web_data.instagram_url:
             # Extract handle from URL like https://instagram.com/hitchki
@@ -220,6 +289,7 @@ async def audit_lead(
             ig_data = await asyncio.to_thread(ig_scraper.get_instagram_data, ig_handle)
 
         # 4. AI Audit (with visual critique)
+        _progress_set(req.website, 3)
         analysis = await asyncio.to_thread(auditor.analyze_lead, req.company, ig_data, web_data, image_path=image_path)
 
         image_url = None
@@ -230,6 +300,7 @@ async def audit_lead(
             return {"error": "AI failed to analyze."}
 
         # 5. Find Contact (using fully rendered HTML)
+        _progress_set(req.website, 4)
         dm = await asyncio.to_thread(decision_maker.find_decision_maker, req.company, req.website, html_content=html_content)
         contact = dm.get("name", "")
         email = dm.get("email", "")
@@ -259,6 +330,7 @@ async def audit_lead(
         await asyncio.to_thread(db.log_cost, "AI Audit", ai_cost, description=f"Audit for {req.company}")
 
         # Save to DB Drafts
+        _progress_set(req.website, 5)
         await asyncio.to_thread(
             db.log_draft,
             company=req.company,
@@ -279,13 +351,21 @@ async def audit_lead(
             "overall_score": analysis.get("overall_score", 100),
             "flaws": analysis.get("flaws", []),
             "image_url": image_url,
-            "ai_cost": analysis.get("ai_cost", 0.0001)
+            "ai_cost": analysis.get("ai_cost", 0.0001),
+            # Which checks actually produced data — lets the UI show that a
+            # flaw category was never measured, instead of an absent flaw
+            # being indistinguishable from a clean result.
+            "signal_status": getattr(web_data, "signal_status", {}) or {},
         }
         if req.website:
             _audit_cache_set(req.website, result)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Always clear, including on the error path — a failed audit must
+        # not leave a stale "still running" entry the frontend keeps polling.
+        _progress_clear(req.website)
 
 @app.post("/api/send")
 async def send_email(

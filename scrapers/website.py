@@ -117,6 +117,16 @@ class WebsiteData:
     lighthouse_scores: dict = field(default_factory=dict)
     visual_flaw_context: str = ""
     flaws: list[Flaw] = field(default_factory=list)
+    # Which audit signals actually produced data on this run, keyed by
+    # signal name -> "ok" | "no_data" | "failed". Every check in this
+    # pipeline degrades to an empty value on failure and lets the audit
+    # continue, which is correct behaviour (one dead tool shouldn't sink a
+    # lead) but leaves no trace that it happened — two separate bugs
+    # (a dead PerformanceObserver script, a phantom 0/100 score) both
+    # survived for weeks purely because a silent degrade is invisible.
+    # This records it so a missing signal is visible in the UI/logs
+    # instead of silently narrowing what the audit could see.
+    signal_status: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +197,10 @@ class WebsiteScraper:
         perf_timing = extra.get("perf_timing", {})
         load_time_ms = perf_timing.get("full_load_ms", 1500)  # Real value or default
 
+        # Records which signals actually produced data — see
+        # WebsiteData.signal_status for why this exists.
+        signal_status: dict[str, str] = {}
+
         # Step 2 — Lighthouse CLI (primary) → PageSpeed API (fallback)
         lighthouse_scores = {}
         try:
@@ -194,19 +208,31 @@ class WebsiteScraper:
             lighthouse_scores = await run_lighthouse(url)
         except Exception as e:
             print(f"[Lighthouse] Import/run error: {e}")
-        
+
         if lighthouse_scores:
             perf_score = lighthouse_scores.get("performance", 0)
             seo_score = lighthouse_scores.get("seo", 0)
             mobile_score = perf_score  # Performance IS mobile score
+            signal_status["lighthouse"] = "ok"
             print(f"[Audit] Using Lighthouse CLI scores: perf={perf_score}, seo={seo_score}")
         else:
+            signal_status["lighthouse"] = "no_data"
             # Fallback to PageSpeed Insights API
             lighthouse_scores = await self._pagespeed(url)
             perf_score = lighthouse_scores.get("performance", 0)
             seo_score = lighthouse_scores.get("seo", 0)
             mobile_score = perf_score
+            signal_status["pagespeed_fallback"] = "ok" if lighthouse_scores else "no_data"
             print(f"[Audit] Using PageSpeed API scores: perf={perf_score}, seo={seo_score}")
+
+        # Both measurement paths failing is a real "we have no performance
+        # data at all" condition, not a site that scored zero — but the
+        # .get(key, 0) fallbacks above make the two look identical
+        # downstream. Log it loudly: a silent degrade here is exactly how a
+        # phantom "0/100" reached real drafted emails before the prompt was
+        # taught to say COULD NOT BE MEASURED (see analyzer/ai_audit.py).
+        if not perf_score and not seo_score:
+            print(f"[Audit] WARNING: no performance/SEO data for {url} — Lighthouse AND the PageSpeed fallback both returned nothing. Scores are absent, NOT zero; any speed/SEO claim in the generated email would be fabricated.")
 
         # Step 3 — HTML analysis (Crawl4AI enhanced → markdownify fallback)
         parsed = await self._parse_html(html)
@@ -224,6 +250,10 @@ class WebsiteScraper:
         seo_page = await self._run_pyseoanalyzer(url)
         robots_blocked = await self._check_robots_disallow_all(url)
         missing_alt_count = self._check_missing_alt_images(html)
+
+        signal_status["tech_detection"] = "ok" if technologies else "no_data"
+        signal_status["brand_context_crawl"] = "ok" if company_context else "no_data"
+        signal_status["pyseoanalyzer"] = "ok" if seo_page else "no_data"
 
         # Step 3.7 — HTML validity + a second, independent accessibility
         # engine. Both run sequentially here (i.e. after Playwright's own
@@ -244,6 +274,14 @@ class WebsiteScraper:
             print(f"[Pa11y] Import/run error: {e}")
             pa11y_issues = []
 
+        signal_status["html_validate"] = "ok" if html_validate_result else "no_data"
+        # pa11y legitimately returns [] on a clean page, so an empty list
+        # can't distinguish "ran, found nothing" from "never ran" — the
+        # module returns {} / [] identically for both. Treated as no_data
+        # here deliberately: under-reporting coverage is safer than
+        # claiming a check ran when it may not have.
+        signal_status["pa11y"] = "ok" if pa11y_issues else "no_data"
+
         # Real, in-browser Core Web Vitals (analyzer/visuals.py, via
         # PerformanceObserver) beat Lighthouse's lab-simulated equivalents
         # when both are available — prefer real, fall back to lab per-metric
@@ -254,6 +292,20 @@ class WebsiteScraper:
         lcp_ms = real_wv.get("lcp_ms") if real_wv.get("lcp_ms") is not None else lighthouse_scores.get("lcp_ms")
         cls = real_wv.get("cls") if real_wv.get("cls") is not None else lighthouse_scores.get("cls")
         tbt_ms = real_wv.get("tbt_ms") if real_wv.get("tbt_ms") is not None else lighthouse_scores.get("tbt_ms")
+
+        # This one specifically was dead on every single site for weeks (the
+        # init script was wrapped in an arrow function Playwright never
+        # called) and nothing surfaced it, because falling back to
+        # Lighthouse's lab numbers looks identical to working. Tracked
+        # explicitly so a silent regression here is visible immediately.
+        signal_status["real_web_vitals"] = "ok" if real_wv else "no_data"
+        signal_status["axe_core"] = "ok" if extra.get("accessibility_violations") else "no_data"
+        signal_status["screenshot"] = "ok" if extra.get("visual_flaw_context") or extra.get("pages_audited") else "no_data"
+        signal_status["mobile_screenshot"] = "ok" if extra.get("mobile_image_path") else "no_data"
+
+        degraded = [name for name, state in signal_status.items() if state != "ok"]
+        if degraded:
+            print(f"[Audit] Signal coverage for {url}: {len(signal_status) - len(degraded)}/{len(signal_status)} OK. NO DATA from: {', '.join(sorted(degraded))} — flaws in those categories could not be detected at all on this run.")
 
         # Step 4 — Reconcile every signal above into one ranked flaw list,
         # instead of feeding the AI prompt raw, unreconciled tool output.
@@ -313,6 +365,7 @@ class WebsiteScraper:
             lighthouse_scores=lighthouse_scores,
             visual_flaw_context=extra.get("visual_flaw_context", ""),
             flaws=flaws,
+            signal_status=signal_status,
         )
 
     # (Removed _check_reachability as we now use Playwright for rendering HTML)

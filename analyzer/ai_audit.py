@@ -417,10 +417,31 @@ class AIAuditor:
             )
 
         # --- Website section (headline numbers + context, not flaws) ---
+        # A score of 0 here means "both Lighthouse AND the PageSpeed API
+        # fallback failed to return anything", NOT "this site genuinely
+        # scored zero" — the two are indistinguishable in the raw value
+        # (scrapers/website.py falls back to .get(key, 0)). Feeding a
+        # phantom "0/100" into a prompt that also says "QUOTE THE EXACT
+        # NUMBER" is how the AI ends up confidently telling a real business
+        # its site scored 0 out of 100 on a measurement that never ran.
+        # Same bug class as the dead PerformanceObserver init script (see
+        # analyzer/visuals.py) — a silent failure degrading into a
+        # confident, wrong claim. Say "could not be measured" instead, and
+        # explicitly forbid inventing a number for it.
+        speed_line = (
+            f"- Page speed (mobile): {web.page_speed_score}/100\n"
+            if web.page_speed_score
+            else "- Page speed (mobile): COULD NOT BE MEASURED (measurement tool failed — do NOT mention page speed scores at all, and never claim it scored 0)\n"
+        )
+        seo_line = (
+            f"- SEO score: {web.seo_score}/100\n"
+            if web.seo_score
+            else "- SEO score: COULD NOT BE MEASURED (measurement tool failed — do NOT mention an SEO score at all, and never claim it scored 0)\n"
+        )
         web_section = (
             f"WEBSITE DATA:\n"
-            f"- Page speed (mobile): {web.page_speed_score}/100\n"
-            f"- SEO score: {web.seo_score}/100\n"
+            f"{speed_line}"
+            f"{seo_line}"
             f"- Tech Stack: {web.technologies}\n"
             f"- Homepage text: {web.homepage_text[:2000]}\n"
         )

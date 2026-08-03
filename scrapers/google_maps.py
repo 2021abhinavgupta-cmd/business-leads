@@ -46,7 +46,16 @@ class GoogleMapsScraper:
         leads = []
         headers = {
             "X-Goog-Api-Key": self.api_key,
-            "X-Goog-FieldMask": "places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount",
+            # `nextPageToken` MUST be listed here. In the Places API (New),
+            # the field mask controls the whole response body, not just the
+            # per-place fields — omitting it means the API never returns a
+            # token, so the pagination loop below always broke after page 1.
+            # Live-verified 2026-07-31: without it the response's only
+            # top-level key is "places"; with it, "nextPageToken" appears
+            # and page 2+ fetch correctly. This capped every search at one
+            # 20-result page, which after the has-a-website filter and
+            # domain dedupe below is why asking for 10 leads returned ~5.
+            "X-Goog-FieldMask": "places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount,nextPageToken",
             "Content-Type": "application/json"
         }
         payload = {
@@ -54,12 +63,22 @@ class GoogleMapsScraper:
             "pageSize": 20
         }
         
-        while len(leads) < limit:
+        # Now that pagination actually works (see the field-mask note above),
+        # this loop needs a hard page bound: `len(leads) < limit` alone can
+        # keep requesting pages when few results per page have a website,
+        # and every page is a billable API call. Google's Text Search caps
+        # at ~60 results (3 pages of 20) anyway, so this mostly just
+        # guarantees termination rather than restricting real results.
+        _MAX_PAGES = 3
+        pages_fetched = 0
+
+        while len(leads) < limit and pages_fetched < _MAX_PAGES:
             time.sleep(_REQUEST_DELAY)
             response = self.client.post(TEXT_SEARCH_URL, headers=headers, json=payload)
             response.raise_for_status() # Will raise Exception if 403 (Billing issues)
             data = response.json()
-                
+            pages_fetched += 1
+
             places = data.get("places", [])
             if not places:
                 break
@@ -88,8 +107,17 @@ class GoogleMapsScraper:
             if not next_token:
                 break
             payload["pageToken"] = next_token
-            
-        return self._deduplicate(leads)[:limit]
+
+        deduped = self._deduplicate(leads)[:limit]
+        # Two filters legitimately shrink the result set below `limit`:
+        # businesses with no website at all (skipped above — there's nothing
+        # to audit), and multiple branches of one chain sharing a domain
+        # (collapsed by _deduplicate). Asking for 10 and getting 5 is
+        # usually this, not a failure — but silently returning fewer than
+        # requested with no explanation looks like a bug from the UI.
+        if len(deduped) < limit:
+            print(f"[Maps API] Returning {len(deduped)} of {limit} requested leads for '{niche} in {city}' — {pages_fetched} page(s) fetched, {len(leads)} listing(s) had a website, {len(leads) - len(deduped)} dropped as duplicate domains (chain branches). Listings with no website are skipped since there's nothing to audit.")
+        return deduped
 
     # ---------------------------------------------------------
     # STRATEGY 2: Playwright + DDGS OSINT (100% Free, Slower)
