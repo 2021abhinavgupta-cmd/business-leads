@@ -9,7 +9,23 @@ import asyncio
 import json
 import subprocess
 import tempfile
+import time
 import os
+
+
+# Lighthouse is by far the most expensive step in an audit: two sequential
+# runs at up to 180s each, every one launching its own headless Chrome. The
+# same URL gets audited repeatedly in normal use (a retry after a failure,
+# re-opening a lead, Autopilot re-running a row), and a site's scores don't
+# meaningfully move within a few minutes — so a short-TTL cache removes
+# whole minutes of wall-clock without changing results. Same in-memory,
+# single-instance tradeoff as app.py's audit cache and rate limiter.
+_CACHE_TTL_SECONDS = 900
+_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _cache_key(url: str) -> str:
+    return url.strip().lower().rstrip("/")
 
 
 async def run_lighthouse(url: str) -> dict:
@@ -31,12 +47,24 @@ async def run_lighthouse(url: str) -> dict:
         Dict with keys: performance, seo, accessibility, best_practices (each 0-100)
         Returns empty dict on failure.
     """
+    key = _cache_key(url)
+    entry = _cache.get(key)
+    if entry and time.monotonic() - entry[0] <= _CACHE_TTL_SECONDS:
+        print(f"[Lighthouse] Using cached scores for {url} (avoids a ~2-6 minute re-run).")
+        return entry[1]
+
     first = await _run_lighthouse_once(url)
     second = await _run_lighthouse_once(url)
 
+    # Only successful results are cached — caching {} would lock in a
+    # transient failure for the full TTL and suppress the retry that would
+    # otherwise have recovered the scores.
     if not first:
+        if second:
+            _cache[key] = (time.monotonic(), second)
         return second
     if not second:
+        _cache[key] = (time.monotonic(), first)
         return first
 
     averaged: dict = {}
@@ -54,6 +82,7 @@ async def run_lighthouse(url: str) -> dict:
         averaged["cls"] = round(averaged["cls"], 3)
 
     print(f"[Lighthouse] Averaged scores from 2 runs: {averaged}")
+    _cache[key] = (time.monotonic(), averaged)
     return averaged
 
 

@@ -155,6 +155,24 @@ class AIAuditor:
                 # separate key for visibility, not because anything reads it.
                 parsed["ai_reported_score"] = parsed.get("overall_score")
                 parsed["overall_score"] = compute_score(getattr(web, "flaws", None) or [])
+
+                # compute_score starts at 100 and subtracts per detected
+                # flaw, so FEWER flaws means a HIGHER (healthier) score —
+                # but fewer flaws is also exactly what a partially-failed
+                # audit produces. Without this, a site we simply couldn't
+                # measure scores as "too good to contact" and gets silently
+                # discarded by the >CONTACT_THRESHOLD skip in main.py.
+                # Measured on one identical site: 8 flaws -> score 19
+                # (contacted); the same site with Lighthouse/pa11y/
+                # html-validate returning no data -> 2 flaws -> score 76
+                # (skipped). That's the default state on a Windows dev box
+                # and reachable in Docker, so real leads were being thrown
+                # away for want of a measurement, with nothing logged.
+                signal_status = getattr(web, "signal_status", None) or {}
+                degraded = [name for name, state in signal_status.items() if state != "ok"]
+                parsed["partial_coverage"] = degraded
+                if degraded:
+                    print(f"[AIAuditor] '{company}' audited with partial signal coverage (no data from: {', '.join(sorted(degraded))}) — score {parsed['overall_score']} is an upper bound, real flaw count may be higher.")
                 return parsed
 
         print(f"[AIAuditor] All AI providers failed or returned unparseable output for '{company}' — check API keys/quotas.")
@@ -375,7 +393,15 @@ class AIAuditor:
         """
         Return ``True`` if the lead's overall score is below the
         contact threshold (< 70), meaning they need help.
+
+        A partial-coverage audit always returns True regardless of score:
+        the score is computed by subtracting per detected flaw, so signals
+        that returned no data inflate it, and treating that inflated number
+        as "this site is healthy" throws away leads for want of a
+        measurement. See analyze_lead for the measured example.
         """
+        if audit_result.get("partial_coverage"):
+            return True
         return audit_result.get("overall_score", 100) < CONTACT_THRESHOLD
 
     # ------------------------------------------------------------------
@@ -484,6 +510,22 @@ class AIAuditor:
                 f"{web.visual_flaw_context}\n"
             )
 
+        # --- Signals that returned no data on this run. Without this the
+        # AI can't tell "we checked and it was fine" from "we never
+        # checked", and will happily imply a whole category is clean based
+        # on its absence from FLAWS DETECTED.
+        coverage_section = ""
+        signal_status = getattr(web, "signal_status", None) or {}
+        degraded = sorted(name for name, state in signal_status.items() if state != "ok")
+        if degraded:
+            coverage_section = (
+                "CHECKS THAT RETURNED NO DATA ON THIS RUN: "
+                + ", ".join(degraded)
+                + "\nThese did NOT run successfully, so problems in those areas would not appear in FLAWS DETECTED above. "
+                "Never state or imply that any of these areas is fine, healthy, fast, or passing — you have no evidence either way. "
+                "Only write about flaws actually listed above.\n"
+            )
+
         # --- Google Business rating (Maps-sourced leads only) — a
         # personalization hook, not a flaw: a strong rating with a weak
         # website is a compelling contrast ("great reviews but the site
@@ -500,6 +542,7 @@ class AIAuditor:
             f"{perf_section}\n"
             f"{rating_section}\n"
             f"{flaws_section}\n"
+            f"{coverage_section}\n"
             f"{brand_context_section}\n"
             f"{visual_flaw_section}\n"
             "TASK:\n"

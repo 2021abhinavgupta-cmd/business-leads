@@ -103,10 +103,21 @@ async def process_single_lead(lead: dict) -> str:
         print(f"  AI audit failed for {company}")
         return "failed_ai_error"
     
-    # Step 7: Skip if score is too good (not worth emailing)
+    # Step 7: Skip if score is too good (not worth emailing).
+    # A high score only means "healthy" when the audit actually managed to
+    # measure everything — the score starts at 100 and subtracts per
+    # detected flaw, so a run where several signals returned no data
+    # produces an artificially high score for a site that may well be in
+    # bad shape. Skipping on that would silently discard a real lead
+    # because a tool failed, so partial-coverage runs are never skipped;
+    # they fall through to a normal draft that a human reviews anyway.
+    partial_coverage = analysis.get("partial_coverage") or []
     if analysis.get("overall_score", 100) > 70:
-        print(f"  Score {analysis.get('overall_score')} — too good, skipping")
-        return "skipped"
+        if partial_coverage:
+            print(f"  Score {analysis.get('overall_score')} looks good, but coverage was partial (no data from: {', '.join(sorted(partial_coverage))}) — drafting anyway rather than discarding a possibly-real lead.")
+        else:
+            print(f"  Score {analysis.get('overall_score')} — too good, skipping")
+            return "skipped"
     
     # Step 8: Generate and draft email
     subject, body = ses.generate_email(company, contact, analysis, YOUR_NAME)

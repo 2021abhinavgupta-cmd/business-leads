@@ -104,6 +104,32 @@ def log_email(company: str, website: str, target_email: str, sender_email: str, 
     conn.commit()
     conn.close()
 
+def count_emails_sent_today() -> int:
+    """
+    Number of emails actually sent in the last 24h, read from the real send
+    log rather than an in-process counter.
+
+    DAILY_EMAIL_LIMIT used to be enforced only in main.py's batch loop,
+    which never sends (it drafts to Sheets — see main.py:process_single_lead,
+    whose "emailed" branch is unreachable), so the cap didn't constrain the
+    path emails actually go out on: the Drafts inbox -> /api/send. On a
+    brand-new sending domain the daily volume ceiling is the whole point of
+    the warm-up, so it has to be enforced where sending really happens, and
+    it has to survive restarts — hence counting rows, not a module global.
+
+    CURRENT_TIMESTAMP is UTC, so this is a rolling 24h window rather than a
+    calendar day; close enough for a volume guard and immune to timezone
+    edge cases.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM email_history WHERE timestamp >= datetime('now', '-1 day')")
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
 def add_suppression(email: str, reason: str = "unsubscribe"):
     init_db()
     conn = sqlite3.connect(DB_PATH)

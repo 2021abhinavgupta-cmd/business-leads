@@ -375,6 +375,25 @@ async def send_email(
     _rl: None = Depends(rate_limit(10, 60)),
 ):
     try:
+        # Enforce the daily sending cap HERE, because this is the only path
+        # emails actually go out on. main.py's batch loop has its own
+        # DAILY_EMAIL_LIMIT check, but that loop only ever drafts (its
+        # "emailed" branch is unreachable — process_single_lead returns
+        # "drafted"), so before this the cap constrained how many leads got
+        # drafted and nothing at all about send volume. On a freshly
+        # un-sandboxed domain the volume ramp is the entire warm-up
+        # strategy, so it needs teeth on the real send path.
+        sent_today = await asyncio.to_thread(db.count_emails_sent_today)
+        if sent_today >= config.DAILY_EMAIL_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Daily sending limit reached ({sent_today}/{config.DAILY_EMAIL_LIMIT} in the last 24h). "
+                    "This cap protects sender reputation while the domain warms up — raise DAILY_EMAIL_LIMIT "
+                    "gradually once Postmaster Tools shows spam placement improving."
+                ),
+            )
+
         # Use existing screenshot (same collision-safe name generate_audit_screenshot wrote)
         image_path = None
         if req.company and req.website:
@@ -406,6 +425,14 @@ async def send_email(
             return {"status": "success"}
         else:
             raise HTTPException(status_code=400, detail=f"{req.email} is on the unsubscribe/suppression list")
+    except HTTPException:
+        # HTTPException subclasses Exception, so the generic handler below
+        # was swallowing the deliberate 400 above and re-raising it as a
+        # 500 — collapsing "recipient is unsubscribed" back into the same
+        # opaque 500 the 2026-07-14 fix set out to eliminate, and it would
+        # do the same to the 429 daily-cap response. Let intentional status
+        # codes through untouched.
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
