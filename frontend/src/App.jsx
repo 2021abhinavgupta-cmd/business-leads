@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { NICHES, CITIES } from './searchOptions';
 import './App.css';
 
 const API_BASE = ""; // Use relative paths so it works on same domain
@@ -23,6 +24,8 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [loadingSearch, setLoadingSearch] = useState(false);
+  const [loadingNearby, setLoadingNearby] = useState(false);
+  const [nearbyRadiusKm, setNearbyRadiusKm] = useState(5);
   const [manualCompany, setManualCompany] = useState('');
   const [manualWebsite, setManualWebsite] = useState('');
   const [showManualEntry, setShowManualEntry] = useState(false);
@@ -100,6 +103,49 @@ function App() {
     } finally {
       setLoadingSearch(false);
     }
+  };
+
+  const handleSearchNearby = () => {
+    if (!navigator.geolocation) {
+      alert('Your browser does not support location access, so nearby search is unavailable. Use the niche and city search instead.');
+      return;
+    }
+
+    setLoadingNearby(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const res = await axios.post(`${API_BASE}/api/search-nearby`, {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            radius_m: Math.round(nearbyRadiusKm * 1000),
+            limit: parseInt(limit) || 10,
+          });
+          setLeads(res.data.leads.map(lead => ({ ...lead, auditState: 'none' })));
+          setLeadsPage(1);
+          if (res.data.leads.length === 0) {
+            alert('No businesses with a website were found nearby. Try a larger radius.');
+          }
+        } catch (err) {
+          console.error('Nearby search failed:', err);
+          alert(`Error searching nearby: ${err.response?.data?.detail || err.message}`);
+        } finally {
+          setLoadingNearby(false);
+        }
+      },
+      (error) => {
+        setLoadingNearby(false);
+        // Distinguish the causes — "denied" needs a browser-settings fix,
+        // the others are usually transient or environmental.
+        const reason = {
+          1: 'Location permission was denied. Allow location access for this site in your browser settings, then try again.',
+          2: 'Your location could not be determined. Check that location services are enabled on your device.',
+          3: 'Getting your location timed out. Try again.',
+        }[error.code] || 'Could not get your location.';
+        alert(reason);
+      },
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 300000 }
+    );
   };
 
   const handleAddManualLead = (e) => {
@@ -276,28 +322,14 @@ function App() {
           <label>Business Niche</label>
           <input type="text" list="niche-options" value={niche} onChange={e => setNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" required />
           <datalist id="niche-options">
-            <option value="Digital Marketing Agency" />
-            <option value="Software Development" />
-            <option value="Dental Clinic" />
-            <option value="Real Estate Agency" />
-            <option value="Law Firm" />
-            <option value="Accounting Firm" />
-            <option value="Plumbing Services" />
+            {NICHES.map(n => <option key={n} value={n} />)}
           </datalist>
         </div>
         <div className="input-group">
           <label>City</label>
           <input type="text" list="city-options" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
           <datalist id="city-options">
-            <option value="Mumbai" />
-            <option value="Pune" />
-            <option value="Nagpur" />
-            <option value="Nashik" />
-            <option value="Thane" />
-            <option value="Navi Mumbai" />
-            <option value="Chhatrapati Sambhajinagar" />
-            <option value="Kolhapur" />
-            <option value="Solapur" />
+            {CITIES.map(c => <option key={c} value={c} />)}
           </datalist>
         </div>
         <div className="input-group" style={{maxWidth: '100px'}}>
@@ -314,6 +346,35 @@ function App() {
           </button>
         </div>
       </form>
+
+      {/* Nearby search is deliberately outside the form above: it needs
+          neither niche nor city (both `required` there), and submitting the
+          form would fail validation before this could ever run. */}
+      <div className="search-box glass" style={{ marginTop: 16, alignItems: 'flex-end' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <label style={{ display: 'block', fontWeight: 600, marginBottom: 6, color: '#334155' }}>
+            Or find every type of business near you
+          </label>
+          <p style={{ margin: 0, fontSize: 13, color: '#64748b' }}>
+            Uses your device location and searches across all industries, no niche needed.
+          </p>
+        </div>
+        <div className="input-group" style={{ maxWidth: 140 }}>
+          <label>Radius (km)</label>
+          <input
+            type="number" min="1" max="50" value={nearbyRadiusKm}
+            onChange={e => setNearbyRadiusKm(e.target.value)}
+          />
+        </div>
+        <button
+          type="button" onClick={handleSearchNearby} disabled={loadingNearby}
+          className="primary-btn"
+          style={{ background: loadingNearby ? '#94a3b8' : '#0f766e' }}
+        >
+          {loadingNearby ? <Loader2 className="spin" /> : <MapPin />}
+          {loadingNearby ? 'Searching...' : 'Find Leads Near Me'}
+        </button>
+      </div>
 
       <AnimatePresence>
         {showManualEntry && (
@@ -359,6 +420,15 @@ function App() {
               <div className="lead-details">
                 <p><strong>URL:</strong> <a href={lead.Website} target="_blank" rel="noreferrer">{lead.Website || 'N/A'}</a></p>
                 <p><strong>Address:</strong> {lead.Address}</p>
+                {/* Only nearby searches set this — a niche search already
+                    tells you the category, but an all-types search doesn't. */}
+                {lead.Category && (
+                  <p style={{ margin: '4px 0 0' }}>
+                    <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 999, background: '#ccfbf1', color: '#0f766e', fontSize: 12, fontWeight: 600 }}>
+                      {lead.Category}
+                    </span>
+                  </p>
+                )}
                 {lead.auditState === 'sent' && lead.auditData && (
                   <div style={{ marginTop: '12px', padding: '8px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
                     <p style={{ color: '#059669', marginBottom: '4px' }}><strong>To:</strong> {lead.auditData.email}</p>

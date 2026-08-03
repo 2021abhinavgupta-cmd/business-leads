@@ -10,7 +10,42 @@ import config
 from analyzer.visuals import _PLAYWRIGHT_SEMAPHORE
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
 _REQUEST_DELAY = 2  # seconds
+
+# Place types that are returned by a no-keyword nearby search but are never
+# a sellable lead — infrastructure, transit, civic amenities and the like.
+# Without this, a search around a city centre comes back full of train
+# stations and corporate parks (live-observed at Mumbai BKC) instead of
+# businesses with a website worth auditing.
+_NON_BUSINESS_TYPES = {
+    "train_station", "subway_station", "bus_station", "transit_station",
+    "light_rail_station", "airport", "parking", "bus_stop",
+    "city_hall", "courthouse", "embassy", "fire_station", "police",
+    "local_government_office", "post_office", "cemetery",
+    "park", "national_park", "tourist_attraction", "historical_landmark",
+    "place_of_worship", "church", "hindu_temple", "mosque", "synagogue",
+    "school", "primary_school", "secondary_school", "university",
+    "hospital", "atm", "bank",
+}
+
+# Place types queried one-per-request by scrape_nearby. Each gets its own
+# 20-result budget from the API, which is the only way to get volume out of
+# an endpoint that can't paginate. Ordered by how likely the category is to
+# have both a website and an owner who'd act on an audit — service
+# businesses first, retail later.
+_NEARBY_TYPE_ROTATION = [
+    "dentist", "beauty_salon", "hair_salon", "spa", "gym",
+    "real_estate_agency", "lawyer", "accounting", "insurance_agency",
+    "restaurant", "cafe", "bakery", "hotel",
+    "car_repair", "car_dealer", "moving_company", "storage",
+    "electrician", "plumber", "painter", "roofing_contractor",
+    "general_contractor", "veterinary_care", "physiotherapist",
+    "travel_agency", "florist", "furniture_store", "jewelry_store",
+    "clothing_store", "shoe_store", "pet_store", "book_store",
+    "electronics_store", "home_goods_store", "hardware_store",
+    "photographer", "consultant", "advertising_agency",
+]
 
 class GoogleMapsScraper:
     def __init__(self):
@@ -117,6 +152,139 @@ class GoogleMapsScraper:
         # requested with no explanation looks like a bug from the UI.
         if len(deduped) < limit:
             print(f"[Maps API] Returning {len(deduped)} of {limit} requested leads for '{niche} in {city}' — {pages_fetched} page(s) fetched, {len(leads)} listing(s) had a website, {len(leads) - len(deduped)} dropped as duplicate domains (chain branches). Listings with no website are skipped since there's nothing to audit.")
+        return deduped
+
+    # ---------------------------------------------------------
+    # Nearby search — "everything around this point", no niche
+    # ---------------------------------------------------------
+    async def scrape_nearby(
+        self,
+        latitude: float,
+        longitude: float,
+        radius_m: int = 3000,
+        limit: int = 20,
+    ) -> list[dict]:
+        """
+        Find businesses of every type within *radius_m* of a coordinate.
+
+        Different endpoint from scrape_google_maps: searchText needs a
+        keyword ("dentist in Mumbai"), while searchNearby takes a circle and
+        returns whatever is inside it. That's what makes an unfiltered
+        "everything near me" search possible at all — there's no keyword
+        that means "any business".
+
+        No Playwright fallback here, deliberately: the OSINT path is built
+        around scraping a text query off a Maps search page and has no
+        equivalent for a radius search, so this degrades to an empty list
+        rather than silently returning unrelated results.
+
+        Searches one business type at a time rather than once for
+        everything. A single unfiltered call returns at most 20 places and
+        cannot paginate (unlike searchText), and the places physically
+        nearest a point skew heavily to small shops with no website —
+        live-observed 20 places around Mumbai BKC yielding only 4 auditable
+        leads. Widening the radius does not help, because DISTANCE ranking
+        returns the same nearest 20 no matter how big the circle is
+        (verified: 2km, 6km and 18km all returned an identical four).
+        Giving each type its own request is the only way to get real volume,
+        and it also spreads results across industries instead of returning
+        whichever category happens to cluster around the caller.
+        """
+        if not self.api_key:
+            print("[Maps Nearby] No GOOGLE_MAPS_API_KEY set — cannot run a nearby search.")
+            return []
+
+        radius = min(radius_m, 50000)
+        collected: dict[str, dict] = {}
+
+        for place_type in _NEARBY_TYPE_ROTATION:
+            batch = await self._nearby_once(latitude, longitude, radius, place_type)
+            for lead in batch:
+                # Keyed by domain so a business listed under two types, or
+                # re-found by a later query, is only counted once.
+                collected.setdefault(self._extract_domain(lead["Website"]), lead)
+
+            if len(collected) >= limit:
+                break
+            # Same jittered pacing as the rest of this scraper.
+            await asyncio.sleep(random.uniform(0.3, 0.9))
+
+        leads = list(collected.values())[:limit]
+        print(f"[Maps Nearby] Returning {len(leads)} lead(s) within {radius}m of ({latitude:.4f}, {longitude:.4f}).")
+        return leads
+
+    async def _nearby_once(
+        self, latitude: float, longitude: float, radius_m: int, place_type: str | None = None
+    ) -> list[dict]:
+        """One searchNearby call, optionally restricted to a single place type."""
+        headers = {
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": (
+                "places.displayName,places.websiteUri,places.nationalPhoneNumber,"
+                "places.formattedAddress,places.rating,places.userRatingCount,"
+                "places.primaryTypeDisplayName,places.types"
+            ),
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "locationRestriction": {
+                "circle": {
+                    "center": {"latitude": latitude, "longitude": longitude},
+                    # Google rejects anything above 50km.
+                    "radius": float(min(radius_m, 50000)),
+                }
+            },
+            # 20 is the API's per-request maximum, and searchNearby has no
+            # pagination at all (unlike searchText) — so this endpoint can
+            # never return more than 20 raw results per call, before the
+            # has-a-website and non-business filters below cut it further.
+            "maxResultCount": 20,
+            "rankPreference": "DISTANCE",
+        }
+        if place_type:
+            payload["includedTypes"] = [place_type]
+
+        try:
+            response = await asyncio.to_thread(
+                self.client.post, NEARBY_SEARCH_URL, headers=headers, json=payload
+            )
+            response.raise_for_status()
+            places = response.json().get("places", [])
+        except Exception as e:
+            print(f"[Maps Nearby] Search failed: {e}")
+            return []
+
+        leads = []
+        skipped_non_business = 0
+        for place in places:
+            name = place.get("displayName", {}).get("text", "")
+            website = place.get("websiteUri", "")
+            if not name or not website:
+                continue
+
+            if set(place.get("types", [])) & _NON_BUSINESS_TYPES:
+                skipped_non_business += 1
+                continue
+
+            leads.append({
+                "Company": name,
+                "Website": website,
+                "Phone": place.get("nationalPhoneNumber", ""),
+                "Address": place.get("formattedAddress", ""),
+                "Rating": str(place.get("rating", "")),
+                "Reviews Count": place.get("userRatingCount", 0),
+                "Category": (place.get("primaryTypeDisplayName") or {}).get("text", ""),
+                "Email": "",
+                "Instagram Handle": "",
+                "Decision Maker Name": "",
+                "Source": "Google Maps (Nearby)",
+            })
+
+        deduped = self._deduplicate(leads)
+        print(
+            f"[Maps Nearby] {len(places)} place(s) within {radius_m}m -> {len(deduped)} lead(s) "
+            f"({skipped_non_business} skipped as non-business, rest had no website or a duplicate domain)."
+        )
         return deduped
 
     # ---------------------------------------------------------

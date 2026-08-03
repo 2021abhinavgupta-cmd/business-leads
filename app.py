@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Re
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import config
 from scrapers.google_maps import GoogleMapsScraper
@@ -164,6 +164,17 @@ class SearchRequest(BaseModel):
     city: str
     limit: int = 10
 
+class NearbySearchRequest(BaseModel):
+    # Bounded by Pydantic rather than checked by hand: these come straight
+    # from the browser's geolocation API, and an out-of-range coordinate
+    # would otherwise be passed to Google as a paid request that can only
+    # fail.
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    # Google rejects a radius above 50km outright.
+    radius_m: int = Field(default=5000, ge=100, le=50000)
+    limit: int = Field(default=10, ge=1, le=100)
+
 class AuditRequest(BaseModel):
     company: str
     website: str
@@ -214,6 +225,40 @@ async def search_leads(
             await asyncio.to_thread(
                 db.log_cost, "Google Maps API", total_search_cost,
                 description=f"Search: {req.niche} in {req.city} ({len(leads)} leads)"
+            )
+
+        return {"leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search-nearby")
+async def search_leads_nearby(
+    req: NearbySearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    # Same 5/min as /api/search: this fans out into several billable Places
+    # calls (one per business type), so it is if anything more expensive.
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    """
+    Find businesses of any type near a coordinate.
+
+    Separate endpoint from /api/search rather than an optional mode on it:
+    it takes a different Places endpoint (searchNearby, not searchText),
+    needs no niche or city at all, and has genuinely different result
+    characteristics (no pagination, capped per type).
+    """
+    try:
+        leads = await maps_scraper.scrape_nearby(
+            req.latitude, req.longitude, radius_m=req.radius_m, limit=req.limit
+        )
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
+
+        total_search_cost = sum(lead.get("search_cost", 0) for lead in leads)
+        if total_search_cost > 0:
+            await asyncio.to_thread(
+                db.log_cost, "Google Maps API", total_search_cost,
+                description=f"Nearby search within {req.radius_m}m ({len(leads)} leads)"
             )
 
         return {"leads": leads}
