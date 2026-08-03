@@ -60,13 +60,26 @@ _PAGESPEED_METRIC_MAP = {
 }
 
 
-def _normalise_cls(raw) -> float | None:
-    """
-    CrUX reports CLS multiplied by 100 as an integer (a p75 of 1 means 0.01),
-    while every threshold in this codebase and Google's own "good < 0.10"
-    guidance uses the decimal form. Converting here keeps the flaw-building
-    code from having to know which source a number came from.
-    """
+# CLS arrives in two genuinely different shapes depending on which endpoint
+# produced it, and getting this wrong is silent: the value either vanishes or
+# lands 100x off, and 0.01 vs 1.0 is the difference between "fine" and a
+# critical flaw. Live-verified 2026-08-03 against the same site:
+#   dedicated CrUX API        -> "0.01"  (string, already the decimal form)
+#   PageSpeed loadingExperience ->  1     (integer, multiplied by 100)
+# Every threshold in this codebase, and Google's own "good < 0.10" guidance,
+# uses the decimal form, so both are converted to that here rather than
+# leaving the flaw-building code to know where a number came from.
+
+def _cls_from_crux_api(raw) -> float | None:
+    """Dedicated CrUX API: a decimal, but delivered as a string."""
+    try:
+        return round(float(raw), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cls_from_pagespeed(raw) -> float | None:
+    """PageSpeed loadingExperience: an integer at 100x the real value."""
     if not isinstance(raw, (int, float)):
         return None
     return round(raw / 100, 3)
@@ -100,7 +113,28 @@ async def fetch_crux_vitals(url: str, form_factor: str = "PHONE") -> dict:
             return {}
 
         if response.status_code == 403:
-            print("[CrUX] Chrome UX Report API is not enabled for this API key's project — enable it at console.cloud.google.com (search 'Chrome UX Report API') to use real-user performance data. Falling back to measured/lab vitals.")
+            # Two distinct causes that need different fixes, and guessing
+            # wrong sends you to the wrong console page:
+            #   SERVICE_DISABLED      -> enable the API on the GCP project
+            #   API_KEY_SERVICE_BLOCKED -> the API is enabled, but the key's
+            #                              own "API restrictions" allowlist
+            #                              doesn't include this service
+            # Surface Google's actual reason rather than asserting one.
+            error = response.json().get("error", {})
+            reason = ""
+            for detail in error.get("details", []):
+                if detail.get("reason"):
+                    reason = detail["reason"]
+                    break
+
+            if reason == "API_KEY_SERVICE_BLOCKED":
+                hint = "the API key's own API-restrictions allowlist doesn't include Chrome UX Report API — add it under APIs & Services > Credentials > (your key) > API restrictions"
+            elif reason == "SERVICE_DISABLED":
+                hint = "the Chrome UX Report API isn't enabled on this project — enable it under APIs & Services > Library"
+            else:
+                hint = error.get("message", "permission denied")
+
+            print(f"[CrUX] Field data unavailable ({reason or '403'}): {hint}. Falling back to measured/lab vitals.")
             return {}
 
         response.raise_for_status()
@@ -119,7 +153,20 @@ def _metrics_to_vitals(metrics: dict) -> dict:
         p75 = (metrics.get(crux_name) or {}).get("percentiles", {}).get("p75")
         if p75 is None:
             continue
-        vitals[our_name] = _normalise_cls(p75) if our_name == "cls" else round(p75)
+
+        if our_name == "cls":
+            value = _cls_from_crux_api(p75)
+        else:
+            try:
+                value = round(float(p75))
+            except (TypeError, ValueError):
+                value = None
+
+        # Drop rather than store a null: callers test `is not None` to decide
+        # whether to fall through to the next-best source, so a None left in
+        # the dict would masquerade as "CrUX answered" and block the fallback.
+        if value is not None:
+            vitals[our_name] = value
 
     if vitals:
         print(f"[CrUX] Real-user field data: {vitals}")
@@ -143,7 +190,10 @@ def extract_crux_from_pagespeed(data: dict) -> dict:
         percentile = (metrics.get(ps_name) or {}).get("percentile")
         if percentile is None:
             continue
-        vitals[our_name] = _normalise_cls(percentile) if our_name == "cls" else round(percentile)
+
+        value = _cls_from_pagespeed(percentile) if our_name == "cls" else round(percentile)
+        if value is not None:
+            vitals[our_name] = value
 
     if vitals:
         print(f"[CrUX] Real-user field data (via PageSpeed response): {vitals}")

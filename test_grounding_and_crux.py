@@ -55,12 +55,39 @@ def test_no_crux_data_returns_empty_not_zero():
 
 
 def test_crux_api_metric_shape_is_parsed():
+    """
+    The dedicated CrUX API returns CLS as a decimal STRING ("0.01"), while
+    PageSpeed's loadingExperience returns the same value as an integer at
+    100x ("1"). Live-verified on jns.ac.in. Treating one like the other is
+    silent: the value either vanishes or lands 100x off, and 0.01 vs 1.0 is
+    the difference between fine and a critical flaw.
+    """
     metrics = {
-        "largest_contentful_paint": {"percentiles": {"p75": 2785}},
-        "cumulative_layout_shift": {"percentiles": {"p75": 12}},
+        "largest_contentful_paint": {"percentiles": {"p75": 1818}},
+        "cumulative_layout_shift": {"percentiles": {"p75": "0.01"}},
+        "interaction_to_next_paint": {"percentiles": {"p75": 128}},
     }
     vitals = _metrics_to_vitals(metrics)
-    assert vitals == {"lcp_ms": 2785, "cls": 0.12}
+    assert vitals == {"lcp_ms": 1818, "cls": 0.01, "inp_ms": 128}
+
+
+def test_the_two_sources_agree_on_the_same_underlying_cls():
+    """Both formats must land on the identical decimal value."""
+    from_api = _metrics_to_vitals({"cumulative_layout_shift": {"percentiles": {"p75": "0.01"}}})
+    from_pagespeed = extract_crux_from_pagespeed(
+        {"loadingExperience": {"metrics": {"CUMULATIVE_LAYOUT_SHIFT_SCORE": {"percentile": 1}}}}
+    )
+    assert from_api["cls"] == from_pagespeed["cls"] == 0.01
+
+
+def test_unparseable_metric_is_dropped_not_stored_as_none():
+    """
+    A None left in the dict would masquerade as "CrUX answered" and block
+    the fallback to measured/lab vitals — this is exactly how CLS came back
+    as None before the string form was handled.
+    """
+    vitals = _metrics_to_vitals({"cumulative_layout_shift": {"percentiles": {"p75": "not-a-number"}}})
+    assert "cls" not in vitals
 
 
 # ---------------------------------------------------------------------------
