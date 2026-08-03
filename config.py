@@ -51,6 +51,15 @@ IG_PASSWORD = os.getenv("IG_PASSWORD")
 DAILY_EMAIL_LIMIT = int(os.getenv("DAILY_EMAIL_LIMIT", "50"))
 LEAD_SOURCE = os.getenv("LEAD_SOURCE", "maps").lower() # options: maps, ecommerce, startups, b2b
 
+# Self-consistency: generate the audit copy twice and keep only the claims
+# whose cited source line appears in BOTH runs. A claim the model invents
+# tends not to survive a second independent sample, so agreement across runs
+# is real evidence of grounding in a way a single low-temperature run isn't.
+# Costs one extra AI call per lead (roughly doubles per-lead AI spend, which
+# is fractions of a cent on Haiku/Flash) and adds a few seconds. Set
+# AI_SELF_CONSISTENCY=false to disable.
+AI_SELF_CONSISTENCY = os.getenv("AI_SELF_CONSISTENCY", "true").strip().lower() not in ("false", "0", "no")
+
 # === API Auth ===
 # Required header (X-API-Key) for all /api/* routes. If unset, the API is
 # wide open — set this before deploying anywhere reachable from the internet.

@@ -49,8 +49,17 @@ _RESPONSE_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "paragraph": {"type": "string"},
+                    # Forces the model to point at the exact line from
+                    # FLAWS DETECTED that it is writing about, which turns
+                    # grounding verification from an LLM judgment call into
+                    # a cheap, deterministic substring match against the
+                    # prompt (see _verify_source_quotes). Asking for a
+                    # citation alongside each claim is also the single
+                    # highest-leverage prompt-level hallucination guard —
+                    # a model that must name its source invents less.
+                    "source_quote": {"type": "string"},
                 },
-                "required": ["paragraph"],
+                "required": ["paragraph", "source_quote"],
             },
         },
         "overall_score": {"type": "integer"},
@@ -143,7 +152,17 @@ class AIAuditor:
             parsed = self._parse_json(raw)
             if parsed is not None:
                 parsed["ai_cost"] = cost
+
+                if config.AI_SELF_CONSISTENCY:
+                    second = call_fn(prompt, base64_image, base64_mobile_image)
+                    if second is not None:
+                        second_parsed = self._parse_json(second[0])
+                        parsed["ai_cost"] = cost + second[1]
+                        if second_parsed is not None:
+                            self._apply_self_consistency(parsed, second_parsed, company)
+
                 self._check_number_hallucination(parsed, prompt, company)
+                self._verify_source_quotes(parsed, prompt, company)
                 self._verify_grounding(parsed, prompt, company)
                 self._check_spam_trigger_words(parsed, company)
                 self._check_body_length(parsed, company, has_image=bool(image_path))
@@ -273,6 +292,86 @@ class AIAuditor:
         word_count = len(f"{opening} {paragraphs}".split())
         if word_count < AIAuditor._MIN_BODY_WORD_COUNT:
             print(f"[AIAuditor] WARNING: email for '{company}' is only {word_count} words with an embedded screenshot attached — low text:image ratio can itself look spammy, review before sending.")
+
+    @staticmethod
+    def _apply_self_consistency(parsed: dict, second: dict, company: str) -> None:
+        """
+        Keep only the claims that BOTH independent samples chose to write
+        about, identified by the source line each one cites.
+
+        Two runs will always word their paragraphs differently, so comparing
+        prose would be meaningless — but `source_quote` names the specific
+        measured finding behind each claim, which makes agreement checkable
+        exactly. A genuine finding sits at the top of the ranked flaw list
+        and gets picked by both runs; a fabricated one is a coin flip and
+        usually doesn't recur.
+
+        Mutates `parsed` in place, and deliberately refuses to empty it: if
+        the two runs happen to overlap on nothing, the original is kept and
+        the disagreement logged, since an email with no content at all is a
+        worse outcome than one needing review.
+        """
+        first_flaws = parsed.get("flaws") or []
+        second_quotes = {
+            AIAuditor._normalise_for_match(f.get("source_quote", ""))
+            for f in (second.get("flaws") or [])
+            if f.get("source_quote")
+        }
+        if not first_flaws or not second_quotes:
+            return
+
+        agreed = [
+            f for f in first_flaws
+            if AIAuditor._normalise_for_match(f.get("source_quote", "")) in second_quotes
+        ]
+        dropped = len(first_flaws) - len(agreed)
+
+        if not agreed:
+            print(f"[AIAuditor] Self-consistency: the two samples for '{company}' cited entirely different findings — keeping the first sample unchanged, but this email is worth a closer read before sending.")
+            return
+
+        if dropped:
+            print(f"[AIAuditor] Self-consistency: dropped {dropped} of {len(first_flaws)} claim(s) for '{company}' that only appeared in one of two samples (kept {len(agreed)}).")
+        parsed["flaws"] = agreed
+
+    @staticmethod
+    def _normalise_for_match(text: str) -> str:
+        """Collapse whitespace/case so trivial reformatting isn't a mismatch."""
+        return " ".join(text.split()).strip().lower()
+
+    @staticmethod
+    def _verify_source_quotes(parsed: dict, prompt: str, company: str) -> None:
+        """
+        Check each flaw's `source_quote` actually appears in the prompt.
+
+        This is the cheapest and strictest of the three grounding checks:
+        no extra LLM call, no judgment, just a substring match. A quote the
+        model invented cannot be found in the source text, so a fabricated
+        claim is caught deterministically rather than probabilistically —
+        _check_number_hallucination only catches invented *numbers*, and
+        _verify_grounding is itself an LLM and can be wrong in both
+        directions.
+
+        Log-only, consistent with the other two: a paraphrase that drifts
+        slightly from the source line is a false positive, and blocking a
+        send on that would be worse than flagging it for review.
+        """
+        flaws = parsed.get("flaws", [])
+        if not flaws:
+            return
+
+        haystack = AIAuditor._normalise_for_match(prompt)
+        unverified = []
+        for i, flaw in enumerate(flaws, start=1):
+            quote = (flaw.get("source_quote") or "").strip()
+            if not quote:
+                unverified.append(f"#{i} (no source quote given)")
+                continue
+            if AIAuditor._normalise_for_match(quote) not in haystack:
+                unverified.append(f"#{i} \"{quote[:80]}\"")
+
+        if unverified:
+            print(f"[AIAuditor] WARNING: {len(unverified)} claim(s) for '{company}' cite a source quote that does NOT appear in the audit data — likely fabricated, review before sending: {unverified}")
 
     def _verify_grounding(self, parsed: dict, prompt: str, company: str) -> None:
         """
@@ -568,7 +667,8 @@ class AIAuditor:
             "{\n"
             '  "flaws": [\n'
             "    {\n"
-            '      "paragraph": "A single, highly conversational, flowing 2 to 3 sentence paragraph explaining the specific problem and the business impact. NO HYPHENS. NO DASHES. Be extremely natural."\n'
+            '      "paragraph": "A single, highly conversational, flowing 2 to 3 sentence paragraph explaining the specific problem and the business impact. NO HYPHENS. NO DASHES. Be extremely natural.",\n'
+            '      "source_quote": "Copy the ONE line from FLAWS DETECTED above that this paragraph is about, EXACTLY as written, character for character. Do not paraphrase, summarise, reword, or merge two lines. If you cannot copy an exact line for this claim, do not make the claim at all."\n'
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
@@ -653,17 +753,23 @@ class AIAuditor:
                     "json_schema": {
                         "name": "audit_result",
                         "strict": True,
+                        # Derived from _RESPONSE_JSON_SCHEMA rather than
+                        # restating the flaw shape, which had drifted out of
+                        # sync the moment a field was added to the shared
+                        # schema: OpenAI strict mode rejects any property not
+                        # declared here, so a hardcoded copy silently becomes
+                        # the one provider that can't return the new field.
+                        # Strict mode additionally requires
+                        # additionalProperties:false at every object level.
                         "schema": {
                             **_RESPONSE_JSON_SCHEMA,
                             "additionalProperties": False,
                             "properties": {
                                 **_RESPONSE_JSON_SCHEMA["properties"],
                                 "flaws": {
-                                    "type": "array",
+                                    **_RESPONSE_JSON_SCHEMA["properties"]["flaws"],
                                     "items": {
-                                        "type": "object",
-                                        "properties": {"paragraph": {"type": "string"}},
-                                        "required": ["paragraph"],
+                                        **_RESPONSE_JSON_SCHEMA["properties"]["flaws"]["items"],
                                         "additionalProperties": False,
                                     },
                                 },

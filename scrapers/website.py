@@ -288,10 +288,41 @@ class WebsiteScraper:
         # rather than all-or-nothing, since either source can independently
         # come back empty (Lighthouse unavailable, or the observer had
         # nothing buffered yet on a very fast/simple page).
+        # Real-user field data (Chrome UX Report) is the strongest source
+        # available: an aggregate of actual Chrome users' measurements at the
+        # 75th percentile over 28 days, rather than a throttled simulation
+        # (Lighthouse) or a single datacentre pageload (our own
+        # PerformanceObserver capture). Fetched via the dedicated CrUX API
+        # when it's enabled on the API key's project; also arrives free
+        # inside the PageSpeed response on the code path where that runs.
+        # Many small-business leads legitimately have no CrUX data (Google
+        # only publishes it above a traffic threshold), so this is an
+        # additional source in the priority chain, never a required one.
+        crux = lighthouse_scores.get("crux") or {}
+        if not crux:
+            from analyzer.crux import fetch_crux_vitals
+            crux = await fetch_crux_vitals(url)
+
         real_wv = extra.get("real_web_vitals") or {}
-        lcp_ms = real_wv.get("lcp_ms") if real_wv.get("lcp_ms") is not None else lighthouse_scores.get("lcp_ms")
-        cls = real_wv.get("cls") if real_wv.get("cls") is not None else lighthouse_scores.get("cls")
+
+        def _pick(metric: str):
+            """Per-metric, not all-or-nothing: CrUX -> real measured -> lab."""
+            for source in (crux, real_wv, lighthouse_scores):
+                value = source.get(metric)
+                if value is not None:
+                    return value
+            return None
+
+        lcp_ms = _pick("lcp_ms")
+        cls = _pick("cls")
+        # TBT is a lab-only metric — CrUX doesn't publish it (real users
+        # can't be measured for total blocking time), so it keeps the
+        # original measured-then-lab order.
         tbt_ms = real_wv.get("tbt_ms") if real_wv.get("tbt_ms") is not None else lighthouse_scores.get("tbt_ms")
+        # INP replaced FID as Google's official responsiveness Core Web
+        # Vital in March 2024 and is field-only, so it exists solely when
+        # CrUX data is available.
+        inp_ms = crux.get("inp_ms")
 
         # This one specifically was dead on every single site for weeks (the
         # init script was wrapped in an arrow function Playwright never
@@ -299,6 +330,7 @@ class WebsiteScraper:
         # Lighthouse's lab numbers looks identical to working. Tracked
         # explicitly so a silent regression here is visible immediately.
         signal_status["real_web_vitals"] = "ok" if real_wv else "no_data"
+        signal_status["crux_field_data"] = "ok" if crux else "no_data"
         signal_status["axe_core"] = "ok" if extra.get("accessibility_violations") else "no_data"
         signal_status["screenshot"] = "ok" if extra.get("visual_flaw_context") or extra.get("pages_audited") else "no_data"
         signal_status["mobile_screenshot"] = "ok" if extra.get("mobile_image_path") else "no_data"
@@ -318,6 +350,7 @@ class WebsiteScraper:
             lcp_ms=lcp_ms,
             cls=cls,
             tbt_ms=tbt_ms,
+            inp_ms=inp_ms,
             has_ssl=has_ssl,
             parsed=parsed,
             has_structured_data=has_structured_data,
@@ -448,13 +481,19 @@ class WebsiteScraper:
                 return {}
 
             from analyzer.lighthouse import _extract_core_web_vitals
+            from analyzer.crux import extract_crux_from_pagespeed
 
+            # The response also carries real-user CrUX field data alongside
+            # the lab audit, at no extra cost — surfaced under its own key
+            # so the caller can prefer it over the lab numbers rather than
+            # having the two silently overwrite each other.
             return {
                 "performance": int((categories.get("performance", {}).get("score") or 0) * 100),
                 "seo": int((categories.get("seo", {}).get("score") or 0) * 100),
                 "accessibility": int((categories.get("accessibility", {}).get("score") or 0) * 100),
                 "best_practices": int((categories.get("best-practices", {}).get("score") or 0) * 100),
                 **_extract_core_web_vitals(lighthouse_result.get("audits", {})),
+                "crux": extract_crux_from_pagespeed(data),
             }
         except Exception as e:
             body = getattr(getattr(e, "response", None), "text", "")[:300]
@@ -928,6 +967,7 @@ class WebsiteScraper:
         mobile_score: int,
         best_practices_score: int,
         lcp_ms: int | None = None,
+        inp_ms: int | None = None,
         cls: float | None = None,
         tbt_ms: int | None = None,
         has_ssl: bool,
@@ -986,6 +1026,15 @@ class WebsiteScraper:
         if cls is not None and cls > 0.1:
             sev = "high" if cls > 0.25 else "medium"
             flaws.append(Flaw("performance", sev, f"Cumulative Layout Shift score is {cls:.2f} (Google's 'good' threshold is 0.10) — page content visibly jumps around while loading, which can cause visitors to mis-click."))
+
+        # INP (Interaction to Next Paint) replaced FID as a Core Web Vital in
+        # March 2024 and is field-only — it exists here solely when CrUX has
+        # real-user data, so unlike the lab metrics this is measured from
+        # actual visitors tapping actual buttons. Google's thresholds:
+        # good <= 200ms, needs-improvement <= 500ms, poor above that.
+        if inp_ms is not None and inp_ms > 200:
+            sev = "high" if inp_ms > 500 else "medium"
+            flaws.append(Flaw("performance", sev, f"Real visitors wait {inp_ms}ms for the page to respond after they tap or click (Google's 'good' threshold is 200ms) — this is measured from actual users on the site, not a simulation."))
 
         if tbt_ms is not None and tbt_ms > 200:
             sev = "high" if tbt_ms > 600 else "medium"
