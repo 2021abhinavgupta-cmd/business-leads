@@ -14,7 +14,7 @@ from scrapers.google_maps import GoogleMapsScraper
 from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
-from emailer.ses_sender import SESSender
+from emailer import get_sender
 from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
 from storage.sheets import SheetsStorage
@@ -191,7 +191,7 @@ maps_scraper = GoogleMapsScraper()
 web_scraper = WebsiteScraper()
 ig_scraper = InstagramScraper()
 auditor = AIAuditor()
-ses = SESSender()
+ses = get_sender()
 sheets = SheetsStorage()
 decision_maker = DecisionMaker()
 
@@ -301,7 +301,7 @@ async def audit_lead(
 
     try:
         # Check SES quota (optional but good for safety)
-        quota = await asyncio.to_thread(ses.check_ses_quota)
+        quota = await asyncio.to_thread(ses.check_quota)
         remaining_quota = quota.get('Max24HourSend', 0) - quota.get('SentLast24Hours', 0)
         if remaining_quota <= 0:
             return {"error": "SES quota exceeded."}

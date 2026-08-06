@@ -23,6 +23,25 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 # === Email ===
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
+# Which transport actually delivers the mail: "ses" (default) or "gmail".
+# Gmail here means an authenticated Google Workspace mailbox over SMTP —
+# Gmail treats mail from its own infrastructure differently from third-party
+# ESP traffic, and this tool's leads are mostly Gmail inboxes. See
+# emailer/gmail_sender.py for the two real constraints before switching.
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "ses")
+
+# Workspace mailbox used when EMAIL_PROVIDER=gmail. GMAIL_APP_PASSWORD is an
+# App Password (https://myaccount.google.com/apppasswords), not the account
+# password — creating one requires 2-Step Verification on the account.
+GMAIL_USER = os.getenv("GMAIL_USER")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+
+# Self-imposed daily ceiling for the Gmail transport. Google's own limit is
+# far higher (2,000 external recipients/day on Workspace), but the risk being
+# managed here is account suspension for bulk unsolicited mail, not the hard
+# limit — so this stays deliberately low.
+GMAIL_DAILY_CAP = int(os.getenv("GMAIL_DAILY_CAP", "40"))
+
 # Public base URL of this deployment (e.g. "https://myapp.up.railway.app"),
 # used to build a one-click HTTPS unsubscribe link for the List-Unsubscribe
 # header (RFC 8058). If unset, outgoing emails still carry a mailto:

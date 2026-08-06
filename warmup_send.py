@@ -10,7 +10,7 @@ import time
 import random
 import datetime
 
-from emailer.ses_sender import SESSender
+from emailer import get_sender
 
 _RECIPIENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "warmup_recipients.txt")
 
@@ -70,7 +70,7 @@ def _build_email(seed: int) -> tuple[str, str]:
 
 def main():
     recipients = _load_recipients()
-    ses = SESSender()
+    ses = get_sender()
     for i, email in enumerate(recipients):
         subject, body = _build_email(seed=i)
         try:

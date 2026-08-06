@@ -9,7 +9,7 @@ import sys
 
 import config
 from analyzer.ai_audit import AIAuditor
-from emailer.ses_sender import SESSender
+from emailer import get_sender
 from enrichment.decision_maker import DecisionMaker
 from scrapers.instagram import InstagramScraper
 from scrapers.website import WebsiteScraper
@@ -25,7 +25,7 @@ try:
     ig_scraper = InstagramScraper()
     web_scraper = WebsiteScraper()
     auditor = AIAuditor()
-    ses = SESSender()
+    ses = get_sender()
     sheets = SheetsStorage()
 except Exception as e:
     print(f"Failed to initialize components: {e}")
@@ -159,13 +159,13 @@ async def run_batch():
 
     print("--- Starting Lead Audit Bot Batch ---")
     
-    # Check SES quota first
-    quota = ses.check_ses_quota()
+    # Check the transport's remaining daily capacity first
+    quota = ses.check_quota()
     remaining_quota = quota.get('Max24HourSend', 0) - quota.get('SentLast24Hours', 0)
-    print(f"SES quota remaining today: {remaining_quota}")
-    
+    print(f"{ses.provider_name} quota remaining today: {remaining_quota}")
+
     if remaining_quota <= 0:
-        print("No SES quota remaining today. Exiting.")
+        print(f"No {ses.provider_name} quota remaining today. Exiting.")
         return
         
     leads = sheets.get_pending_leads()[:config.DAILY_EMAIL_LIMIT]

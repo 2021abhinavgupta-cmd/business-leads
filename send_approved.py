@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 
-from emailer.ses_sender import SESSender
+from emailer import get_sender
 from storage.sheets import SheetsStorage
 from analyzer.visuals import generate_audit_screenshot
 
@@ -12,7 +12,7 @@ async def send_approved_emails():
     sends the drafted email via SES, and marks them as "emailed".
     """
     try:
-        ses = SESSender()
+        ses = get_sender()
         sheets = SheetsStorage()
     except Exception as e:
         print(f"Failed to initialize components: {e}")
