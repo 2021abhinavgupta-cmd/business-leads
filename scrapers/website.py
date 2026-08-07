@@ -174,6 +174,32 @@ class WebsiteScraper:
         has_ssl = str(final_url).startswith("https://")
 
         if not html:
+            # Playwright failed twice (see analyzer/visuals.py's retry wrapper) —
+            # but that means OUR headless browser choked, not necessarily that
+            # the site is down. Bot-detection/WAF challenges and JS-heavy
+            # loading-screen sites can both defeat a headless browser while
+            # loading perfectly normally for a real visitor — live-verified
+            # 2026-08-07 on a lead where this exact branch produced a
+            # "Your website isn't loading" email for a site that came back
+            # completely clean on the very next attempt. A plain httpx GET
+            # (no JS, no bot-fingerprinting surface Playwright has) is a
+            # cheap independent check: if it succeeds, the flaw text must
+            # not claim the site is down, since that's the one factual claim
+            # a lead can trivially disprove by opening their own website.
+            reachability_note = "Website is unreachable or returned an error"
+            try:
+                probe = await self.client.get(url, timeout=10, follow_redirects=True)
+                if probe.status_code < 400:
+                    reachability_note = (
+                        "Automated visual/technical audit could not render this page "
+                        "(likely bot-protection or a heavy JS loading screen blocking "
+                        "the headless browser), but a direct HTTP request to the same "
+                        "URL succeeded — the site is reachable, just not fully auditable "
+                        "on this run."
+                    )
+            except Exception:
+                pass  # genuinely unreachable even to a plain HTTP request — keep the original wording
+
             return WebsiteData(
                 url=url,
                 reachable=False,
@@ -189,7 +215,7 @@ class WebsiteScraper:
                 meta_title="",
                 meta_description="",
                 technologies=[],
-                flaws=[Flaw(category="tech", severity="critical", description="Website is unreachable or returned an error")],
+                flaws=[Flaw(category="tech", severity="critical", description=reachability_note)],
             )
 
         # We are using Playwright now, so use real timing data if available.

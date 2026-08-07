@@ -13,6 +13,7 @@ import pytest
 
 from analyzer.flaws import Flaw, compute_score
 from analyzer.ai_audit import AIAuditor
+from scrapers.website import WebsiteScraper
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +249,52 @@ def test_count_emails_sent_today_reads_the_send_log():
     source = inspect.getsource(db.count_emails_sent_today)
     assert "email_history" in source, "the cap must count real sends, not an in-process counter"
     assert "-1 day" in source
+
+
+# ---------------------------------------------------------------------------
+# "Website is unreachable" false positive
+#
+# audit_website() used to treat html=None (Playwright failed both retries)
+# as proof the site was down, and that exact wording became the AI's "Your
+# website isn't loading" email. Live-verified on a real lead
+# (brandyaar.com): Playwright failed the run that produced the email, but
+# the site loaded perfectly on the very next attempt and responded
+# normally to a plain HTTP request the whole time — bot-detection/a JS
+# loading screen defeated the headless browser, the site was never down.
+# A cheap httpx probe now distinguishes "our tool failed" from "the site is
+# actually unreachable" before either wording is allowed into a flaw.
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _FakeClientReachable:
+    async def get(self, *args, **kwargs):
+        return _FakeResponse(200)
+
+
+class _FakeClientGenuinelyDown:
+    async def get(self, *args, **kwargs):
+        raise Exception("connection refused")
+
+
+async def test_playwright_failure_does_not_claim_site_is_down_when_httpx_succeeds():
+    scraper = WebsiteScraper()
+    scraper.client = _FakeClientReachable()
+    data = await scraper.audit_website("https://example.com", html=None, extra_audit_data=None)
+
+    assert data.reachable is False  # we still couldn't run the real audit
+    description = data.flaws[0].description.lower()
+    assert "down" not in description
+    assert "unreachable" not in description
+    assert "reachable" in description  # states plainly that it IS reachable
+
+
+async def test_playwright_failure_keeps_unreachable_wording_when_httpx_also_fails():
+    scraper = WebsiteScraper()
+    scraper.client = _FakeClientGenuinelyDown()
+    data = await scraper.audit_website("https://example.com", html=None, extra_audit_data=None)
+
+    assert "unreachable" in data.flaws[0].description.lower()

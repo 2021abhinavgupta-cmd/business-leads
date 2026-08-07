@@ -387,11 +387,19 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
                 # not-yet-rendered page that doesn't match what a real visitor sees.
                 # Best-effort wait for network activity to quiet down, then a fixed
                 # settle delay for CSS transitions — never fail the audit over this.
+                #
+                # 10s here specifically (not the 1.5s used for extra/mobile pages
+                # below) because the HOMEPAGE is where full-screen JS preloaders/
+                # intro animations live (a spinner or logo-reveal that gates the
+                # real content) — live-verified 2026-08-07 as a real contributor
+                # to false "site is unreachable" audits: on a slow run, axe-core
+                # and the screenshot could fire while a preloader was still up,
+                # not because the site was actually down.
                 try:
                     await page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(10000)
 
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
