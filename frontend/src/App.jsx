@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, AlertTriangle, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import './App.css';
@@ -36,6 +36,8 @@ function App() {
 
   const [historyLogs, setHistoryLogs] = useState([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
+  const [replyCheckEnabled, setReplyCheckEnabled] = useState(false);
+  const [checkingReplies, setCheckingReplies] = useState(false);
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
@@ -71,6 +73,7 @@ function App() {
       axios.get(`${API_BASE}/api/history?t=${t}`).then(res => {
         setHistoryLogs(res.data.history);
         setTrackingEnabled(!!res.data.tracking_enabled);
+        setReplyCheckEnabled(!!res.data.reply_checking_enabled);
       }).catch(console.error);
     }
     if (currentView === 'cost') {
@@ -616,10 +619,62 @@ function App() {
     </div>
   );
 
+  const handleCheckReplies = async () => {
+    setCheckingReplies(true);
+    try {
+      const res = await axios.post(`${API_BASE}/api/check-replies`);
+      const s = res.data;
+      alert(
+        `Scanned ${s.scanned} messages.\n\n` +
+        `${s.replies} real replies\n${s.auto_replies} auto-replies (out of office)\n` +
+        `${s.bounces} bounces\n${s.unmatched} unrelated to anything we sent`
+      );
+      const res2 = await axios.get(`${API_BASE}/api/history?t=${Date.now()}`);
+      setHistoryLogs(res2.data.history);
+    } catch (err) {
+      console.error(err);
+      alert(err.response?.data?.detail || 'Could not check replies.');
+    } finally {
+      setCheckingReplies(false);
+    }
+  };
+
   const renderHistory = () => (
     <div className="glass" style={{ padding: '24px' }}>
-      <h2><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
-      <p style={{color: '#94a3b8', marginBottom: '16px'}}>Persistent log of all outbound emails dispatched.</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+        <h2 style={{ margin: 0 }}><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
+        {replyCheckEnabled && (
+          <button
+            onClick={handleCheckReplies}
+            disabled={checkingReplies}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: checkingReplies ? 'rgba(148,163,184,0.2)' : '#10b981', border: 'none', borderRadius: '8px', color: '#fff', cursor: checkingReplies ? 'default' : 'pointer', fontSize: '14px', fontWeight: 'bold' }}
+          >
+            {checkingReplies ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+            {checkingReplies ? 'Checking inbox...' : 'Check for replies'}
+          </button>
+        )}
+      </div>
+      <p style={{color: '#94a3b8', marginBottom: '16px', marginTop: '8px'}}>Persistent log of all outbound emails dispatched.</p>
+
+      {!replyCheckEnabled && (
+        <div style={{ background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', fontSize: '13px', color: '#94a3b8' }}>
+          Reply detection is off. Set <code>IMAP_USER</code> and <code>IMAP_PASSWORD</code> (an App Password)
+          to see who actually wrote back — the one engagement signal that is never wrong.
+        </div>
+      )}
+
+      {replyCheckEnabled && (
+        <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', fontSize: '13px', color: '#94a3b8' }}>
+          <strong style={{ color: '#22c55e' }}>
+            {historyLogs.filter(l => l.replied).length} replies
+          </strong>
+          {' '}from {historyLogs.length} emails sent
+          {historyLogs.filter(l => l.bounced).length > 0 && (
+            <span style={{ color: '#ef4444' }}> · {historyLogs.filter(l => l.bounced).length} bounced</span>
+          )}
+          . Replies are exact — unlike opens, nothing inflates or hides them.
+        </div>
+      )}
 
       {trackingEnabled ? (
         <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px 16px', marginBottom: '24px', fontSize: '13px', color: '#94a3b8' }}>
@@ -644,6 +699,22 @@ function App() {
               <div>
                 <h4 style={{ margin: '0 0 4px 0' }}>{log.company}</h4>
                 <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {log.target_email} • From: {log.sender_email}</p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {log.replied && (
+                  <span title={log.reply_subject ? `Re: ${log.reply_subject}` : 'Replied'} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', fontWeight: 'bold', color: '#22c55e', background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)', borderRadius: '999px', padding: '3px 10px' }}>
+                    <MessageSquare size={13} /> Replied
+                  </span>
+                )}
+                {log.bounced && (
+                  <span title="Delivery failed — this address may be dead" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', fontWeight: 'bold', color: '#ef4444', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: '999px', padding: '3px 10px' }}>
+                    <AlertTriangle size={13} /> Bounced
+                  </span>
+                )}
+                {log.auto_replied && !log.replied && (
+                  <span title="Automatic response — proves the address is live, not that anyone read it" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', color: '#94a3b8', background: 'rgba(148,163,184,0.1)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '999px', padding: '3px 10px' }}>
+                    <MessageSquare size={13} /> Auto-reply
+                  </span>
+                )}
                 {trackingEnabled && (
                   log.open_count > 0 ? (
                     <span title={`First opened ${log.first_opened_at} UTC`} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', fontWeight: 'bold', color: '#10b981', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '999px', padding: '3px 10px' }}>
@@ -655,6 +726,7 @@ function App() {
                     </span>
                   )
                 )}
+                </div>
               </div>
               <div style={{ textAlign: 'right' }}>
                 <span style={{ fontSize: '12px', color: '#10b981', display: 'block' }}>{log.timestamp}</span>

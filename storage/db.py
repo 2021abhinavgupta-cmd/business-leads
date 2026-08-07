@@ -101,6 +101,29 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_opens_tracking ON email_opens (tracking_id)")
         cursor.execute("PRAGMA user_version = 3")
 
+    # Email Replies Table — inbound mail matched back to something we sent.
+    # reply_message_id is the PRIMARY KEY so re-scanning the same mailbox is
+    # idempotent: the checker re-reads a rolling window of days and will see
+    # the same reply many times, and INSERT OR REPLACE turns that into a
+    # no-op rather than a pile of duplicates inflating the one metric here
+    # that's meant to be trustworthy.
+    if schema_version < 4:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_replies (
+            reply_message_id TEXT PRIMARY KEY,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            in_reply_to TEXT,
+            from_email TEXT,
+            target_email TEXT,
+            subject TEXT,
+            is_auto INTEGER DEFAULT 0,
+            is_bounce INTEGER DEFAULT 0
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_replies_thread ON email_replies (in_reply_to)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_replies_target ON email_replies (target_email)")
+        cursor.execute("PRAGMA user_version = 4")
+
     conn.commit()
     conn.close()
 
@@ -221,6 +244,81 @@ def get_open_summary() -> dict:
     return {row["tracking_id"]: dict(row) for row in rows}
 
 
+def log_reply(reply_message_id: str, in_reply_to: str, from_email: str, target_email: str,
+              subject: str = "", is_auto: bool = False, is_bounce: bool = False):
+    """
+    Record one inbound message matched to something we sent.
+
+    INSERT OR REPLACE, keyed on the reply's own Message-ID, because the
+    checker re-scans a rolling window and will see the same reply on every
+    run. A reply that carries no Message-ID at all gets a synthetic key
+    derived from its own content, so those stay idempotent too instead of
+    all colliding on the empty string.
+    """
+    init_db()
+    key = (reply_message_id or "").strip()
+    if not key:
+        import hashlib
+        seed = f"{from_email}|{subject}|{in_reply_to}".encode("utf-8")
+        key = f"<synthetic-{hashlib.blake2s(seed, digest_size=12).hexdigest()}>"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT OR REPLACE INTO email_replies
+           (reply_message_id, in_reply_to, from_email, target_email, subject, is_auto, is_bounce)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (key, in_reply_to, (from_email or "").strip().lower(), (target_email or "").strip().lower(),
+         subject[:300], 1 if is_auto else 0, 1 if is_bounce else 0)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_replies():
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_replies ORDER BY timestamp DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_reply_summary() -> tuple[dict, dict]:
+    """
+    Reply aggregates indexed two ways: by the Message-ID replied to, and by
+    the address we originally mailed.
+
+    Both exist because matching happens both ways — threading headers are
+    exact but plenty of clients drop them, in which case the sender's address
+    is all there is to go on.
+    """
+    by_thread: dict = {}
+    by_address: dict = {}
+
+    for row in get_replies():
+        entry = {
+            "replied": not row["is_auto"] and not row["is_bounce"],
+            "is_auto": bool(row["is_auto"]),
+            "is_bounce": bool(row["is_bounce"]),
+            "from_email": row["from_email"],
+            "subject": row["subject"],
+            "timestamp": row["timestamp"],
+        }
+        # A real reply outranks an auto-reply or bounce for the same thread:
+        # an out-of-office followed by a genuine answer is a genuine answer.
+        for index, key in ((by_thread, row["in_reply_to"]), (by_address, row["target_email"])):
+            if not key:
+                continue
+            existing = index.get(key)
+            if existing is None or (entry["replied"] and not existing["replied"]):
+                index[key] = entry
+
+    return by_thread, by_address
+
+
 def get_email_history():
     """
     Send log, newest first, with open data merged in.
@@ -241,12 +339,22 @@ def get_email_history():
     from emailer.tracking import tracking_id_for
 
     summary = get_open_summary()
+    replies_by_thread, replies_by_address = get_reply_summary()
+
     for row in rows:
         stats = summary.get(tracking_id_for(row.get("message_id") or ""), {})
         row["open_count"] = stats.get("open_count") or 0
         row["automated_count"] = stats.get("automated_count") or 0
         row["first_opened_at"] = stats.get("first_opened_at")
         row["last_opened_at"] = stats.get("last_opened_at")
+
+        reply = replies_by_thread.get(row.get("message_id") or "") or \
+            replies_by_address.get((row.get("target_email") or "").strip().lower())
+        row["replied"] = bool(reply and reply["replied"])
+        row["auto_replied"] = bool(reply and reply["is_auto"])
+        row["bounced"] = bool(reply and reply["is_bounce"])
+        row["reply_subject"] = reply["subject"] if reply else None
+        row["reply_at"] = reply["timestamp"] if reply else None
 
     return rows
 

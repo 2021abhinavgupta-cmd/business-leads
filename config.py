@@ -51,6 +51,20 @@ GMAIL_DAILY_CAP = int(os.getenv("GMAIL_DAILY_CAP", "40"))
 # See emailer/tracking.py.
 EMAIL_OPEN_TRACKING = os.getenv("EMAIL_OPEN_TRACKING", "false").strip().lower() in ("true", "1", "yes")
 
+# === Reply detection (IMAP) ===
+# The mailbox replies land in — every outgoing message sets Reply-To to
+# FROM_EMAIL, so this is that mailbox regardless of which transport sent it.
+# IMAP_PASSWORD must be an App Password for Gmail/Workspace, not the account
+# password. Scanning is read-only (BODY.PEEK) and never marks mail as read.
+IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
+IMAP_USER = os.getenv("IMAP_USER")
+IMAP_PASSWORD = os.getenv("IMAP_PASSWORD")
+
+# How far back each scan looks. Generous by default: re-seeing a reply is a
+# no-op (email_replies is keyed on the reply's own Message-ID), whereas a
+# window shorter than the gap between scans loses replies permanently.
+REPLY_LOOKBACK_DAYS = int(os.getenv("REPLY_LOOKBACK_DAYS", "30"))
+
 # Public base URL of this deployment (e.g. "https://myapp.up.railway.app"),
 # used to build a one-click HTTPS unsubscribe link for the List-Unsubscribe
 # header (RFC 8058). If unset, outgoing emails still carry a mailto:

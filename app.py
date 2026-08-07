@@ -553,6 +553,22 @@ async def tracking_pixel(tracking_id: str, request: Request):
     )
 
 
+@app.post("/api/check-replies")
+async def check_replies(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(10, 60))):
+    """
+    Scan the reply mailbox over IMAP and record anything matching a sent email.
+
+    Rate-limited low: each call opens a real IMAP session and walks a rolling
+    window of messages, so it's a poll to run occasionally, not on a timer.
+    """
+    from emailer.reply_checker import check_replies as run_check
+
+    try:
+        return await asyncio.to_thread(run_check)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/api/costs")
 async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
@@ -570,6 +586,7 @@ async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depend
         return {
             "history": history,
             "tracking_enabled": bool(config.EMAIL_OPEN_TRACKING and config.APP_BASE_URL),
+            "reply_checking_enabled": bool(config.IMAP_HOST and config.IMAP_USER and config.IMAP_PASSWORD),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
