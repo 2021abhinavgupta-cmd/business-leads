@@ -42,6 +42,15 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 # limit — so this stays deliberately low.
 GMAIL_DAILY_CAP = int(os.getenv("GMAIL_DAILY_CAP", "40"))
 
+# Embed a 1x1 tracking pixel in outgoing HTML so opens can be logged.
+# OFF by default and deliberately so: a remote image in a first-touch email
+# from an unknown sender is a spam signal, which is a real cost paid for a
+# number that can't be trusted (Apple Mail pre-fetches every image, so opens
+# read high; images-off readers register nothing, so they read low). Needs
+# APP_BASE_URL set — a relative URL is meaningless inside an email.
+# See emailer/tracking.py.
+EMAIL_OPEN_TRACKING = os.getenv("EMAIL_OPEN_TRACKING", "false").strip().lower() in ("true", "1", "yes")
+
 # Public base URL of this deployment (e.g. "https://myapp.up.railway.app"),
 # used to build a one-click HTTPS unsubscribe link for the List-Unsubscribe
 # header (RFC 8058). If unset, outgoing emails still carry a mailto:

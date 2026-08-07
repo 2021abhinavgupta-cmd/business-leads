@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,7 @@ from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
 from emailer import get_sender
+from emailer.tracking import TRANSPARENT_GIF, hash_ip, looks_automated
 from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
 from storage.sheets import SheetsStorage
@@ -508,6 +509,50 @@ async def unsubscribe(request: Request, email: str = ""):
         "</body></html>"
     )
 
+# Deliberately unauthenticated and unrate-limited, same reasoning as
+# /unsubscribe above: the caller is a recipient's mail client, which has no
+# API key and no way to retry a rejection. The tracking ID is a digest of the
+# message's Message-ID (emailer/tracking.py), so hits can't be forged for a
+# message the sender never sent.
+@app.get("/o/{tracking_id}.gif")
+async def tracking_pixel(tracking_id: str, request: Request):
+    """
+    Log one open and return a 1x1 transparent GIF.
+
+    This route must return the image no matter what goes wrong. A 404 or a
+    500 here renders as a broken-image icon inside someone's inbox, which is
+    both visibly odd and a giveaway that the mail is tracked — so logging
+    failures are swallowed rather than surfaced.
+    """
+    try:
+        # Only accept the exact shape tracking_id_for() produces (18 hex
+        # chars), so scanners probing this path don't fill the table.
+        if len(tracking_id) == 18 and all(c in "0123456789abcdef" for c in tracking_id):
+            user_agent = request.headers.get("user-agent", "")
+            client_ip = request.client.host if request.client else ""
+            await asyncio.to_thread(
+                db.log_email_open,
+                tracking_id,
+                user_agent,
+                hash_ip(client_ip),
+                looks_automated(user_agent),
+            )
+    except Exception as e:
+        print(f"[Tracking] Could not log open for {tracking_id}: {e}")
+
+    return Response(
+        content=TRANSPARENT_GIF,
+        media_type="image/gif",
+        headers={
+            # Without this the client caches the pixel and a second open
+            # never reaches us.
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/api/costs")
 async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
@@ -520,7 +565,12 @@ async def get_costs(_auth: None = Depends(require_api_key), _rl: None = Depends(
 async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
         history = await asyncio.to_thread(db.get_email_history)
-        return {"history": history}
+        # The frontend needs this to tell "nobody opened it" apart from
+        # "opens were never measured" — both look like open_count 0.
+        return {
+            "history": history,
+            "tracking_enabled": bool(config.EMAIL_OPEN_TRACKING and config.APP_BASE_URL),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -79,6 +79,28 @@ def init_db():
         cursor.execute("ALTER TABLE email_history ADD COLUMN message_id TEXT")
         cursor.execute("PRAGMA user_version = 2")
 
+    # Email Opens Table — one row per tracking-pixel fetch, not per email.
+    # A single message can be fetched many times (reopened, forwarded,
+    # re-rendered), and the raw hits are worth keeping: collapsing to a
+    # boolean at write time would throw away the repeat-open signal, which is
+    # the more interesting one. Aggregation happens at read time instead.
+    # No FK to email_history: the pixel is matched by a digest of the
+    # Message-ID (see emailer/tracking.py), and a hit can legitimately arrive
+    # for a message that was sent outside this database.
+    if schema_version < 3:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_opens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tracking_id TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_agent TEXT,
+            ip_hash TEXT,
+            is_automated INTEGER DEFAULT 0
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_opens_tracking ON email_opens (tracking_id)")
+        cursor.execute("PRAGMA user_version = 3")
+
     conn.commit()
     conn.close()
 
@@ -160,15 +182,73 @@ def get_costs():
     conn.close()
     return [dict(row) for row in rows]
 
+def log_email_open(tracking_id: str, user_agent: str = "", ip_hash: str = "", is_automated: bool = False):
+    """Record one tracking-pixel fetch. See emailer/tracking.py on what this does and doesn't mean."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO email_opens (tracking_id, user_agent, ip_hash, is_automated) VALUES (?, ?, ?, ?)",
+        (tracking_id, user_agent[:300], ip_hash, 1 if is_automated else 0)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_open_summary() -> dict:
+    """
+    Per-message open aggregates, keyed by tracking_id.
+
+    Automated fetches are counted separately rather than dropped — a message
+    whose only hits came from a scanner genuinely hasn't been read, and that
+    reads very differently from one with no hits at all.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT tracking_id,
+               SUM(CASE WHEN is_automated = 0 THEN 1 ELSE 0 END) AS open_count,
+               SUM(CASE WHEN is_automated = 1 THEN 1 ELSE 0 END) AS automated_count,
+               MIN(CASE WHEN is_automated = 0 THEN timestamp END) AS first_opened_at,
+               MAX(CASE WHEN is_automated = 0 THEN timestamp END) AS last_opened_at
+        FROM email_opens
+        GROUP BY tracking_id
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return {row["tracking_id"]: dict(row) for row in rows}
+
+
 def get_email_history():
+    """
+    Send log, newest first, with open data merged in.
+
+    Rows sent before open tracking existed (no message_id, or sent with
+    tracking off) come back with open_count 0 — which means "never
+    measured", not "never read". The frontend distinguishes the two using
+    tracking_enabled from /api/history.
+    """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM email_history ORDER BY timestamp DESC")
-    rows = cursor.fetchall()
+    rows = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    return [dict(row) for row in rows]
+
+    from emailer.tracking import tracking_id_for
+
+    summary = get_open_summary()
+    for row in rows:
+        stats = summary.get(tracking_id_for(row.get("message_id") or ""), {})
+        row["open_count"] = stats.get("open_count") or 0
+        row["automated_count"] = stats.get("automated_count") or 0
+        row["first_opened_at"] = stats.get("first_opened_at")
+        row["last_opened_at"] = stats.get("last_opened_at")
+
+    return rows
 
 def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = ""):
     init_db()

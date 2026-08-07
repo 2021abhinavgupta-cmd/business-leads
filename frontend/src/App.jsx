@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import './App.css';
@@ -35,6 +35,7 @@ function App() {
   const LEADS_PAGE_SIZE = 12;
 
   const [historyLogs, setHistoryLogs] = useState([]);
+  const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
@@ -67,7 +68,10 @@ function App() {
   useEffect(() => {
     const t = Date.now();
     if (currentView === 'history') {
-      axios.get(`${API_BASE}/api/history?t=${t}`).then(res => setHistoryLogs(res.data.history)).catch(console.error);
+      axios.get(`${API_BASE}/api/history?t=${t}`).then(res => {
+        setHistoryLogs(res.data.history);
+        setTrackingEnabled(!!res.data.tracking_enabled);
+      }).catch(console.error);
     }
     if (currentView === 'cost') {
       axios.get(`${API_BASE}/api/costs?t=${t}`).then(res => setCostLogs(res.data.costs)).catch(console.error);
@@ -615,8 +619,24 @@ function App() {
   const renderHistory = () => (
     <div className="glass" style={{ padding: '24px' }}>
       <h2><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
-      <p style={{color: '#94a3b8', marginBottom: '24px'}}>Persistent log of all outbound emails dispatched.</p>
-      
+      <p style={{color: '#94a3b8', marginBottom: '16px'}}>Persistent log of all outbound emails dispatched.</p>
+
+      {trackingEnabled ? (
+        <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px 16px', marginBottom: '24px', fontSize: '13px', color: '#94a3b8' }}>
+          <strong style={{ color: '#10b981' }}>
+            {historyLogs.filter(l => l.open_count > 0).length} of {historyLogs.length} opened
+          </strong>
+          {' '}— counts are approximate. Apple Mail loads images automatically, so some
+          &ldquo;opens&rdquo; are nobody; a reader with images off shows as never opened.
+          Treat it as a trend, not a headcount.
+        </div>
+      ) : (
+        <div style={{ background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '12px 16px', marginBottom: '24px', fontSize: '13px', color: '#94a3b8' }}>
+          Open tracking is off, so every email below shows as unopened regardless of what
+          actually happened. Set <code>EMAIL_OPEN_TRACKING=true</code> and <code>APP_BASE_URL</code> to turn it on.
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {historyLogs.map(log => (
           <div key={log.id} style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
@@ -624,6 +644,17 @@ function App() {
               <div>
                 <h4 style={{ margin: '0 0 4px 0' }}>{log.company}</h4>
                 <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {log.target_email} • From: {log.sender_email}</p>
+                {trackingEnabled && (
+                  log.open_count > 0 ? (
+                    <span title={`First opened ${log.first_opened_at} UTC`} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', fontWeight: 'bold', color: '#10b981', background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '999px', padding: '3px 10px' }}>
+                      <Eye size={13} /> Opened{log.open_count > 1 ? ` ${log.open_count}x` : ''}
+                    </span>
+                  ) : (
+                    <span title={log.automated_count > 0 ? `${log.automated_count} fetch(es), all from scanners or bots — not a person` : 'No pixel fetch recorded'} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', color: '#64748b', background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.2)', borderRadius: '999px', padding: '3px 10px' }}>
+                      <EyeOff size={13} /> {log.automated_count > 0 ? 'Scanner only' : 'Not opened'}
+                    </span>
+                  )
+                )}
               </div>
               <div style={{ textAlign: 'right' }}>
                 <span style={{ fontSize: '12px', color: '#10b981', display: 'block' }}>{log.timestamp}</span>

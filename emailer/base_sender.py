@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import config
 from storage import db
+from emailer.tracking import pixel_html, tracking_id_for
 
 
 class TransientSendError(Exception):
@@ -187,6 +188,10 @@ class BaseSender:
             msg[header] = value
 
         html_body = body.replace("\n", "<br>")
+        # Only the HTML alternative carries the pixel — a text/plain part
+        # can't load an image, and putting a bare URL there would just show
+        # the recipient a tracking link.
+        pixel = pixel_html(tracking_id_for(message_id))
 
         alt = MIMEMultipart("alternative")
         alt.attach(MIMEText(body, "plain", "utf-8"))
@@ -202,6 +207,7 @@ class BaseSender:
                             <p style="color: #475569; font-size: 14px; margin-bottom: 16px;">Here is the screenshot my team took of your website on mobile:</p>
                             <img src='cid:audit_img' alt='Website Audit' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>
                         </div>
+                        {pixel}
                     </div>
                     """
             alt.attach(MIMEText(html_with_img, "html", "utf-8"))
@@ -222,6 +228,7 @@ class BaseSender:
             html_plain = f"""
                     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
                         {html_body}
+                        {pixel}
                     </div>
                     """
             alt.attach(MIMEText(html_plain, "html", "utf-8"))
@@ -232,10 +239,13 @@ class BaseSender:
     def _build_followup_message(
         self, to_email: str, subject: str, body: str, in_reply_to: str = ""
     ) -> MIMEMultipart:
+        message_id = make_msgid(domain=self._msgid_domain())
         html_body = body.replace("\n", "<br>")
+        pixel = pixel_html(tracking_id_for(message_id))
         html_template = f"""
                 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; color: #1a1a1a; line-height: 1.6;">
                     {html_body}
+                    {pixel}
                 </div>
                 """
 
@@ -245,7 +255,7 @@ class BaseSender:
         msg["Reply-To"] = self.from_email
         msg["To"] = to_email
         msg["Date"] = formatdate(localtime=True)
-        msg["Message-ID"] = make_msgid(domain=self._msgid_domain())
+        msg["Message-ID"] = message_id
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = in_reply_to
