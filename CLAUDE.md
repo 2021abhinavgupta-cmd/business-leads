@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-
+A lead-generation and cold-email tool for MMGA Agency: it finds local businesses with weak websites (via Google Maps/Places, or an alternate source per `LEAD_SOURCE`), runs a real technical + visual audit of each site, and drafts a personalized cold email that cites the specific flaws found — reviewed and sent through an inbox-style dashboard rather than blasted automatically. The project's dominant theme across its history (see §13) is **accuracy over cleverness**: nearly every session-scale fix has been about closing a gap where a failed or degraded signal silently produced a confident wrong claim (an invented load time, a "the site is down" email for a site that loads fine, a healthy-looking score that was actually just unmeasured) rather than adding a new capability.
 
 1. **React Frontend**: A sleek, multi-page Dashboard with Top Navigation (Dashboard, Drafts, Costs, History).
 2. **FastAPI Backend**: Serves the API and connects the web scrapers, AI analyzers, and persistent storage.
@@ -27,8 +27,11 @@ lead-audit-bot/
 ├── security_utils.py          # validate_public_url() — SSRF guard for the audit endpoint's user-supplied URL
 ├── scrapers/
 │   ├── __init__.py
-│   ├── google_maps.py         # GoogleMapsScraper — SerpAPI / Places API
+│   ├── google_maps.py         # GoogleMapsScraper — Places API (New): searchText + searchNearby, see §8
 │   ├── instagram.py           # InstagramScraper — instagrapi
+│   ├── shopify_dork.py        # ShopifyDorkScraper — used when LEAD_SOURCE=ecommerce, see scheduler.py
+│   ├── startup_dork.py        # StartupDorkScraper — used when LEAD_SOURCE=startups
+│   ├── apollo_free.py         # ApolloFreeScraper — used when LEAD_SOURCE=b2b (needs APOLLO_API_KEY)
 │   └── website.py             # WebsiteScraper — Playwright + Crawl4AI + Jina Reader
 ├── enrichment/
 │   ├── __init__.py
@@ -38,6 +41,9 @@ lead-audit-bot/
 │   ├── ai_audit.py            # AIAuditor — multi-provider AI reports
 │   ├── flaws.py               # Flaw dataclass + severity ranking — the reconciliation layer, see §5.6
 │   ├── lighthouse.py          # Lighthouse CLI runner for performance scores
+│   ├── crux.py                # Real-user Core Web Vitals from Google's Chrome UX Report, see §8
+│   ├── html_validate.py       # html-validate (Node) wrapper — real HTML-validity errors, see §8
+│   ├── pa11y_check.py         # pa11y (Node) wrapper — second, independent accessibility engine
 │   └── visuals.py             # Playwright screenshots, axe-core audits, precise Pillow bounding boxes
 ├── emailer/
 │   ├── __init__.py            # get_sender() — picks the transport from EMAIL_PROVIDER
@@ -54,12 +60,16 @@ lead-audit-bot/
 ├── data/                      # Persistent storage mount point (database.sqlite, screenshots/), gitignored
 ├── screenshots/               # Temporary generated AI audit screenshots, gitignored
 ├── main.py                    # CLI batch-send orchestration script (separate from app.py web API)
-├── scheduler.py               # Picks scraper by LEAD_SOURCE env var (maps/ecommerce/startups/b2b)
+├── scheduler.py               # APScheduler daemon: sends Mon-Fri 10am IST, follow-ups 9am IST, ingest_leads() Sun 8pm IST — picks scraper by LEAD_SOURCE (maps/ecommerce/startups/b2b)
 ├── test_audit.py              # pytest, @integration — full pipeline smoke test, see §6
 ├── test_lh.py                 # pytest, @integration — Lighthouse CLI smoke test, see §6
 ├── test_parse_json.py         # pytest, unit (no network) — AIAuditor._parse_json, see §6
-├── test_crawl.py, test_ddg.py, test_google.py, test_maps.py, test_playwright_maps.py
-│                               # 5 remaining manual smoke-test scripts (not converted to pytest), run via `python <file>.py`
+├── test_build_flaws.py, test_email_deliverability.py, test_new_flaw_signals.py,
+│   test_real_web_vitals.py, test_accuracy_guards.py, test_grounding_and_crux.py,
+│   test_gmail_sender.py, test_open_tracking.py, test_reply_detection.py
+│                               # pytest, unit (no network) — see §6 for what each covers
+├── test_crawl.py, test_ddg.py, test_google.py, test_maps.py, test_playwright_maps.py, test_ps.py
+│                               # 6 remaining manual smoke-test scripts (not converted to pytest), run via `python <file>.py`
 ├── pytest.ini                 # pytest config (asyncio_mode=auto, `integration` marker)
 ├── requirements-dev.txt       # requirements.txt + pytest/pytest-asyncio, for local dev & CI
 ├── .github/workflows/tests.yml # CI: runs pytest on push/PR (integration tests self-skip, no secrets configured)
@@ -82,12 +92,13 @@ lead-audit-bot/
 | **Frontend**    | `react`, `vite`, `lucide-react`, `framer-motion` |
 | **Scraping**    | `httpx`, `crawl4ai`, `beautifulsoup4`, `trafilatura` |
 | **Headless**    | `playwright`, `axe-playwright-python`      |
-| **Performance** | Google Lighthouse CLI (Node.js, runs twice/averages — see §8), native `PerformanceObserver` for real Core Web Vitals (`analyzer/visuals.py`, no dependency) |
+| **Performance** | Google Lighthouse CLI (Node.js, runs twice/averages — see §8), native `PerformanceObserver` for real Core Web Vitals (`analyzer/visuals.py`, no dependency), Chrome UX Report API for real-*user* field data (`analyzer/crux.py`, no dependency beyond `httpx` — see §8, this is the most authoritative of the three performance sources and is preferred over both) |
 | **SEO/Flaws**   | `pyseoanalyzer` (crawl-based SEO pass), `extruct` (Schema.org/JSON-LD structured data), `textstat` (readability), `html-validate` (Node.js, HTML validity), `pa11y` (Node.js, second accessibility engine) — see §5.6, §8 |
 | **AI Vision**   | `Pillow` (PIL)                             |
 | **AI Models**   | `google-generativeai` (deprecated upstream, still functional — see §8), `openai`, `anthropic` |
-| **Email**       | `boto3` (AWS SES)                          |
+| **Email**       | `boto3` (AWS SES), stdlib `smtplib`/`imaplib` (Gmail/Workspace send + reply detection, no new dependency — see §5.7/§8) |
 | **Database**    | `sqlite3`                                  |
+| **Scheduling**  | `apscheduler` (`scheduler.py`, standalone daemon process — not run by `app.py`) |
 
 **Installation:**
 Both Python and Node.js are required. `requirements.txt` is version-pinned (as of 2026-07-10) — bump versions deliberately, not via a bare re-`pip install`.
@@ -118,7 +129,7 @@ Both Python and Node.js are required. `requirements.txt` is version-pinned (as o
 | `EMAIL_OPEN_TRACKING` | Embed a 1x1 tracking pixel in outgoing HTML, default `false`. Also needs `APP_BASE_URL` (a relative image URL is meaningless inside an email) — `/api/history` reports `tracking_enabled` as the AND of both. Off by default deliberately: see §8 for why the resulting numbers are directional at best. |
 | `GMAIL_DAILY_CAP`    | Self-imposed daily ceiling for the Gmail transport, default `40`. Google's own limit is 2,000 external recipients/day on Workspace — this cap exists to avoid *suspension for bulk sending*, not to avoid the hard limit. Enforced via `db.count_emails_sent_today()`. |
 | `GOOGLE_MAPS_API_KEY`| Google Maps / Places API      |
-| `PAGESPEED_KEY`      | Fallback API Key for Lighthouse metrics |
+| `PAGESPEED_KEY`      | Fallback API Key for Lighthouse metrics; also the key `analyzer/crux.py:fetch_crux_vitals` uses for the dedicated Chrome UX Report API — needs "Chrome UX Report API" separately enabled on the same Google Cloud project (403 until it is, treated as "no data" not an error). See §5.7/§8. |
 | `GOOGLE_SHEETS_ID`   | Legacy CRM sheet ID (storage/sheets.py) |
 | `GOOGLE_CREDENTIALS_JSON` | Google service-account JSON as env var (prod); falls back to local `credentials.json` file |
 | `APOLLO_API_KEY`     | ApolloFreeScraper (used when `LEAD_SOURCE=b2b`) |
@@ -175,7 +186,16 @@ Every audit tool used to dump its raw output into the AI prompt as its own unran
 
 As of 2026-07-10, all tool output gets normalized into a common `Flaw(category, severity, description)` type in `scrapers/website.py:_build_flaws()`, deduplicated/reconciled in code (axe-core wins over Lighthouse's `accessibility` number; the two are never both shown), ranked by severity via `analyzer/flaws.py:rank()`, and handed to the AI as one `FLAWS DETECTED (ranked most severe first)` block. The AI's job shifted from "find the flaws in this raw dump" to "write compelling copy about the 2-3 most severe items on this pre-ranked list" — more consistent results, and the reconciliation logic is visible/testable in code (`test_build_flaws.py`) rather than being an LLM judgment call each time.
 
-Signals feeding into it: Lighthouse/PageSpeed scores + raw Core Web Vitals (LCP/CLS/TBT), SSL, meta title/description/H1, CTA/contact/testimonials/blog presence, canonical tag, robots `noindex` meta tag + `robots.txt` blanket-disallow, Open Graph tags, structured data + business-relevant schema `@type` (`extruct`), readability (`textstat`), thin content + real SEO warnings (`pyseoanalyzer`), security headers, mixed content (HTTP-on-HTTPS), JS console errors, axe-core violations (desktop + mobile viewport, across every crawled page), broken links, viewport meta, favicon, font-family consistency, stretched/blurry images, real alt-text coverage, duplicate title/meta-description across crawled pages, mobile horizontal overflow, and business/conversion signals (booking widget, click-to-call/WhatsApp, menu/pricing) — the last category exists because prior flaws were 100% technical (perf/SEO/a11y/security), and a business owner cares just as much about "can a customer actually convert on this page," see §8.
+Signals feeding into it: Lighthouse/PageSpeed scores + raw Core Web Vitals (LCP/CLS/TBT), CrUX real-user field data (`analyzer/crux.py`, preferred over both lab sources when available — see §5.7/§8), SSL, meta title/description/H1, CTA/contact/testimonials/blog presence, canonical tag, robots `noindex` meta tag + `robots.txt` blanket-disallow, Open Graph tags, structured data + business-relevant schema `@type` (`extruct`), readability (`textstat`), thin content + real SEO warnings (`pyseoanalyzer`), HTML validity (`html-validate`), a second accessibility engine (`pa11y`), security headers, mixed content (HTTP-on-HTTPS), JS console errors, axe-core violations (desktop + mobile viewport, across every crawled page), broken links, viewport meta, favicon, font-family consistency, stretched/blurry images, real alt-text coverage, duplicate title/meta-description across crawled pages, mobile horizontal overflow, and business/conversion signals (booking widget, click-to-call/WhatsApp, menu/pricing) — the last category exists because prior flaws were 100% technical (perf/SEO/a11y/security), and a business owner cares just as much about "can a customer actually convert on this page," see §8.
+
+### 5.7 `emailer/` — sending, deliverability, and engagement measurement
+Split across five files, each with one job (see §2 for the list). The dependency direction is one-way: `base_sender.py` knows nothing about SES or Gmail; `ses_sender.py`/`gmail_sender.py` each implement only `_transport_send()` and `check_quota()`; `tracking.py` and `reply_checker.py` are independent of both and of each other.
+
+- **`base_sender.py`** owns everything that decides how a message looks to a spam filter — the text/plain + text/html multipart structure, `List-Unsubscribe`/`List-Unsubscribe-Post` headers, RFC `In-Reply-To`/`References` threading on follow-ups, the suppression-list check, and the copy generators (`generate_email`, `generate_followup`). This exists so the two transports can never silently drift apart on a deliverability-critical detail — see §8.
+- **`ses_sender.py`** / **`gmail_sender.py`** are the only two files that know how to actually hand a built MIME message to a server. Selected via `emailer.get_sender()` (reads `config.EMAIL_PROVIDER`), which is the **only** construction point every caller (`app.py`, `main.py`, `send_approved.py`, `warmup_send.py`) is meant to use.
+- **`tracking.py`** builds the open-tracking pixel and the ID that matches a pixel fetch back to a send — see §8 for why the resulting numbers are directional, not exact.
+- **`reply_checker.py`** connects to `IMAP_USER`'s mailbox read-only and matches inbound mail back to a sent email — see §8 for why this is the one engagement signal actually worth trusting.
+- **From vs Reply-To**: `config.REPLY_TO_EMAIL` (defaults to `FROM_EMAIL`) exists because the two have different jobs — see the `REPLY_TO_EMAIL` row in §4 and the `Reply-To` gotcha in §8.
 
 ---
 
@@ -186,8 +206,6 @@ Signals feeding into it: Lighthouse/PageSpeed scores + raw Core Web Vitals (LCP/
 ```bash
 pip install -r requirements-dev.txt   # pytest + pytest-asyncio, on top of requirements.txt
 pytest -v
-###for i in range 
-  let the ran{}
 ```
 
 | File | Type | Notes |
@@ -196,6 +214,7 @@ pytest -v
 | `test_build_flaws.py` | Unit, no network | 23 tests locking in `_build_flaws()`'s severity mapping, ranking, and business/conversion/HTML-validity/Pa11y flaw logic (see §5.6). Always runs, always fast. |
 | `test_email_deliverability.py` | Unit, no network | 6 tests — suppression list, `List-Unsubscribe` header shape, message-ID storage. |
 | `test_new_flaw_signals.py` | Unit, no network | 6 tests — `html_validate`/`pa11y_check` JSON parsing, mocked `subprocess.run` with real-captured output shapes, including the Windows `OSError`→npx fallback path. |
+| `test_grounding_and_crux.py` | Unit, no network | 20 tests — `analyzer/crux.py`'s two extraction paths (`fetch_crux_vitals` API shape vs `extract_crux_from_pagespeed`'s `loadingExperience` shape) including the CLS unit mismatch between them (dedicated API returns a decimal string, PageSpeed returns an integer at 100x scale), plus `_check_number_hallucination`/`_verify_grounding`/`_apply_self_consistency` in `ai_audit.py`. |
 | `test_real_web_vitals.py` | Unit, no network | 4 tests — `analyzer/visuals.py`'s `_get_real_web_vitals()` rounding/graceful-degradation, fake `page.evaluate()`. |
 | `test_accuracy_guards.py` | Unit, no network | 15 tests — one per bug found in the 2026-07-31 audit that had shipped and stayed invisible: score inflation from failed signals, per-category score caps, phantom `0/100`, coverage disclosure in the prompt, Places `nextPageToken` field mask, and the `/api/send` daily cap (behavioural, via `TestClient`, asserting a real `429` rather than the generic `500` a bare `except Exception` produces). |
 | `test_reply_detection.py` | Unit, no network | 35 tests — `imaplib.IMAP4_SSL` replaced by a fake mailbox built from real header shapes. Most of them police one boundary: an out-of-office, an autoresponder, or a bounce notification must never be counted as somebody writing back. Also covers matching by threading header vs sender fallback, a real reply outranking an earlier auto-reply, idempotent re-scanning, read-only/`BODY.PEEK` access, and one unparseable message not aborting the whole scan. |
@@ -240,6 +259,7 @@ Most of the issues found in the 2026-07-10 audit were fixed the same day — see
 - **AI temperature set to `_AI_TEMPERATURE = 0.2` on all 4 providers** (fixed 2026-07-20) — previously OpenAI/OpenRouter used `0.7` and Anthropic/Gemini didn't set it at all (Anthropic defaults to `1.0`). This is a fact-citation task ("quote the exact number from the data you were given"), not creative writing, so a near-deterministic temperature should reduce invented numbers/claims. Not independently live-measured before/after — a plausible-but-unverified improvement, unlike the other live-verified fixes in this file; worth spot-checking real output over the next batch of leads.
 - **Two independent hallucination safety nets in `analyzer/ai_audit.py`, both log-only (never block/retry a send)**: `_check_number_hallucination` (existing, regex-based — flags numbers in the generated copy that don't appear anywhere in the source prompt) and `_verify_grounding` (added 2026-07-20 — fires one extra cheap LLM call, fixed preference order Gemini Flash → Haiku → GPT-4o-mini via `_call_judge`, asking a strict yes/no per flaw paragraph: is this claim grounded in the source data or invented). The judge call is independent of which provider generated the copy being checked (a model re-checking its own output is a weaker signal). Catches non-numeric fabrications the regex check can't (e.g. "you have no mobile site" when one exists) — but is itself an LLM call, so it can have its own false positives/negatives; treat its warning log as a prompt to review, not as ground truth.
 - **Real, in-browser Core Web Vitals** (`analyzer/visuals.py:_get_real_web_vitals`, added 2026-07-20) — a `PerformanceObserver`-based init script (same native browser APIs Google's own `web-vitals` JS library wraps, no dependency needed) captures actual LCP/CLS/TBT during the real page load, registered via `context.add_init_script` so it attaches before any page script runs. `scrapers/website.py` prefers these over `lighthouse_scores`' lab-simulated `lcp_ms`/`cls`/`tbt_ms` per-metric (not all-or-nothing) when both are available. TBT here is a simplified approximation (sum of `duration - 50` across all observed `longtask` entries for the whole observation window, not strictly bounded to the FCP→TTI window Lighthouse's own definition uses) — directionally correct, not a certified Lighthouse-equivalent number.
+- **Three independent sources feed the LCP/CLS/TBT numbers, ranked and preferred in this order: CrUX field data → real in-browser `PerformanceObserver` capture → Lighthouse/PageSpeed lab simulation** (`scrapers/website.py`'s per-metric `_pick()` priority chain). This ordering is deliberate, not arbitrary: Lighthouse's lab numbers are a *simulation* on throttled CPU/network and routinely read 5-10x worse than reality (see the 17.5s-vs-2s bug below); the in-browser capture is a real page load but only one, from a datacentre IP, on a fast connection, with an empty cache — not representative of an actual visitor; CrUX (`analyzer/crux.py`) is neither simulated nor a single sample — real Chrome users, aggregated at p75 over a rolling 28-day window, published by Google. **Most small-business leads won't have CrUX data at all** (Google only publishes it for origins/pages above a traffic threshold), so absence must fall through to the next source, never render as a zero — this is exactly the phantom-`0/100` bug class documented elsewhere in this section. **The two CrUX access paths return the same metric in different units and this has already caused a live bug**: the dedicated API (`fetch_crux_vitals`) returns CLS as a decimal *string* (`"0.01"`), while `extract_crux_from_pagespeed`'s `loadingExperience` block returns the same value as an *integer at 100x scale* (`1`). Treating one like the other either loses the value or lands it 100x off — 0.01 vs 1.0 is the difference between a healthy page and a critical layout-shift flaw. `_metrics_to_vitals`/`extract_crux_from_pagespeed` handle this with two separate parse paths rather than one shared one; see `test_grounding_and_crux.py`.
 - **`html-validate` and `pa11y` added as new free flaw signals** (added 2026-07-20, `analyzer/html_validate.py` / `analyzer/pa11y_check.py`, both new `package.json` deps) — same Node-subprocess pattern as `analyzer/lighthouse.py`: local `node_modules/.bin` first, `npx` fallback, degrades to `{}`/`[]` on any failure. **Hit a Windows-specific gap while adding these**: executing the `node_modules/.bin` shim directly on native Windows (not Git Bash) raises `OSError: [WinError 193] %1 is not a valid Win32 application` (it's a Unix shebang script), not `FileNotFoundError` — a narrow `except FileNotFoundError` (which is what `lighthouse.py` effectively relies on via its own `--version` pre-check pattern) would silently skip the whole signal on Windows dev machines instead of falling through to `npx`. Both new modules catch `OSError` broadly instead. `npx` itself *also* fails on native Windows subprocess calls (`FileNotFoundError: [WinError 2]` — Windows needs the literal `npx.cmd`, doesn't auto-resolve extensions like a shell does) — so on a Windows dev machine both signals currently degrade to empty every time, exactly matching the pre-existing Lighthouse Windows/Docker-parity gotcha already documented above. Confirmed both CLIs work correctly (real output captured and locked into `test_new_flaw_signals.py`'s mocked tests) via Git Bash directly against `node_modules/.bin/*`, so this is a Windows-subprocess limitation, not a code or Docker-target problem — the Docker deploy (Linux) doesn't have either failure mode. `pa11y` is deliberately run **sequentially after Playwright's own browser has already closed** (audit_website() always runs after generate_audit_screenshot() returns — see app.py) since Pa11y launches its own Puppeteer-controlled Chromium; running it concurrently with Playwright's browser would risk the same Railway 500MB OOM the Playwright semaphore already guards against.
 - **Lighthouse now runs twice and averages, same variance-smoothing pattern as `WebsiteScraper._pagespeed`** (added 2026-07-20) — but SEQUENTIALLY, not concurrently like the PageSpeed API calls, since each Lighthouse run launches its own headless Chrome via `chrome-launcher`; running two at once would risk the same OOM the Playwright semaphore exists to prevent. Trade-off: roughly doubles Lighthouse's contribution to total audit wall-clock time (up to ~240s worst case at the existing 120s-per-run timeout) in exchange for the same variance-smoothing PageSpeed already gets. Worth watching real audit latency after deploy; if it becomes a problem, dropping back to a single run is a one-line revert (see `analyzer/lighthouse.py:run_lighthouse`).
 - **AI model IDs need periodic re-verification against the provider's own model list, not just documentation/memory** — live-verified 2026-07-13: `claude-3-5-haiku-latest` had silently hit end-of-life 5 months earlier (every lead was falling through to Gemini without anyone noticing, since Anthropic's provider call swallowed the exception with no log line), and a separately-added `"gemini-3-flash"` model ID turned out to not exist on this API key at all (404, confirmed via `genai.list_models()`) — it was silently cascading to GPT-4o-mini the entire time. Both fixed, and all 4 providers now log their own errors (previously only Gemini and OpenRouter did) specifically so a bad model ID can't go unnoticed like this again. Before trusting a model name from docs/memory, verify with `genai.list_models()` (Gemini) or a live 1-token API call (Anthropic/OpenAI).
@@ -344,6 +364,7 @@ Railway builds from **`Dockerfile`** (`railway.json` pins `"builder": "DOCKERFIL
 - **`frontend/dist/` is no longer committed to git** (untracked 2026-07-10 — it used to be, which meant a locally-built bundle with a baked-in `VITE_API_KEY` could end up in git history). The Docker build produces it fresh from `frontend/` source every deploy; `app.py` mounts it if present, same as before.
 - **Set `VITE_API_KEY` as a Railway *Build Variable*** (not just a regular deploy-time env var — it needs to be visible during the Docker build, since that's when `npm run build` bakes it into the JS). The `Dockerfile`'s `frontend-builder` stage declares `ARG VITE_API_KEY` to receive it. Without this, the deployed frontend won't send `X-API-Key` and every request will 401 once `API_KEY` is set server-side.
 - Railway mounts a persistent volume at `/app/data` to ensure `database.sqlite` and `screenshots/` survive deployments.
+- **The Gmail transport and reply detection need no Dockerfile changes.** `smtplib`/`imaplib` are Python stdlib — unlike Lighthouse/html-validate/pa11y, there's no Node binary or system dependency to install for `EMAIL_PROVIDER=gmail` or `/api/check-replies` to work; setting the relevant env vars in Railway (see §4) is sufficient on its own.
 
 ---
 
