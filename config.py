@@ -95,6 +95,16 @@ APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 IG_USERNAME = os.getenv("IG_USERNAME")
 IG_PASSWORD = os.getenv("IG_PASSWORD")
 
+# Reputation warm-up sending (warmup_send.py) — off by default so a deploy
+# never starts sending warm-up mail on its own. When enabled and scheduler.py
+# is running as its own Railway service (app.py's web service does NOT run
+# scheduler.py — see CLAUDE.md §12), this fires once daily instead of relying
+# on a local machine's Task Scheduler, which only runs while that machine is
+# on. Fixed cron hour rather than a full expression, matching the simple
+# daily-job pattern the rest of scheduler.py already uses.
+WARMUP_ENABLED = os.getenv("WARMUP_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+WARMUP_HOUR = int(os.getenv("WARMUP_HOUR", "13"))  # 24h, Asia/Kolkata — matches the prior local 1:00 PM schedule
+
 # === Limits & Settings ===
 # Default dropped from 100 to 15 (2026-07-20) then raised to 50 (2026-07-20,
 # same day) on explicit user request, ahead of any Postmaster Tools data

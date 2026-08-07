@@ -51,13 +51,31 @@ _BLOG_PATHS = ["/blog", "/news", "/articles"]
 # the email (can a customer actually book/call/see prices?) independent of
 # any technical score, which is what an audit that only surfaces Lighthouse/
 # axe-core numbers misses entirely.
+# Restaurant/hospitality platforms plus general-purpose scheduling tools,
+# plus (added 2026-08-07) salon/spa/fitness platforms and the two booking
+# platforms that actually dominate Indian clinics/dentists — this project's
+# leads are overwhelmingly Indian SMBs (see §8 in CLAUDE.md), and the
+# original list skewed US-restaurant-heavy, which under-detects a real
+# booking widget on exactly the kind of lead most likely to have one
+# (a dentist using Practo, a salon using Fresha/Vagaro).
 _BOOKING_PLATFORM_SIGNATURES = [
     "opentable", "resy.com", "sevenrooms", "exploretock", "tock.com",
     "reserve.google.com", "calendly.com", "acuityscheduling.com",
     "squareup.com/appointments", "setmore.com", "booksy.com", "cal.com",
     "bookatable", "yelp.com/reservations",
+    # Salon / spa / fitness
+    "fresha.com", "vagaro.com", "mindbodyonline.com", "zenoti.com",
+    "schedulicity.com", "simplybook.me", "simplybook.it", "gettimely.com",
+    "appointy.com", "10to8.com", "booker.com",
+    # Medical / dental — Practo and Lybrate specifically dominate Indian
+    # clinic booking; live-verified: neither was in the prior list despite
+    # this tool auditing Indian dental/medical leads as a core niche.
+    "practo.com", "lybrate.com", "doctolib", "housecallpro.com",
 ]
-_MENU_PRICING_KEYWORDS = ["menu", "pricing", "price list", "our prices"]
+_MENU_PRICING_KEYWORDS = [
+    "menu", "pricing", "price list", "our prices", "packages",
+    "rate card", "tariff",
+]
 _BUSINESS_SCHEMA_TYPES = {
     "localbusiness", "restaurant", "foodestablishment", "store",
     "professionalservice", "organization", "product", "menu",

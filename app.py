@@ -384,7 +384,8 @@ async def audit_lead(
             target_email=email,
             subject=subject,
             body=body,
-            image_url=image_url or ""
+            image_url=image_url or "",
+            review_warnings=analysis.get("review_warnings") or [],
         )
 
         result = {
@@ -402,6 +403,10 @@ async def audit_lead(
             # flaw category was never measured, instead of an absent flaw
             # being indistinguishable from a clean result.
             "signal_status": getattr(web_data, "signal_status", {}) or {},
+            # Accuracy safety-net findings (hallucination/grounding/spam-word
+            # checks in analyzer/ai_audit.py) — previously only a server log
+            # line, now surfaced so a flagged draft is visible before send.
+            "review_warnings": analysis.get("review_warnings") or [],
         }
         if req.website:
             _audit_cache_set(req.website, result)

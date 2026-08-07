@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import os
 from datetime import datetime
@@ -123,6 +124,17 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_replies_thread ON email_replies (in_reply_to)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_email_replies_target ON email_replies (target_email)")
         cursor.execute("PRAGMA user_version = 4")
+
+    # review_warnings on email_drafts — the AI-audit accuracy checks
+    # (_check_number_hallucination, _verify_grounding, etc. in
+    # analyzer/ai_audit.py) used to only print() their findings, which
+    # meant real signal ("this cites a number that isn't in the source
+    # data") only ever reached a Railway log line nobody was watching while
+    # actually reviewing a draft. Stored as a JSON-encoded list of warning
+    # strings (possibly empty); parsed back to a list in get_drafts().
+    if schema_version < 5:
+        cursor.execute("ALTER TABLE email_drafts ADD COLUMN review_warnings TEXT")
+        cursor.execute("PRAGMA user_version = 5")
 
     conn.commit()
     conn.close()
@@ -358,13 +370,13 @@ def get_email_history():
 
     return rows
 
-def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = ""):
+def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url) VALUES (?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, subject, body, image_url)
+        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None)
     )
     conn.commit()
     conn.close()
@@ -377,7 +389,14 @@ def get_drafts():
     cursor.execute("SELECT * FROM email_drafts ORDER BY timestamp DESC")
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    drafts = [dict(row) for row in rows]
+    for draft in drafts:
+        raw = draft.get("review_warnings")
+        try:
+            draft["review_warnings"] = json.loads(raw) if raw else []
+        except (TypeError, json.JSONDecodeError):
+            draft["review_warnings"] = []
+    return drafts
 
 def delete_draft(draft_id: int):
     init_db()

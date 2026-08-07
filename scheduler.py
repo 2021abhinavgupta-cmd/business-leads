@@ -12,6 +12,7 @@ from scrapers.shopify_dork import ShopifyDorkScraper
 from scrapers.startup_dork import StartupDorkScraper
 from scrapers.apollo_free import ApolloFreeScraper
 from storage.sheets import SheetsStorage
+from warmup_send import run_warmup
 import config
 
 
@@ -90,7 +91,22 @@ def start_scheduler():
         CronTrigger(day_of_week="sun", hour=20, minute=0),
         name="ingest_leads_sunday"
     )
-    
+
+    # 3) Reputation warm-up send, once daily — opt-in via WARMUP_ENABLED so
+    # deploying this scheduler doesn't silently start sending warm-up mail.
+    # This replaces a local Task Scheduler entry that only fired while that
+    # machine happened to be on (see CLAUDE.md §13, 2026-08-06 entry) — this
+    # process running at all already requires being deployed as its own
+    # always-on Railway service (see config.py's WARMUP_ENABLED comment and
+    # CLAUDE.md §12), which is the actual fix for that reliability gap.
+    if config.WARMUP_ENABLED:
+        scheduler.add_job(
+            run_warmup,
+            CronTrigger(hour=config.WARMUP_HOUR, minute=0),
+            name="warmup_send_daily",
+        )
+        print(f"Warm-up sending enabled: daily at {config.WARMUP_HOUR:02d}:00 IST.")
+
     print("Scheduler running (Asia/Kolkata timezone). Press Ctrl+C to exit.")
     scheduler.start()
 

@@ -586,6 +586,21 @@ function App() {
                 <p><strong>To:</strong> {draft.target_email || 'Missing email'}</p>
               </div>
 
+              {draft.review_warnings && draft.review_warnings.length > 0 && (
+                <div style={{
+                  marginTop: '12px', padding: '10px 12px', borderRadius: '8px',
+                  background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.4)',
+                  color: '#fca5a5', fontSize: '13px',
+                }}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, marginBottom: '6px'}}>
+                    <AlertTriangle size={14} /> Review before sending ({draft.review_warnings.length})
+                  </div>
+                  <ul style={{margin: 0, paddingLeft: '18px'}}>
+                    {draft.review_warnings.map((w, wi) => <li key={wi}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+
               {draft.sending ? (
                 <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>
               ) : (

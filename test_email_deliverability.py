@@ -70,3 +70,26 @@ def test_send_followup_skips_suppressed_recipient(monkeypatch, tmp_path):
     ses = SESSender()
     result = ses.send_followup("lead@example.com", "Subject", "Body")
     assert result is False
+
+
+def test_draft_review_warnings_roundtrip(monkeypatch, tmp_path):
+    """
+    review_warnings (added 2026-08-07) is the first list-typed column on
+    email_drafts, JSON-encoded on write and decoded back on read — the AI
+    accuracy checks in analyzer/ai_audit.py used to only print() their
+    findings, invisible to anyone reviewing a draft in the dashboard.
+    """
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_draft(
+        "Acme", "acme.com", "lead@acme.com", "Subject", "Body",
+        review_warnings=["Cites number(s) [999] not found in source data."],
+    )
+    drafts = db.get_drafts()
+    assert drafts[0]["review_warnings"] == ["Cites number(s) [999] not found in source data."]
+
+
+def test_draft_without_review_warnings_returns_empty_list(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_draft("Acme", "acme.com", "lead@acme.com", "Subject", "Body")
+    drafts = db.get_drafts()
+    assert drafts[0]["review_warnings"] == []

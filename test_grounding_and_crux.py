@@ -147,15 +147,19 @@ _PROMPT = (
 def test_fabricated_source_quote_is_flagged(capsys):
     parsed = {"flaws": [{"paragraph": "Your checkout is broken.",
                          "source_quote": "[CRITICAL] Checkout form does not submit"}]}
-    AIAuditor._verify_source_quotes(parsed, _PROMPT, "Acme")
+    warning = AIAuditor._verify_source_quotes(parsed, _PROMPT, "Acme")
     assert "does NOT appear in the audit data" in capsys.readouterr().out
+    # Return value (not just the print) feeds analyze_lead's review_warnings
+    # list for the Drafts UI — see test_review_warnings_are_collected below.
+    assert warning is not None and "does NOT appear" in warning
 
 
 def test_real_source_quote_passes_silently(capsys):
     parsed = {"flaws": [{"paragraph": "Your main image is slow.",
                          "source_quote": "[CRITICAL] Largest Contentful Paint takes 4.2s to render"}]}
-    AIAuditor._verify_source_quotes(parsed, _PROMPT, "Acme")
+    warning = AIAuditor._verify_source_quotes(parsed, _PROMPT, "Acme")
     assert capsys.readouterr().out == ""
+    assert warning is None
 
 
 def test_whitespace_and_case_differences_are_tolerated(capsys):
@@ -243,3 +247,56 @@ def test_shared_schema_requires_a_source_quote():
     flaw_schema = _RESPONSE_JSON_SCHEMA["properties"]["flaws"]["items"]
     assert "source_quote" in flaw_schema["properties"]
     assert "source_quote" in flaw_schema["required"]
+
+
+# ---------------------------------------------------------------------------
+# review_warnings — surfacing the review checks beyond a server log line
+#
+# _check_number_hallucination / _check_spam_trigger_words / _check_body_length
+# / _verify_source_quotes / _verify_grounding used to only print() their
+# findings — real signal nobody was watching, since nothing reads Railway
+# logs while reviewing a draft in the dashboard. Added 2026-08-07: each now
+# also returns its warning text, which analyze_lead collects into
+# parsed["review_warnings"] for the Drafts UI to show as a visible flag.
+# ---------------------------------------------------------------------------
+
+def test_number_hallucination_returns_warning_text(capsys):
+    parsed = {"flaws": [{"paragraph": "Your site scored 999/100 on speed."}]}
+    warning = AIAuditor._check_number_hallucination(parsed, "no numbers here", "Acme")
+    capsys.readouterr()
+    assert warning is not None and "999" in warning
+
+
+def test_number_hallucination_returns_none_when_clean(capsys):
+    parsed = {"flaws": [{"paragraph": "Your site scored 42/100 on speed."}]}
+    warning = AIAuditor._check_number_hallucination(parsed, "the score was 42/100", "Acme")
+    capsys.readouterr()
+    assert warning is None
+
+
+def test_spam_trigger_words_returns_warning_text(capsys):
+    parsed = {"email_subject": "FREE audit inside", "opening_line": "", "flaws": []}
+    warning = AIAuditor._check_spam_trigger_words(parsed, "Acme")
+    capsys.readouterr()
+    assert warning is not None and "trigger word" in warning
+
+
+def test_spam_trigger_words_returns_none_when_clean(capsys):
+    parsed = {"email_subject": "A quick note about your site", "opening_line": "", "flaws": []}
+    warning = AIAuditor._check_spam_trigger_words(parsed, "Acme")
+    capsys.readouterr()
+    assert warning is None
+
+
+def test_body_length_returns_none_without_an_image(capsys):
+    parsed = {"opening_line": "hi", "flaws": [{"paragraph": "short"}]}
+    warning = AIAuditor._check_body_length(parsed, "Acme", has_image=False)
+    capsys.readouterr()
+    assert warning is None
+
+
+def test_body_length_returns_warning_when_short_with_image(capsys):
+    parsed = {"opening_line": "hi", "flaws": [{"paragraph": "short body"}]}
+    warning = AIAuditor._check_body_length(parsed, "Acme", has_image=True)
+    capsys.readouterr()
+    assert warning is not None and "words" in warning

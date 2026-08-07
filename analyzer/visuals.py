@@ -217,7 +217,7 @@ def _find_duplicate_page_labels(pages_checked: list[dict], key: str) -> list[str
     return [label for label, value in pairs if counts[value] > 1]
 
 
-_AUDIT_SCREENSHOT_RETRIES = 2
+_AUDIT_SCREENSHOT_RETRIES = 3
 
 
 async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
@@ -231,7 +231,9 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
     isolated attempt seconds after the pipeline reported it as down. Large
     sites behind Akamai/Cloudflare bot management are especially prone to
     intermittently challenging a single headless-browser request without
-    the site actually being down. Retries once with a short delay before
+    the site actually being down. Retries twice (3 attempts total, bumped
+    from 2 on 2026-08-07 after a real lead — see scrapers/website.py's httpx
+    fallback — hit exactly two failures in a row) with a short delay before
     giving up and reporting unreachable, same "transient blip, not a dead
     site" assumption as SES's Throttling retry.
     """
@@ -241,7 +243,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
         if last_result[1] is not None:  # html_content present = success
             return last_result
         if attempt < _AUDIT_SCREENSHOT_RETRIES - 1:
-            print(f"[Visuals] Audit attempt {attempt + 1} failed for {url} — retrying once (likely transient network/bot-detection blip, not a dead site)...")
+            print(f"[Visuals] Audit attempt {attempt + 1} failed for {url} — retrying (likely transient network/bot-detection blip, not a dead site)...")
             await asyncio.sleep(5)
     return last_result
 

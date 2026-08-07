@@ -161,11 +161,21 @@ class AIAuditor:
                         if second_parsed is not None:
                             self._apply_self_consistency(parsed, second_parsed, company)
 
-                self._check_number_hallucination(parsed, prompt, company)
-                self._verify_source_quotes(parsed, prompt, company)
-                self._verify_grounding(parsed, prompt, company)
-                self._check_spam_trigger_words(parsed, company)
-                self._check_body_length(parsed, company, has_image=bool(image_path))
+                # Each check below used to only print()  its warning — real,
+                # useful signal that nobody was actually watching, since
+                # nothing reads server/Railway logs while reviewing a draft.
+                # They now also return the same text, collected here into
+                # review_warnings so the Drafts UI can show a visible flag
+                # instead of the warning existing only in a log line no one
+                # will read before the email goes out.
+                review_warnings = [w for w in (
+                    self._check_number_hallucination(parsed, prompt, company),
+                    self._verify_source_quotes(parsed, prompt, company),
+                    self._verify_grounding(parsed, prompt, company),
+                    self._check_spam_trigger_words(parsed, company),
+                    self._check_body_length(parsed, company, has_image=bool(image_path)),
+                ) if w]
+                parsed["review_warnings"] = review_warnings
                 # overall_score drives should_contact()/the skip-if-too-good
                 # decision, but as returned by the AI it's pure self-report
                 # with no real connection to the flaw data it was given.
@@ -204,22 +214,24 @@ class AIAuditor:
     _BOILERPLATE_NUMBERS = {"10", "1", "2", "3"}
 
     @staticmethod
-    def _check_number_hallucination(parsed: dict, prompt: str, company: str) -> None:
+    def _check_number_hallucination(parsed: dict, prompt: str, company: str) -> str | None:
         """
-        Free, log-only sanity check: the prompt instructs the AI to quote
-        exact numbers from the real data it was given, but nothing actually
-        verifies it did that instead of inventing a plausible-sounding one.
-        Compares against the FULL rendered *prompt* text (not just
-        web.flaws) so scores/timing numbers mentioned elsewhere in the
-        prompt — e.g. WEBSITE DATA's page_speed_score — aren't false
-        positives; a number only counts as suspicious if it appears nowhere
-        in anything the AI was actually shown.
+        Sanity check: the prompt instructs the AI to quote exact numbers
+        from the real data it was given, but nothing actually verifies it
+        did that instead of inventing a plausible-sounding one. Compares
+        against the FULL rendered *prompt* text (not just web.flaws) so
+        scores/timing numbers mentioned elsewhere in the prompt — e.g.
+        WEBSITE DATA's page_speed_score — aren't false positives; a number
+        only counts as suspicious if it appears nowhere in anything the AI
+        was actually shown.
 
         Doesn't block or retry sending — too many legitimate false
         positives are still possible (a number split across sentences, a
-        rounded figure) — but logs a warning so a hallucinated stat is
-        visible before a real business owner receives a specific,
-        checkable number that's wrong.
+        rounded figure) — but returns a warning string (also logged) so a
+        hallucinated stat is visible before a real business owner receives
+        a specific, checkable number that's wrong. Collected by
+        analyze_lead into parsed["review_warnings"] for the Drafts UI,
+        since a print() nobody watches isn't actually a safety net.
         """
         source_numbers = set(re.findall(r"\d+(?:\.\d+)?", prompt))
 
@@ -228,7 +240,10 @@ class AIAuditor:
 
         suspicious = (email_numbers - source_numbers) - AIAuditor._BOILERPLATE_NUMBERS
         if suspicious:
-            print(f"[AIAuditor] WARNING: email for '{company}' cites number(s) {sorted(suspicious)} not found anywhere in the source prompt — possible hallucination, review before sending.")
+            message = f"Cites number(s) {sorted(suspicious)} not found anywhere in the source data — possible hallucination, review before sending."
+            print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
+            return message
+        return None
 
     # Classic spam-filter trigger words/phrases (case insensitive substring
     # match) — the prompt already instructs the AI to avoid these, this is
@@ -244,13 +259,15 @@ class AIAuditor:
     ]
 
     @staticmethod
-    def _check_spam_trigger_words(parsed: dict, company: str) -> None:
+    def _check_spam_trigger_words(parsed: dict, company: str) -> str | None:
         """
-        Log-only scan of the generated subject + flaw paragraphs + opening
-        line for classic spam-filter trigger words/phrases and ALL CAPS
-        shouting, both of which independently hurt inbox placement
-        regardless of sender reputation. Doesn't block/retry sending, same
-        rationale as the other two checks above this one.
+        Scan of the generated subject + flaw paragraphs + opening line for
+        classic spam-filter trigger words/phrases and ALL CAPS shouting,
+        both of which independently hurt inbox placement regardless of
+        sender reputation. Doesn't block/retry sending, same rationale as
+        the other checks in this file. Returns a warning string (also
+        logged) collected into parsed["review_warnings"] — see
+        _check_number_hallucination's docstring for why.
         """
         subject = parsed.get("email_subject", "") or ""
         opening = parsed.get("opening_line", "") or ""
@@ -271,7 +288,10 @@ class AIAuditor:
                 parts.append(f"trigger word(s) {hits}")
             if all_caps_words:
                 parts.append(f"ALL CAPS word(s) {all_caps_words}")
-            print(f"[AIAuditor] WARNING: email for '{company}' contains {' and '.join(parts)} — spam-filter risk, review before sending.")
+            message = f"Contains {' and '.join(parts)} — spam-filter risk, review before sending."
+            print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
+            return message
+        return None
 
     # Below this, an embedded screenshot dominates the message and the
     # text:image ratio itself reads as spammy to some filters regardless of
@@ -279,19 +299,24 @@ class AIAuditor:
     _MIN_BODY_WORD_COUNT = 40
 
     @staticmethod
-    def _check_body_length(parsed: dict, company: str, has_image: bool) -> None:
+    def _check_body_length(parsed: dict, company: str, has_image: bool) -> str | None:
         """
-        Log-only: flags a body that's too short relative to the embedded
-        screenshot it ships with. Only meaningful when an image is actually
-        attached — a short text-only email isn't the same spam signal.
+        Flags a body that's too short relative to the embedded screenshot
+        it ships with. Only meaningful when an image is actually attached —
+        a short text-only email isn't the same spam signal. Returns a
+        warning string (also logged), same collection pattern as the other
+        checks in this file.
         """
         if not has_image:
-            return
+            return None
         paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
         opening = parsed.get("opening_line", "") or ""
         word_count = len(f"{opening} {paragraphs}".split())
         if word_count < AIAuditor._MIN_BODY_WORD_COUNT:
-            print(f"[AIAuditor] WARNING: email for '{company}' is only {word_count} words with an embedded screenshot attached — low text:image ratio can itself look spammy, review before sending.")
+            message = f"Only {word_count} words with an embedded screenshot attached — low text:image ratio can itself look spammy, review before sending."
+            print(f"[AIAuditor] WARNING: email for '{company}' is {message[0].lower()}{message[1:]}")
+            return message
+        return None
 
     @staticmethod
     def _apply_self_consistency(parsed: dict, second: dict, company: str) -> None:
@@ -340,7 +365,7 @@ class AIAuditor:
         return " ".join(text.split()).strip().lower()
 
     @staticmethod
-    def _verify_source_quotes(parsed: dict, prompt: str, company: str) -> None:
+    def _verify_source_quotes(parsed: dict, prompt: str, company: str) -> str | None:
         """
         Check each flaw's `source_quote` actually appears in the prompt.
 
@@ -352,13 +377,15 @@ class AIAuditor:
         _verify_grounding is itself an LLM and can be wrong in both
         directions.
 
-        Log-only, consistent with the other two: a paraphrase that drifts
-        slightly from the source line is a false positive, and blocking a
-        send on that would be worse than flagging it for review.
+        Doesn't block sending, consistent with the other checks: a
+        paraphrase that drifts slightly from the source line is a false
+        positive, and blocking a send on that would be worse than flagging
+        it for review. Returns a warning string (also logged), collected
+        into parsed["review_warnings"].
         """
         flaws = parsed.get("flaws", [])
         if not flaws:
-            return
+            return None
 
         haystack = AIAuditor._normalise_for_match(prompt)
         unverified = []
@@ -371,9 +398,12 @@ class AIAuditor:
                 unverified.append(f"#{i} \"{quote[:80]}\"")
 
         if unverified:
+            message = f"{len(unverified)} claim(s) cite a source quote that does NOT appear in the audit data — likely fabricated, review before sending: {unverified}"
             print(f"[AIAuditor] WARNING: {len(unverified)} claim(s) for '{company}' cite a source quote that does NOT appear in the audit data — likely fabricated, review before sending: {unverified}")
+            return message
+        return None
 
-    def _verify_grounding(self, parsed: dict, prompt: str, company: str) -> None:
+    def _verify_grounding(self, parsed: dict, prompt: str, company: str) -> str | None:
         """
         Free-form-claim counterpart to _check_number_hallucination above:
         that regex check only catches invented *numbers*, but a claim like
@@ -384,15 +414,17 @@ class AIAuditor:
         LLM-as-judge pass, independent of which provider generated the
         copy (fixed preference order below, not necessarily the same one).
 
-        Log-only, exactly like the hallucination check: too many legitimate
-        borderline judgment calls (a fair inference vs. a fabrication) to
-        safely auto-block or auto-retry on, but a flagged claim should be
-        visible before a real business owner receives a specific, checkable
-        claim about their own site that's wrong.
+        Doesn't block/retry sending, exactly like the hallucination check:
+        too many legitimate borderline judgment calls (a fair inference vs.
+        a fabrication) to safely auto-block on, but a flagged claim should
+        be visible before a real business owner receives a specific,
+        checkable claim about their own site that's wrong. Returns a
+        warning string (also logged), collected into
+        parsed["review_warnings"].
         """
         flaws = parsed.get("flaws", [])
         if not flaws:
-            return
+            return None
 
         claims = "\n".join(f"{i+1}. {f.get('paragraph', '')}" for i, f in enumerate(flaws))
         judge_prompt = (
@@ -411,14 +443,17 @@ class AIAuditor:
         try:
             raw = self._call_judge(judge_prompt)
             if not raw:
-                return
+                return None
             result = self._parse_json_loose(raw)
             unsupported = result.get("unsupported") if result else None
             if unsupported:
                 flagged = [claims.splitlines()[i - 1] for i in unsupported if 0 < i <= len(flaws)]
-                print(f"[AIAuditor] WARNING: grounding check flagged {len(flagged)} claim(s) for '{company}' as possibly unsupported by source data — review before sending: {flagged}")
+                message = f"Grounding check flagged {len(flagged)} claim(s) as possibly unsupported by source data — review before sending: {flagged}"
+                print(f"[AIAuditor] WARNING: {message[0].lower()}{message[1:]} (for '{company}')")
+                return message
         except Exception as e:
             print(f"[AIAuditor] Grounding verification skipped (non-critical): {e}")
+        return None
 
     def _call_judge(self, judge_prompt: str) -> str | None:
         """
