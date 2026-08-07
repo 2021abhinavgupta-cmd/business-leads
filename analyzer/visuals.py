@@ -624,7 +624,22 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
         severity_order = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
         violations.sort(key=lambda x: severity_order.get(x["impact"], 4))
         
-        # Interconnect: Find a visible node to draw a real red box around
+        # Interconnect: Find a visible node to draw a real red box around.
+        # bounding_box() reports position in full-DOCUMENT coordinates, not
+        # clipped to the viewport — an element below the fold (a footer
+        # iframe, a booking widget halfway down the page) still returns a
+        # "valid" non-null box, but the screenshot this gets drawn onto is
+        # page.screenshot(full_page=False) — viewport-only. Live-verified
+        # 2026-08-07 against a real lead (lp.zooty.in/anjaneya-dental-care):
+        # a `frame-title` violation on an off-screen iframe produced a box
+        # at y=4858 on an 800px-tall image (invisible), and on a different
+        # run the same site's `region` violation resolved to a full hero
+        # wrapper `<div>` — in-bounds at the top, but tall enough to fill
+        # nearly the whole visible screenshot, which is indistinguishable
+        # from "no specific flaw was highlighted" even though a box WAS
+        # drawn. Viewport dimensions are read from the page itself (not
+        # hardcoded) since mobile passes use a different viewport.
+        viewport = page.viewport_size or {"width": 1280, "height": 800}
         visual_flaw = None
         for v in violations:
             for node in v.get("nodes", []):
@@ -635,18 +650,28 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
                 try:
                     if isinstance(selector, list):
                         selector = selector[0]
-                    
+
                     # Skip root level elements as they don't make for good visual highlights
                     if selector.lower() in ["html", "body", "head"]:
                         continue
-                        
+
                     # Get exact coordinates of the flawed element
                     box = await page.locator(selector).first.bounding_box(timeout=1000)
                     if box and box["width"] > 0 and box["height"] > 0:
-                        # Skip if the element covers > 90% of the screen (e.g. wrapper divs, html, body)
-                        if box["width"] > 1150 and box["height"] > 720:
+                        # Reject anything not fully inside the captured viewport —
+                        # a partially/fully off-screen box either draws invisibly
+                        # or, worse, still shows up but highlights nothing specific.
+                        if (
+                            box["x"] < 0 or box["y"] < 0
+                            or box["x"] + box["width"] > viewport["width"]
+                            or box["y"] + box["height"] > viewport["height"]
+                        ):
                             continue
-                            
+                        # Skip if the element covers most of the visible screenshot
+                        # (e.g. a hero wrapper div) — not a "specific" flaw to highlight.
+                        if box["width"] > viewport["width"] * 0.9 and box["height"] > viewport["height"] * 0.9:
+                            continue
+
                         visual_flaw = {
                             "box": [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
                             "description": v["help"],
