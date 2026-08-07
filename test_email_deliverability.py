@@ -33,6 +33,10 @@ def test_log_email_stores_message_id(monkeypatch, tmp_path):
 def test_unsubscribe_headers_mailto_only(monkeypatch):
     monkeypatch.setattr(config, "APP_BASE_URL", "")
     monkeypatch.setattr(config, "FROM_EMAIL", "outreach@mmga.agency")
+    # The mailto follows REPLY_TO_EMAIL, not the sending address — replies to
+    # an unsubscribe request have to reach whoever actually reads that inbox.
+    # Here they're the same address; test_gmail_sender.py covers them differing.
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "outreach@mmga.agency")
     ses = SESSender()
     headers = ses._unsubscribe_headers("lead@example.com")
     assert "mailto:outreach@mmga.agency?subject=Unsubscribe" in headers["List-Unsubscribe"]

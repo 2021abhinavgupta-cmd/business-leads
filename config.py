@@ -23,6 +23,18 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 # === Email ===
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
+# Where replies should land, if that isn't the sending mailbox. Defaults to
+# FROM_EMAIL, so leaving this unset changes nothing.
+#
+# The two are worth separating: cold email lands better when it comes from a
+# named human than from a role address (marketing@, info@, sales@ are
+# filtered harder), but the person whose name is on it isn't necessarily the
+# person who should be reading the answers — or the one whose mailbox reply
+# detection can log into. A Reply-To at the same domain is completely
+# ordinary; pointing it at a different domain is not, and would look like a
+# phishing pattern.
+REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL") or FROM_EMAIL
+
 # Which transport actually delivers the mail: "ses" (default) or "gmail".
 # Gmail here means an authenticated Google Workspace mailbox over SMTP —
 # Gmail treats mail from its own infrastructure differently from third-party

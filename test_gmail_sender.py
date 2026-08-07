@@ -156,6 +156,52 @@ def test_followup_carries_real_threading_headers(gmail):
 
 
 # ---------------------------------------------------------------------------
+# From vs Reply-To
+# ---------------------------------------------------------------------------
+
+def test_reply_to_defaults_to_the_sending_address(monkeypatch):
+    """An environment that never heard of REPLY_TO_EMAIL must be unaffected."""
+    monkeypatch.setattr(config, "FROM_EMAIL", "kshitij@mmga.agency")
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "kshitij@mmga.agency")
+
+    msg = SESSender()._build_initial_message("lead@x.com", "S", "B", "<mid@x.com>")
+    assert msg["From"] == msg["Reply-To"] == "kshitij@mmga.agency"
+
+
+def test_replies_can_be_routed_to_a_different_mailbox(monkeypatch):
+    """
+    Cold email lands better from a named human than a role address, but the
+    person whose name is on it isn't necessarily whose inbox should receive
+    the answers — or whose mailbox reply detection can log into.
+    """
+    monkeypatch.setattr(config, "FROM_EMAIL", "kshitij@mmga.agency")
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "marketing@mmga.agency")
+
+    msg = SESSender()._build_initial_message("lead@x.com", "S", "B", "<mid@x.com>")
+    assert msg["From"] == "kshitij@mmga.agency"
+    assert msg["Reply-To"] == "marketing@mmga.agency"
+
+
+def test_followups_route_replies_the_same_way(monkeypatch):
+    monkeypatch.setattr(config, "FROM_EMAIL", "kshitij@mmga.agency")
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "marketing@mmga.agency")
+
+    msg = SESSender()._build_followup_message("lead@x.com", "Re: S", "B")
+    assert msg["From"] == "kshitij@mmga.agency"
+    assert msg["Reply-To"] == "marketing@mmga.agency"
+
+
+def test_unsubscribe_mailto_points_at_the_reply_mailbox(monkeypatch):
+    """An unsubscribe request nobody reads is the same as having no mechanism."""
+    monkeypatch.setattr(config, "FROM_EMAIL", "kshitij@mmga.agency")
+    monkeypatch.setattr(config, "REPLY_TO_EMAIL", "marketing@mmga.agency")
+    monkeypatch.setattr(config, "APP_BASE_URL", "")
+
+    headers = SESSender()._unsubscribe_headers("lead@x.com")
+    assert "mailto:marketing@mmga.agency" in headers["List-Unsubscribe"]
+
+
+# ---------------------------------------------------------------------------
 # Gmail transport behaviour
 # ---------------------------------------------------------------------------
 

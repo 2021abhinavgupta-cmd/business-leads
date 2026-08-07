@@ -45,6 +45,9 @@ class BaseSender:
 
     def __init__(self, from_email: str | None = None):
         self.from_email = from_email or config.FROM_EMAIL
+        # Falls back to the sending address, so an environment that has never
+        # heard of REPLY_TO_EMAIL behaves exactly as before.
+        self.reply_to = config.REPLY_TO_EMAIL or self.from_email
 
     # --- transport hook -------------------------------------------------
 
@@ -84,7 +87,10 @@ class BaseSender:
         only if APP_BASE_URL is configured, since that URL must be a live,
         unauthenticated endpoint (see app.py's /unsubscribe route).
         """
-        targets = [f"<mailto:{self.from_email}?subject=Unsubscribe>"]
+        # The mailto goes to the reply address, not the sending one — an
+        # unsubscribe request nobody reads is the same as no unsubscribe
+        # mechanism, and honouring opt-outs is a compliance obligation.
+        targets = [f"<mailto:{self.reply_to}?subject=Unsubscribe>"]
         headers = {}
         if config.APP_BASE_URL:
             url = f"{config.APP_BASE_URL}/unsubscribe?email={quote(to_email, safe='')}"
@@ -180,7 +186,7 @@ class BaseSender:
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = self.from_email
-        msg["Reply-To"] = self.from_email
+        msg["Reply-To"] = self.reply_to
         msg["To"] = to_email
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = message_id
@@ -252,7 +258,7 @@ class BaseSender:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = self.from_email
-        msg["Reply-To"] = self.from_email
+        msg["Reply-To"] = self.reply_to
         msg["To"] = to_email
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = message_id
