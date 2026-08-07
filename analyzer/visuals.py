@@ -663,8 +663,14 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
                     if selector.lower() in ["html", "body", "head"]:
                         continue
 
-                    # Get exact coordinates of the flawed element
-                    box = await page.locator(selector).first.bounding_box(timeout=1000)
+                    # Get exact coordinates of the flawed element. 3s, not
+                    # Playwright's default — this was the one 1s timeout left
+                    # over from before the rest of this function's waits were
+                    # generously bumped (see the homepage settle delay above);
+                    # a late-appearing/animating element now has more than a
+                    # blink to become measurable before this candidate is
+                    # given up on and the loop moves to the next node.
+                    box = await page.locator(selector).first.bounding_box(timeout=3000)
                     if box and box["width"] > 0 and box["height"] > 0:
                         # Reject anything not fully inside the captured viewport —
                         # a partially/fully off-screen box either draws invisibly
