@@ -133,7 +133,7 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
     email) knows which page a flaw came from.
     """
     violations, visual_flaw = await _run_axe_audit(page)
-    broken_links = await _check_broken_assets(page, context)
+    broken_links, links_checked = await _check_broken_assets(page, context)
     font_families = await _check_font_consistency(page)
     stretched_images = await _check_stretched_images(page)
 
@@ -167,6 +167,7 @@ async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes
         "violations": violations,
         "visual_flaw": visual_flaw,
         "broken_links": broken_links,
+        "links_checked": links_checked,
         "font_families": font_families,
         "stretched_images": stretched_images,
         "title": title,
@@ -538,6 +539,10 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
         extra_audit_data = {
             "accessibility_violations": all_violations[:15],
             "broken_links": all_broken_links[:15],
+            # Total assets actually probed across every page audited. Zero
+            # means the scan never ran, which must not read as "no broken
+            # links" — see _check_broken_assets.
+            "checked_links": sum(p.get("links_checked", 0) for p in pages_checked),
             "perf_timing": perf_timing,
             "response_headers": response_headers,
             "visual_flaw_context": visual_flaw_context,
@@ -774,9 +779,18 @@ async def _check_stretched_images(page) -> int:
         return 0
 
 
-async def _check_broken_assets(page, context) -> list:
-    """Check for broken links and images on the page."""
+async def _check_broken_assets(page, context) -> tuple[list, int]:
+    """
+    Check for broken links and images on the page.
+
+    Returns (broken, checked_count). The count matters: this whole function
+    degrades to an empty list on any failure, and an empty list is also what
+    a perfectly clean page produces — so without a count of what was actually
+    probed, a crashed scan is indistinguishable from "no broken links", and
+    the audit would report a clean bill of health it never earned.
+    """
     broken = []
+    checked = 0
     try:
         # Extract all links and images
         assets = await page.evaluate("""() => {
@@ -820,9 +834,10 @@ async def _check_broken_assets(page, context) -> list:
                     "status": status
                 })
         
-        print(f"[Links] Checked {len(assets)} assets, found {len(broken)} broken.")
-        
+        checked = len(assets)
+        print(f"[Links] Checked {checked} assets, found {len(broken)} broken.")
+
     except Exception as e:
         print(f"[Links] Broken asset check failed (non-critical): {e}")
-    
-    return broken[:10]  # Cap at 10
+
+    return broken[:10], checked  # Cap at 10

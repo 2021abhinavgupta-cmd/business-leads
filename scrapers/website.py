@@ -353,12 +353,21 @@ class WebsiteScraper:
         readability_score = self._check_readability(parsed["homepage_text"])
         security_flaws = self._check_security_headers(extra.get("response_headers", {}), has_ssl)
         seo_page = await self._run_pyseoanalyzer(url)
-        robots_blocked = await self._check_robots_disallow_all(url)
+        robots_blocked, robots_checked = await self._check_robots_disallow_all(url)
         missing_alt_count = self._check_missing_alt_images(html)
 
         signal_status["tech_detection"] = "ok" if technologies else "no_data"
         signal_status["brand_context_crawl"] = "ok" if company_context else "no_data"
         signal_status["pyseoanalyzer"] = "ok" if seo_page else "no_data"
+        # Tracked because their failure mode is invisible otherwise: each one
+        # degrades to a value indistinguishable from a clean result (no
+        # headers -> no header flaws, a failed link scan -> no broken links,
+        # an unreachable robots.txt -> "not blocked"), so without this the
+        # AI would be free to imply those areas are fine when they were
+        # simply never measured.
+        signal_status["security_headers"] = "ok" if extra.get("response_headers") else "no_data"
+        signal_status["broken_links"] = "ok" if extra.get("checked_links") else "no_data"
+        signal_status["robots_txt"] = "ok" if robots_checked else "no_data"
 
         # Step 3.7 — HTML validity + a second, independent accessibility
         # engine. Both run sequentially here (i.e. after Playwright's own
@@ -986,7 +995,7 @@ class WebsiteScraper:
 
         return bool(types_found & _BUSINESS_SCHEMA_TYPES)
 
-    async def _check_robots_disallow_all(self, url: str) -> bool:
+    async def _check_robots_disallow_all(self, url: str) -> tuple[bool, bool]:
         """
         Fetch /robots.txt and check for a blanket "Disallow: /" under a
         User-agent block that applies to us (User-agent: *). This is a much
@@ -994,16 +1003,25 @@ class WebsiteScraper:
         content="noindex"> check above — it silently removes the entire site
         from Google, and unlike the meta tag most site owners never notice
         because the page itself renders completely normally in a browser.
+
+        Returns (blocked, checked). `checked` is False when the fetch itself
+        failed, which is NOT the same as "not blocked" — both used to collapse
+        into a bare False, so a timeout looked exactly like a clean result and
+        nothing recorded that the check never ran. A 404 DOES count as
+        checked: no robots.txt is a real, definite answer (nothing is
+        disallowed), unlike a network failure.
         """
         try:
             parsed = urlparse(self._normalise_url(url))
             robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
             response = await self.client.get(robots_url, timeout=5)
+            if response.status_code == 404:
+                return False, True
             if response.status_code != 200:
-                return False
+                return False, False
             lines = response.text.splitlines()
         except Exception:
-            return False
+            return False, False
 
         applies_to_us = False
         for line in lines:
@@ -1016,8 +1034,8 @@ class WebsiteScraper:
             if key == "user-agent":
                 applies_to_us = value == "*"
             elif key == "disallow" and applies_to_us and value == "/":
-                return True
-        return False
+                return True, True
+        return False, True
 
     @staticmethod
     def _check_missing_alt_images(html: str) -> int:
@@ -1049,8 +1067,34 @@ class WebsiteScraper:
 
     @staticmethod
     def _check_security_headers(headers: dict, has_ssl: bool) -> list[Flaw]:
-        """Missing HTTP security headers, from the response Playwright already fetched (no extra request)."""
-        headers = {k.lower(): v for k, v in (headers or {}).items()}
+        """
+        Missing HTTP security headers, from the response Playwright already
+        fetched (no extra request).
+
+        Returns [] when no headers were captured at all, which is NOT the
+        same as "the site sent none". Every check below infers a problem from
+        a key being ABSENT, so an empty dict used to fire all five at once —
+        measured: 5 fabricated flaws (2 high, 2 medium, 1 low) versus 1 for a
+        genuinely well-configured site. That is enough score deflation to
+        push a healthy lead under CONTACT_THRESHOLD and then email them five
+        security criticisms that were never measured.
+
+        This is the INVERSE of the silent-degradation bug this codebase keeps
+        fixing: usually a failed signal makes a site look healthy, here it
+        made a fine site look broken. `analyzer/visuals.py` sets
+        response_headers to {} when `page.goto()` returns None, which
+        Playwright genuinely does in several ordinary cases.
+
+        An empty dict is a safe discriminator because a real HTTP response
+        always carries SOME headers (Date, Content-Type, Server) — a site
+        that sets no *security* headers still returns a populated dict, so
+        emptiness means "not captured", never "none sent".
+        """
+        if not headers:
+            print("[Audit] No response headers captured — skipping security-header checks rather than reporting every header as missing.")
+            return []
+
+        headers = {k.lower(): v for k, v in headers.items()}
         flaws: list[Flaw] = []
 
         if has_ssl and "strict-transport-security" not in headers:
