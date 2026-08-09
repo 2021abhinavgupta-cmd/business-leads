@@ -238,7 +238,7 @@ Full suite currently: 214 passed, 1 skipped (locally, with all 3 paid AI keys se
 
 GitHub Actions runs this on every push/PR (`.github/workflows/tests.yml`) — no API-key secrets are configured there, so the two `integration` tests (in `test_audit.py`/`test_lh.py`) show as **skipped** (not failed) in CI; every other test here, including `test_red_box_viewport.py`'s real-browser tests, needs no API key and runs for real on every push since CI already installs Chromium (`playwright install --with-deps chromium`). Add repo secrets + an `env:` block to the workflow if you want the two integration tests to run live too (this will incur real AI-provider API costs on every push).
 
-5 more manual smoke-test scripts remain at repo root (no pytest, just `print()`, run via `python <file>.py`) — `test_crawl.py`, `test_ddg.py`, `test_google.py`, `test_maps.py`, `test_playwright_maps.py`. These weren't converted; mirror `test_audit.py`'s pattern (mark `integration`, `skipif` on required keys) if converting them later.
+6 more manual smoke-test scripts remain at repo root (no pytest, just `print()`, run via `python <file>.py`) — `test_crawl.py`, `test_ddg.py`, `test_google.py`, `test_maps.py`, `test_playwright_maps.py`, `test_ps.py`. These weren't converted; mirror `test_audit.py`'s pattern (mark `integration`, `skipif` on required keys) if converting them later.
 
 When adding new logic, add a real `assert`-based pytest test alongside it — the manual-script convention is deprecated now that a pytest suite exists.
 
