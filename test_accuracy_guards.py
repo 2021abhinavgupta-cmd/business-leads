@@ -242,6 +242,35 @@ def test_send_below_the_cap_is_not_blocked(monkeypatch):
     assert res.status_code == 200, res.text
 
 
+def test_audit_skips_entirely_when_playwright_cannot_access_the_site(monkeypatch):
+    """
+    On explicit request (2026-08-07): if Playwright can't render the page
+    after every retry, /api/audit must not draft anything at all — not even
+    with the softened "reachable but not auditable" wording from earlier the
+    same day. That wording still let the AI infer real (false) problems on
+    two separate live leads. The only fix that actually holds is not
+    generating an audit from no real data in the first place.
+    """
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    async def _fake_generate_audit_screenshot(*a, **k):
+        return (None, None, None)
+
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    monkeypatch.setattr(app_module.ses, "check_quota", lambda: {"Max24HourSend": 100, "SentLast24Hours": 0})
+    monkeypatch.setattr(app_module, "generate_audit_screenshot", _fake_generate_audit_screenshot)
+    monkeypatch.setattr(app_module.db, "log_cost", lambda *a, **k: None)
+
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+    res = client.post("/api/audit", json={"company": "Acme", "website": "https://example.com"})
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert "error" in body
+    assert "flaws" not in body  # never reached the point of drafting anything
+
+
 def test_count_emails_sent_today_reads_the_send_log():
     import inspect
     from storage import db
@@ -292,9 +321,32 @@ async def test_playwright_failure_does_not_claim_site_is_down_when_httpx_succeed
     assert "reachable" in description  # states plainly that it IS reachable
 
 
+async def test_playwright_failure_does_not_imply_an_seo_crawling_problem():
+    """
+    Live-verified 2026-08-07, same day as the fix above: the softened
+    wording still got inflated by the AI into "this barrier makes it harder
+    for search engines to crawl and index your content" — an unsupported
+    claim, since a headless-browser block proves nothing about whether
+    Googlebot (frequently allowlisted separately) is also blocked.
+    """
+    scraper = WebsiteScraper()
+    scraper.client = _FakeClientReachable()
+    data = await scraper.audit_website("https://example.com", html=None, extra_audit_data=None)
+
+    flaw = data.flaws[0]
+    description = flaw.description.lower()
+    assert "search engine" not in description or "do not" in description or "no evidence" in description
+    assert "crawl" not in description or "not claim" in description or "no evidence" in description
+    # An audit-tooling gap, not a confirmed site defect — must not carry
+    # critical-flaw weight (see compute_score, which this feeds directly).
+    assert flaw.severity == "low"
+
+
 async def test_playwright_failure_keeps_unreachable_wording_when_httpx_also_fails():
     scraper = WebsiteScraper()
     scraper.client = _FakeClientGenuinelyDown()
     data = await scraper.audit_website("https://example.com", html=None, extra_audit_data=None)
 
-    assert "unreachable" in data.flaws[0].description.lower()
+    flaw = data.flaws[0]
+    assert "unreachable" in flaw.description.lower()
+    assert flaw.severity == "critical"  # a genuine, verified outage is a real critical flaw

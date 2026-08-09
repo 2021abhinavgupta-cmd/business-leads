@@ -205,18 +205,37 @@ class WebsiteScraper:
             # not claim the site is down, since that's the one factual claim
             # a lead can trivially disprove by opening their own website.
             reachability_note = "Website is unreachable or returned an error"
+            severity = "critical"  # a genuine outage is a real, verified critical flaw
             try:
                 probe = await self.client.get(url, timeout=10, follow_redirects=True)
                 if probe.status_code < 400:
+                    # Live-verified 2026-08-07, same day as the fix above: the
+                    # AI took this softened wording and still inflated it into
+                    # "this barrier makes it harder for search engines to crawl
+                    # and index your content" — an unsupported leap. All we
+                    # actually know is that OUR ONE headless-browser fingerprint
+                    # got blocked/timed out; real bot-protection systems
+                    # routinely allowlist known search-crawler IPs/user-agents
+                    # separately from generic headless browsers, so this proves
+                    # nothing about Googlebot. Worded now to rule that
+                    # inference out explicitly rather than just omit it, and
+                    # downgraded from "critical" — this is a gap in what WE
+                    # could measure this run, not a confirmed defect in the
+                    # site, so it shouldn't carry critical-flaw weight or be
+                    # the sole basis for an urgent-sounding email.
                     reachability_note = (
-                        "Automated visual/technical audit could not render this page "
-                        "(likely bot-protection or a heavy JS loading screen blocking "
-                        "the headless browser), but a direct HTTP request to the same "
-                        "URL succeeded — the site is reachable, just not fully auditable "
-                        "on this run."
+                        "Our automated audit tool could not fully load this page on this "
+                        "attempt, but a direct HTTP request to the same URL succeeded — the "
+                        "site itself is up and reachable to visitors. This only means our own "
+                        "scan was blocked or timed out this one time (a bot-protection layer or "
+                        "a heavy loading screen), not that the site has a real problem. Do NOT "
+                        "claim or imply this affects search engine crawling, SEO, or Google "
+                        "indexing — we have no evidence of that; search crawlers are frequently "
+                        "allowlisted separately from generic automated tools like this one."
                     )
+                    severity = "low"
             except Exception:
-                pass  # genuinely unreachable even to a plain HTTP request — keep the original wording
+                pass  # genuinely unreachable even to a plain HTTP request — keep the original wording/severity
 
             return WebsiteData(
                 url=url,
@@ -233,7 +252,7 @@ class WebsiteScraper:
                 meta_title="",
                 meta_description="",
                 technologies=[],
-                flaws=[Flaw(category="tech", severity="critical", description=reachability_note)],
+                flaws=[Flaw(category="tech", severity=severity, description=reachability_note)],
             )
 
         # We are using Playwright now, so use real timing data if available.

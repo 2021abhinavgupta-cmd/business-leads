@@ -41,7 +41,7 @@ emails_sent = 0
 async def process_single_lead(lead: dict) -> str:
     """
     Process a single lead.
-    Returns: "emailed" | "skipped" | "failed_no_email" | "failed_no_website" | "failed_ai_error" | "failed_error"
+    Returns: "emailed" | "skipped" | "failed_no_email" | "failed_no_website" | "failed_unreachable" | "failed_ai_error" | "failed_error"
     """
     company = lead.get("Company", "")
     email = lead.get("Email", "")
@@ -65,6 +65,18 @@ async def process_single_lead(lead: dict) -> str:
     print(f"  Generating visual evidence & scraping for {website}...")
     image_path, html_content, extra_audit_data = await generate_audit_screenshot(website, company)
     mobile_image_path = (extra_audit_data or {}).get("mobile_image_path")
+
+    # If Playwright couldn't render the page after every retry, don't draft
+    # anything at all — on explicit request, after this exact failure mode
+    # produced multiple real "your website isn't loading" / "this hurts your
+    # SEO" emails to sites that were actually fine (see CLAUDE.md §8/§13,
+    # 2026-08-07). A headless-browser failure only proves our own scan was
+    # blocked or timed out, never that a real audit worth emailing about
+    # happened — no amount of careful wording changes that. Skip the lead
+    # entirely rather than guess at a softened claim.
+    if website and not html_content:
+        print(f"  Could not access {website} after retries — skipping audit for {company} rather than drafting from no real data.")
+        return "failed_unreachable"
 
     # Step 4: Find decision maker if name or email missing (using Playwright HTML)
     if (not contact or not email) and website:

@@ -315,6 +315,18 @@ async def audit_lead(
         if req.website:
             image_path, html_content, extra_audit_data = await generate_audit_screenshot(req.website, req.company)
 
+            # Playwright couldn't render the page after every retry — on
+            # explicit request, don't draft anything from this. This exact
+            # failure mode (a bot-detection challenge or a slow loading
+            # screen defeating our headless browser, not the site actually
+            # being down) produced multiple real "your website isn't
+            # loading"/"this hurts your SEO" emails to sites that were
+            # completely fine — see CLAUDE.md §8/§13, 2026-08-07. No amount
+            # of careful wording fixes that; the only honest move is not to
+            # generate an audit from no real data at all.
+            if not html_content:
+                return {"error": "Could not access this website after multiple attempts (likely bot-protection or a slow-loading page, not necessarily the site being down) — skipped rather than drafting a guess. Try again in a few minutes, or verify the site manually."}
+
         # 2. Website Audit (using fully rendered HTML + Playwright audit data)
         _progress_set(req.website, 1)
         web_data = await web_scraper.audit_website(req.website, html=html_content, extra_audit_data=extra_audit_data)
