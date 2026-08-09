@@ -29,6 +29,8 @@ warnings.filterwarnings("ignore", message=".*looks like a URL.*")
 
 import config
 from analyzer.flaws import Flaw, rank as rank_flaws
+from analyzer import nap_check
+from analyzer.ssl_expiry import days_until_cert_expiry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -198,7 +200,14 @@ class WebsiteScraper:
     # Public API
     # ------------------------------------------------------------------
 
-    async def audit_website(self, url: str, html: str | None = None, extra_audit_data: dict | None = None) -> WebsiteData:
+    async def audit_website(
+        self,
+        url: str,
+        html: str | None = None,
+        extra_audit_data: dict | None = None,
+        gbp_phone: str = "",
+        gbp_address: str = "",
+    ) -> WebsiteData:
         """
         Run a full 4-step audit on *url*.
 
@@ -206,6 +215,11 @@ class WebsiteScraper:
             url: The website URL to audit (e.g. ``"https://example.com"``).
             html: Pre-rendered HTML content (from Playwright).
             extra_audit_data: Dict with accessibility_violations, broken_links, perf_timing from Playwright.
+            gbp_phone: Phone number from the lead's Google Business Profile, if
+                the lead came from Maps. Used only for the NAP consistency
+                check; empty means that check is skipped entirely.
+            gbp_address: Address from the same Google Business Profile, same
+                optional treatment.
 
         Returns:
             A ``WebsiteData`` instance. If the site is unreachable or no html is provided, most
@@ -444,6 +458,29 @@ class WebsiteScraper:
         if degraded:
             print(f"[Audit] Signal coverage for {url}: {len(signal_status) - len(degraded)}/{len(signal_status)} OK. NO DATA from: {', '.join(sorted(degraded))} — flaws in those categories could not be detected at all on this run.")
 
+        # NAP consistency (site vs Google Business Profile) and TLS
+        # certificate expiry. Both are free: the GBP side was already
+        # scraped with the lead, the site side is already-parsed HTML, and
+        # the cert check is one stdlib TLS handshake with no dependency.
+        # Both degrade to None, so a lead with no Maps data behind it or a
+        # plain-HTTP site simply doesn't get these flaws.
+        nap_phone_mismatch = nap_check.phone_mismatch(gbp_phone, parsed.get("site_phones") or [])
+        nap_address_mismatch = nap_check.address_mismatch(gbp_address, parsed.get("page_text") or "")
+        cert_expiry_days = await days_until_cert_expiry(final_url)
+
+        # Only recorded when the signal was actually APPLICABLE, rather than
+        # always with a "no_data" value. `partial_coverage` (every signal
+        # whose status isn't "ok") bypasses should_contact()'s skip-if-healthy
+        # rule, so marking these as degraded on leads they simply don't apply
+        # to — any lead with no Google Business Profile behind it, any
+        # plain-HTTP site — would quietly force a contact decision on every
+        # such lead regardless of score. "Not applicable" is not "we tried and
+        # failed", and only the latter belongs in partial_coverage.
+        if gbp_phone or gbp_address:
+            signal_status["nap_consistency"] = "ok"
+        if has_ssl:
+            signal_status["ssl_expiry"] = "ok" if cert_expiry_days is not None else "no_data"
+
         # Step 4 — Reconcile every signal above into one ranked flaw list,
         # instead of feeding the AI prompt raw, unreconciled tool output.
         flaws = self._build_flaws(
@@ -476,6 +513,9 @@ class WebsiteScraper:
             duplicate_meta_pages=extra.get("duplicate_meta_pages", []),
             html_validate_result=html_validate_result,
             pa11y_issues=pa11y_issues,
+            cert_expiry_days=cert_expiry_days,
+            nap_phone_mismatch=nap_phone_mismatch,
+            nap_address_mismatch=nap_address_mismatch,
         )
 
         return WebsiteData(
@@ -726,10 +766,13 @@ class WebsiteScraper:
         # Testimonials detection
         has_testimonials = any(kw in page_text for kw in _TESTIMONIAL_KEYWORDS)
 
-        # Contact detection — phone or email on page
-        has_contact = bool(
-            _PHONE_PATTERN.search(page_text) or _EMAIL_PATTERN.search(page_text)
-        )
+        # Contact detection — phone or email on page.
+        # finditer (not findall): _PHONE_PATTERN has an optional capture group
+        # for the country code, so findall would return just that group's text
+        # instead of the whole number. The full matches are what the NAP
+        # consistency check compares against the Google listing.
+        site_phones = [m.group(0) for m in _PHONE_PATTERN.finditer(page_text)]
+        has_contact = bool(site_phones or _EMAIL_PATTERN.search(page_text))
 
         # Blog detection — any anchor href containing blog-like paths
         has_blog = False
@@ -819,6 +862,11 @@ class WebsiteScraper:
             "meta_description": meta_description,
             "h1_tags": h1_tags,
             "homepage_text": homepage_text,
+            # Raw page text and every phone number found on it — used by the
+            # NAP consistency check, which needs the whole visible text (not
+            # the 3000-char truncated markdown) to look for the address.
+            "page_text": page_text,
+            "site_phones": site_phones,
             "has_cta": has_cta,
             "has_contact": has_contact,
             "has_testimonials": has_testimonials,
@@ -1095,6 +1143,9 @@ class WebsiteScraper:
         has_business_schema: bool = False,
         html_validate_result: dict | None = None,
         pa11y_issues: list[dict] | None = None,
+        cert_expiry_days: int | None = None,
+        nap_phone_mismatch: str | None = None,
+        nap_address_mismatch: str | None = None,
     ) -> list[Flaw]:
         """
         Reconcile every audit signal (Lighthouse/PageSpeed, HTML parsing,
@@ -1212,6 +1263,28 @@ class WebsiteScraper:
 
         if not parsed.get("has_menu_or_pricing"):
             flaws.append(Flaw("conversion", "medium", "No menu or pricing information findable on the site — visitors have to contact you just to find out what you charge, which is friction most people won't bother with."))
+
+        # --- NAP consistency: does the site agree with the Google listing? ---
+        # Only ever fires on a real contradiction, never on absence — see
+        # analyzer/nap_check.py for why a missing phone/address on the page
+        # is not evidence of anything.
+        if nap_phone_mismatch:
+            flaws.append(Flaw("conversion", "high", f"The phone number on the website doesn't match the one on the Google Business listing ({nap_phone_mismatch}) — customers who find the business on Google and then check the site get two different numbers, and calls to the wrong one are simply lost. Inconsistent contact details across Google and the website also weaken local search ranking."))
+
+        if nap_address_mismatch:
+            flaws.append(Flaw("seo", "medium", f"The address shown on the Google Business listing ({nap_address_mismatch}) doesn't clearly appear on the website — matching name, address and phone across Google and the site is one of the stronger local search ranking signals, and a mismatch also makes customers unsure they've found the right business."))
+
+        # --- SSL certificate expiry ---
+        # has_ssl only says HTTPS worked *today*. An expiring cert is
+        # invisible until the morning every visitor hits a full-page browser
+        # warning — see analyzer/ssl_expiry.py.
+        if cert_expiry_days is not None:
+            if cert_expiry_days < 0:
+                flaws.append(Flaw("security", "critical", f"The SSL certificate expired {abs(cert_expiry_days)} days ago — visitors are being shown a full-page browser security warning before they can reach the site at all, which almost everyone backs out of. This is losing effectively all traffic right now."))
+            elif cert_expiry_days <= 14:
+                flaws.append(Flaw("security", "high", f"The SSL certificate expires in {cert_expiry_days} days — when it does, every visitor gets a full-page 'your connection is not private' warning instead of the site, and most will leave immediately. Renewing it now avoids that entirely."))
+            elif cert_expiry_days <= 30:
+                flaws.append(Flaw("security", "medium", f"The SSL certificate expires in {cert_expiry_days} days — worth renewing before it lapses, since an expired certificate shows every visitor a browser security warning in place of the site."))
 
         word_count = seo_page.get("word_count")
         if word_count is not None and word_count < _THIN_CONTENT_WORDS:

@@ -181,6 +181,13 @@ class AuditRequest(BaseModel):
     company: str
     website: str
     instagram_handle: str = ""
+    # Google Business Profile fields the search already returns and the
+    # frontend already holds per lead. All optional so a direct/manual audit
+    # (no Maps lead behind it) still works exactly as before.
+    rating: str = ""
+    reviews_count: int = 0
+    gbp_phone: str = ""
+    gbp_address: str = ""
 
 class SendRequest(BaseModel):
     email: str
@@ -335,7 +342,13 @@ async def audit_lead(
 
         # 2. Website Audit (using fully rendered HTML + Playwright audit data)
         _progress_set(req.website, 1)
-        web_data = await web_scraper.audit_website(req.website, html=html_content, extra_audit_data=extra_audit_data)
+        web_data = await web_scraper.audit_website(
+            req.website,
+            html=html_content,
+            extra_audit_data=extra_audit_data,
+            gbp_phone=req.gbp_phone,
+            gbp_address=req.gbp_address,
+        )
 
         # 3. Instagram Data — use handle from request, or auto-detect from website
         _progress_set(req.website, 2)
@@ -353,8 +366,23 @@ async def audit_lead(
             ig_data = await asyncio.to_thread(ig_scraper.get_instagram_data, ig_handle)
 
         # 4. AI Audit (with visual critique)
+        #
+        # mobile_image_path and rating/reviews_count were missing here until
+        # 2026-08-09 while main.py's batch runner passed all three — so on
+        # this path (the dashboard, i.e. the one actually used) the separate
+        # mobile screenshot was captured, paid for in wall-clock time, used
+        # for mobile axe-core/overflow flaws, and then never shown to the
+        # model, leaving the whole has_mobile_image prompt block dead. Same
+        # for the Google Business rating personalization hook.
         _progress_set(req.website, 3)
-        analysis = await asyncio.to_thread(auditor.analyze_lead, req.company, ig_data, web_data, image_path=image_path)
+        analysis = await asyncio.to_thread(
+            auditor.analyze_lead,
+            req.company, ig_data, web_data,
+            image_path=image_path,
+            mobile_image_path=(extra_audit_data or {}).get("mobile_image_path"),
+            rating=req.rating,
+            reviews_count=req.reviews_count,
+        )
 
         image_url = None
         if image_path:

@@ -89,7 +89,15 @@ async def process_single_lead(lead: dict) -> str:
         return "failed_no_email"
 
     # Step 5: Audit website (with Playwright HTML)
-    web_data = await web_scraper.audit_website(website, html=html_content, extra_audit_data=extra_audit_data)
+    web_data = await web_scraper.audit_website(
+        website,
+        html=html_content,
+        extra_audit_data=extra_audit_data,
+        # Already scraped with the lead — drives the NAP consistency check
+        # (site details vs the Google listing) at no extra API cost.
+        gbp_phone=str(lead.get("Phone", "") or ""),
+        gbp_address=str(lead.get("Address", "") or ""),
+    )
     print(f"  Web: speed={web_data.page_speed_score}, seo={web_data.seo_score}")
 
     # Step 6: AI Analysis

@@ -844,9 +844,18 @@ class AIAuditor:
         # personalization hook, not a flaw: a strong rating with a weak
         # website is a compelling contrast ("great reviews but the site
         # doesn't reflect it"), so keep it distinct from FLAWS DETECTED.
+        # Only render this when `rating` is a real number: the Playwright
+        # Maps fallback stores the literal string "N/A" when it can't read a
+        # rating, which would otherwise reach the prompt as
+        # "GOOGLE BUSINESS RATING: N/A/5 stars from 0 reviews" — the same
+        # unmeasured-value-presented-as-data shape as the phantom 0/100 bug.
         rating_section = ""
-        if rating:
-            rating_section = f"GOOGLE BUSINESS RATING: {rating}/5 stars from {reviews_count} reviews.\n"
+        try:
+            rating_value = float(rating)
+        except (TypeError, ValueError):
+            rating_value = None
+        if rating_value is not None:
+            rating_section = f"GOOGLE BUSINESS RATING: {rating_value}/5 stars from {reviews_count} reviews.\n"
 
         return (
             f"You are a sharp, conversational digital marketing consultant auditing "
@@ -895,7 +904,7 @@ class AIAuditor:
                 else ""
             )
             + ("A SECOND image is also attached showing the site on an actual MOBILE PHONE screen. Compare it against the desktop screenshot and look specifically for mobile only problems: text or buttons cut off or overlapping, horizontal scrolling, tiny unreadable font, a hamburger menu that looks broken, a hero image that doesn't adapt. If you spot a mobile specific issue, make ONE of your flaws about it and say explicitly that it is how the site looks on a phone (e.g. 'on your phone, the navigation menu overlaps your logo').\n" if has_mobile_image else "")
-            + ("If GOOGLE BUSINESS RATING is 4 stars or higher, use it as a personalization hook, e.g. contrast their strong reputation with a website flaw ('you've clearly got happy customers, X reviews at Y stars, but the website doesn't reflect that trust'). Do not mention the rating if it is below 4 stars or reviews_count is under 10, it is not a strong enough signal to reference.\n" if rating else "")
+            + ("If GOOGLE BUSINESS RATING is 4 stars or higher, use it as a personalization hook, e.g. contrast their strong reputation with a website flaw ('you've clearly got happy customers, X reviews at Y stars, but the website doesn't reflect that trust'). Do not mention the rating if it is below 4 stars or reviews_count is under 10, it is not a strong enough signal to reference.\n" if rating_value is not None else "")
             + "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"
             "Use this exact structure:\n"

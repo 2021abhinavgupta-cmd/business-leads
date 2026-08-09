@@ -208,7 +208,15 @@ function App() {
       const res = await axios.post(`${API_BASE}/api/audit`, {
         company: lead.Company,
         website: lead.Website,
-        instagram_handle: lead['Instagram Handle']
+        instagram_handle: lead['Instagram Handle'],
+        // Google Business Profile fields the search already returned for this
+        // lead. They drive the rating personalization hook and the NAP
+        // consistency check (site details vs the Google listing) — both are
+        // skipped server-side when empty, so a manually-added lead still works.
+        rating: lead.Rating || '',
+        reviews_count: Number(lead['Reviews Count']) || 0,
+        gbp_phone: lead.Phone || '',
+        gbp_address: lead.Address || ''
       });
 
       setLeads(prev => {
