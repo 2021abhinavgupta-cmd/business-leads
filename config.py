@@ -124,6 +124,14 @@ LEAD_SOURCE = os.getenv("LEAD_SOURCE", "maps").lower() # options: maps, ecommerc
 # AI_SELF_CONSISTENCY=false to disable.
 AI_SELF_CONSISTENCY = os.getenv("AI_SELF_CONSISTENCY", "true").strip().lower() not in ("false", "0", "no")
 
+# A draft's audit data is frozen at the moment it was generated, but drafts
+# sit in the inbox until a human sends them — a site can be redesigned, fixed,
+# or taken down in between, and the email would still cite the old findings as
+# current fact. Past this many days /api/send refuses to send without an
+# explicit acknowledgement, so stale claims need a deliberate decision rather
+# than going out unnoticed. Set to 0 to disable the staleness gate entirely.
+DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
+
 # === API Auth ===
 # Required header (X-API-Key) for all /api/* routes. If unset, the API is
 # wide open — set this before deploying anywhere reachable from the internet.

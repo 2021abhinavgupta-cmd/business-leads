@@ -9,6 +9,8 @@ can't come back unnoticed.
 Unit tests only — no network, no browser, no API keys.
 """
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from analyzer.flaws import Flaw, compute_score
@@ -350,3 +352,116 @@ async def test_playwright_failure_keeps_unreachable_wording_when_httpx_also_fail
     flaw = data.flaws[0]
     assert "unreachable" in flaw.description.lower()
     assert flaw.severity == "critical"  # a genuine, verified outage is a real critical flaw
+
+
+# ---------------------------------------------------------------------------
+# The send gate (added 2026-08-09). The five accuracy checks in
+# analyzer/ai_audit.py have flagged suspect copy since 2026-08-07 and the
+# Drafts UI has shown it — but nothing stopped a flagged draft going out, so
+# the whole safety net rested on a human happening to read a red banner.
+# A draft's audit data is also frozen at generation time while the draft sits
+# in the inbox indefinitely, so old findings can be quoted as current fact.
+# ---------------------------------------------------------------------------
+
+def _send_client(monkeypatch, draft):
+    """A TestClient whose /api/send sees exactly `draft` (or None)."""
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    monkeypatch.setattr(app_module.db, "count_emails_sent_today", lambda: 0)
+    monkeypatch.setattr(app_module.db, "get_draft_by_website", lambda website: draft)
+    # If the gate lets the request through, stop before really sending.
+    monkeypatch.setattr(app_module.ses, "send_email", lambda *a, **k: "<msg-id@example.com>")
+    monkeypatch.setattr(app_module.db, "log_cost", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.db, "log_email", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.db, "delete_draft_by_website", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.sheets, "find_row_by_website", lambda *a, **k: None)
+
+    return TestClient(app_module.app, raise_server_exceptions=False)
+
+
+_SEND_PAYLOAD = {
+    "email": "owner@example.com",
+    "subject": "Quick note",
+    "body": "Hi there",
+    "company": "Acme",
+    "website": "https://example.com",
+}
+
+
+def test_flagged_draft_is_not_sent_without_acknowledgement(monkeypatch):
+    draft = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "review_warnings": ["Cites number(s) ['847'] not found anywhere in the source data"],
+    }
+    client = _send_client(monkeypatch, draft)
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert any("847" in w for w in detail["warnings"])
+
+
+def test_flagged_draft_sends_once_acknowledged(monkeypatch):
+    draft = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "review_warnings": ["Grounding check flagged 1 claim(s) as possibly unsupported"],
+    }
+    client = _send_client(monkeypatch, draft)
+
+    res = client.post("/api/send", json={**_SEND_PAYLOAD, "acknowledge_warnings": True})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "success"
+
+
+def test_clean_draft_sends_with_no_extra_step(monkeypatch):
+    draft = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "review_warnings": []}
+    client = _send_client(monkeypatch, draft)
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+
+
+def test_stale_draft_is_not_sent_without_acknowledgement(monkeypatch):
+    """A draft old enough that its audit data may no longer describe the site."""
+    import app as app_module
+
+    old = datetime.now() - timedelta(days=app_module.config.DRAFT_STALE_DAYS + 3)
+    draft = {"timestamp": old.strftime("%Y-%m-%d %H:%M:%S"), "review_warnings": []}
+    client = _send_client(monkeypatch, draft)
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 409, res.text
+    assert any("days ago" in w for w in res.json()["detail"]["warnings"])
+
+
+def test_an_unparseable_draft_timestamp_does_not_block_a_clean_send(monkeypatch):
+    """A bad timestamp is a data problem, not a reason to refuse a clean draft."""
+    draft = {"timestamp": "not-a-timestamp", "review_warnings": []}
+    client = _send_client(monkeypatch, draft)
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+
+
+def test_send_with_no_matching_draft_row_is_unaffected(monkeypatch):
+    """/api/send is also called directly from the audit view, with no draft saved."""
+    client = _send_client(monkeypatch, None)
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+
+
+def test_acknowledgement_defaults_to_false_so_the_gate_fails_closed():
+    """A caller unaware of the gate must not bypass it by omitting the field."""
+    from app import SendRequest
+
+    req = SendRequest(email="a@b.com", subject="s", body="b", company="c", website="w")
+    assert req.acknowledge_warnings is False

@@ -247,6 +247,39 @@ function App() {
     setIsAutopilot(false);
   };
 
+  // A draft's audit data is frozen when it's generated, but the draft can sit
+  // in this inbox for weeks — so the age is shown on the card, matching the
+  // staleness gate /api/send enforces server-side (DRAFT_STALE_DAYS).
+  const draftAgeDays = (draft) => {
+    if (!draft.timestamp) return null;
+    const drafted = new Date(draft.timestamp.replace(' ', 'T'));
+    if (isNaN(drafted)) return null;
+    return Math.floor((Date.now() - drafted.getTime()) / 86400000);
+  };
+
+  // /api/send returns 409 when the draft carries unacknowledged review
+  // warnings or is old enough that its audit data may be stale. That's a
+  // deliberate stop, not an error: show the human exactly what was flagged
+  // and only retry if they explicitly choose to send anyway.
+  const sendWithAcknowledgement = async (payload) => {
+    try {
+      return await axios.post(`${API_BASE}/api/send`, payload);
+    } catch (err) {
+      if (err.response?.status !== 409) throw err;
+
+      const detail = err.response.data?.detail || {};
+      const warnings = detail.warnings || [];
+      const proceed = window.confirm(
+        `${detail.message || 'This draft was flagged during review.'}\n\n` +
+        warnings.map((w, i) => `${i + 1}. ${w}`).join('\n\n') +
+        `\n\nSend it anyway?`
+      );
+      if (!proceed) return null;
+
+      return await axios.post(`${API_BASE}/api/send`, { ...payload, acknowledge_warnings: true });
+    }
+  };
+
   const handleSend = async (index) => {
     const lead = leads[index];
     if (!lead.auditData?.email) {
@@ -259,16 +292,17 @@ function App() {
     setLeads(updatedLeads);
     
     try {
-      await axios.post(`${API_BASE}/api/send`, {
+      const result = await sendWithAcknowledgement({
         email: lead.auditData.email,
         subject: lead.auditData.subject,
         body: lead.auditData.body,
         company: lead.Company,
         website: lead.Website
       });
-      
+
+      // null means the human saw the warnings and chose not to send.
       const finalLeads = [...leads];
-      finalLeads[index].auditState = 'sent';
+      finalLeads[index].auditState = result ? 'sent' : 'done';
       setLeads(finalLeads);
     } catch (err) {
       console.error('Send failed:', err);
@@ -291,14 +325,20 @@ function App() {
     setDrafts(newDrafts);
 
     try {
-      await axios.post(`${API_BASE}/api/send`, {
+      const result = await sendWithAcknowledgement({
         email: draft.target_email,
         subject: draft.subject,
         body: draft.body,
         company: draft.company,
         website: draft.website
       });
-      
+
+      if (!result) {
+        // Human declined after seeing the warnings — leave the draft in place.
+        setDrafts(originalDrafts);
+        return;
+      }
+
       // Remove from drafts list since it was sent
       setDrafts(drafts.filter(d => d.id !== draft.id));
     } catch (err) {
@@ -585,6 +625,18 @@ function App() {
                 <p><strong>URL:</strong> <a href={draft.website} target="_blank" rel="noreferrer">{draft.website}</a></p>
                 <p><strong>To:</strong> {draft.target_email || 'Missing email'}</p>
               </div>
+
+              {draftAgeDays(draft) !== null && draftAgeDays(draft) >= 7 && (
+                <div style={{
+                  marginTop: '12px', padding: '10px 12px', borderRadius: '8px',
+                  background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.4)',
+                  color: '#fcd34d', fontSize: '13px',
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                }}>
+                  <AlertTriangle size={14} />
+                  Drafted {draftAgeDays(draft)} days ago — the site may have changed since this was audited.
+                </div>
+              )}
 
               {draft.review_warnings && draft.review_warnings.length > 0 && (
                 <div style={{

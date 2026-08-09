@@ -398,6 +398,32 @@ def get_drafts():
             draft["review_warnings"] = []
     return drafts
 
+def get_draft_by_website(website: str):
+    """
+    Fetch the single draft for *website*, or None.
+
+    Exists so the send path can check a draft's own review_warnings and age
+    before letting it go out — /api/send receives the subject/body in the
+    request, not the draft row, so without this lookup it has no way to know
+    the copy it's about to send was flagged during generation.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_drafts WHERE website = ? ORDER BY timestamp DESC LIMIT 1", (website,))
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        return None
+    draft = dict(row)
+    raw = draft.get("review_warnings")
+    try:
+        draft["review_warnings"] = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        draft["review_warnings"] = []
+    return draft
+
 def delete_draft(draft_id: int):
     init_db()
     conn = sqlite3.connect(DB_PATH)

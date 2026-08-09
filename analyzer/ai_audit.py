@@ -172,6 +172,7 @@ class AIAuditor:
                     self._check_number_hallucination(parsed, prompt, company),
                     self._verify_source_quotes(parsed, prompt, company),
                     self._verify_grounding(parsed, prompt, company),
+                    self._verify_visual_claims(parsed, company, image_path),
                     self._check_spam_trigger_words(parsed, company),
                     self._check_body_length(parsed, company, has_image=bool(image_path)),
                 ) if w]
@@ -208,10 +209,21 @@ class AIAuditor:
         return None
 
     # Numbers that show up in nearly every generated email regardless of
-    # source data (call-duration boilerplate, list positions) — excluded
-    # from the hallucination check below so they don't drown out real
-    # mismatches with constant noise.
-    _BOILERPLATE_NUMBERS = {"10", "1", "2", "3"}
+    # source data — excluded from the hallucination check below so they
+    # don't drown out real mismatches with constant noise. "10" is the
+    # "10 minute call" CTA the prompt asks for in every email.
+    #
+    # This set used to also contain "1", "2" and "3" as "list positions",
+    # which was a real false-negative hole: the subtraction only ever
+    # applies to a number that appears NOWHERE in the prompt, so a small
+    # number reaching it is not a list position — it's a specific,
+    # checkable count the model made up ("you have 3 broken links" when
+    # the audit found 7, "2 different fonts" when it measured 5). Those
+    # are exactly the claims a business owner can verify in a minute and
+    # exactly what this check exists to catch. Removing them trades a few
+    # more warning banners (safe, a human reads them) for not silently
+    # passing a wrong number to a real recipient (not safe).
+    _BOILERPLATE_NUMBERS = {"10"}
 
     @staticmethod
     def _check_number_hallucination(parsed: dict, prompt: str, company: str) -> str | None:
@@ -500,6 +512,143 @@ class AIAuditor:
                 pass
         return None
 
+    # Words that mark a claim as being about how the site *looks* rather than
+    # about anything in the measured audit data. Used to route only those
+    # claims to the (more expensive, image-carrying) vision judge below.
+    _VISUAL_CLAIM_KEYWORDS = (
+        "screenshot", "font", "typography", "align", "spacing", "layout",
+        "colour", "color", "cluttered", "blurry", "pixelated", "overlap",
+        "looks ", "visual", "design", "red box",
+    )
+
+    @staticmethod
+    def _looks_like_a_visual_claim(text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(keyword in lowered for keyword in AIAuditor._VISUAL_CLAIM_KEYWORDS)
+
+    def _verify_visual_claims(self, parsed: dict, company: str, image_path: str | None) -> str | None:
+        """
+        Grounding check for claims about the screenshot, which every other
+        check is structurally blind to.
+
+        _verify_grounding sends the judge the prompt TEXT only, so a claim
+        like "the fonts in your hero and nav don't match" is judged against
+        source data that contains no visual information whatsoever — the
+        judge can only guess, in either direction. _verify_source_quotes
+        can't help either, since a visual observation has no line in FLAWS
+        DETECTED to quote. That left the single highest-risk claim type in
+        the email (the recipient is looking at their own site while reading
+        it) as the one claim nothing could actually check.
+
+        This sends the real screenshot plus only the visual-sounding claims
+        to a vision-capable judge and asks whether each is actually visible
+        in the image. Same conventions as the other checks: never blocks a
+        send, degrades silently to None if no vision provider is configured,
+        and returns a warning string collected into review_warnings.
+        """
+        if not image_path:
+            return None
+
+        flaws = parsed.get("flaws", [])
+        visual = [
+            (i, f.get("paragraph", ""))
+            for i, f in enumerate(flaws, start=1)
+            if AIAuditor._looks_like_a_visual_claim(f.get("paragraph", ""))
+        ]
+        if not visual:
+            return None
+
+        base64_image = self._encode_image(image_path)
+        if not base64_image:
+            return None
+
+        claims = "\n".join(f"{i}. {paragraph}" for i, paragraph in visual)
+        judge_prompt = (
+            "You are a strict visual fact checker. Attached is a real screenshot of a "
+            "business's website. Below are numbered CLAIMS somebody wrote about how that "
+            "site looks.\n\n"
+            f"CLAIMS:\n{claims}\n\n"
+            "For each claim number, decide if what it describes is actually visible in the "
+            "attached screenshot. Judge only what you can genuinely see. If a claim describes "
+            "a problem that is not there, or that you cannot confirm from the image, mark it "
+            "unsupported. Being unable to see something counts as unsupported.\n"
+            'Return ONLY valid JSON: {"unsupported": [claim numbers not visible in the image]}. '
+            "Empty array if every claim is visibly accurate. No markdown, no explanation."
+        )
+
+        try:
+            raw = self._call_vision_judge(judge_prompt, base64_image)
+            if not raw:
+                return None
+            result = self._parse_json_loose(raw)
+            unsupported = result.get("unsupported") if result else None
+            if unsupported:
+                numbers = {i for i, _ in visual}
+                flagged = [f"#{i}" for i in unsupported if i in numbers]
+                if not flagged:
+                    return None
+                message = (
+                    f"Visual check: {len(flagged)} claim(s) about the screenshot could NOT be "
+                    f"confirmed in the actual image — review before sending: {flagged}"
+                )
+                print(f"[AIAuditor] WARNING: {message} (for '{company}')")
+                return message
+        except Exception as e:
+            print(f"[AIAuditor] Visual claim verification skipped (non-critical): {e}")
+        return None
+
+    def _call_vision_judge(self, judge_prompt: str, base64_image: str) -> str | None:
+        """
+        Vision-capable counterpart to _call_judge, same fixed preference
+        order and same silent-degradation contract. Separate function
+        because the three SDKs each take image content differently, and
+        _call_judge's text-only signature is used by the cheaper checks
+        that must not pay for an image.
+        """
+        if config.GEMINI_API_KEY:
+            try:
+                model = genai.GenerativeModel(
+                    "gemini-3.5-flash",
+                    generation_config=genai.types.GenerationConfig(
+                        response_mime_type="application/json", temperature=0.0,
+                    ),
+                )
+                return model.generate_content([
+                    {"mime_type": "image/jpeg", "data": base64.b64decode(base64_image)},
+                    judge_prompt,
+                ]).text
+            except Exception:
+                pass
+        if self._anthropic_client:
+            try:
+                message = self._anthropic_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=256,
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}},
+                        {"type": "text", "text": judge_prompt},
+                    ]}],
+                )
+                return message.content[0].text
+            except Exception:
+                pass
+        if self._openai_client:
+            try:
+                response = self._openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": judge_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    ]}],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content
+            except Exception:
+                pass
+        return None
+
     @staticmethod
     def _parse_json_loose(raw: str) -> dict | None:
         """Same tolerant parsing as _parse_json but without the required-keys check — used for the judge's smaller {"unsupported": [...]} shape."""
@@ -542,6 +691,36 @@ class AIAuditor:
     # Prompt builder
     # ------------------------------------------------------------------
 
+    # Substrings identifying the deterministic, measured visual/design flaws
+    # that _build_flaws() can actually produce (scrapers/website.py) — the
+    # font-consistency check and the stretched-image check. Matched on the
+    # description rather than the category because both are filed under the
+    # broad "content" category alongside non-visual flaws (favicon, thin
+    # content), so the category alone can't tell them apart.
+    _VISUAL_FLAW_MARKERS = (
+        "different fonts on one page",
+        "displayed larger than their native resolution",
+    )
+
+    @staticmethod
+    def _has_visual_evidence(web: WebsiteData) -> bool:
+        """
+        True if this run actually measured something visual worth claiming.
+
+        Either the red-box pipeline found a real, in-viewport axe-core
+        violation to highlight (visual_flaw_context), or one of the two
+        deterministic design checks fired. Used to decide whether the prompt
+        may *demand* a visual critique — see the visual instruction in
+        _build_prompt for why demanding one unconditionally is a bug.
+        """
+        if getattr(web, "visual_flaw_context", None):
+            return True
+        for flaw in getattr(web, "flaws", None) or []:
+            description = (getattr(flaw, "description", "") or "").lower()
+            if any(marker in description for marker in AIAuditor._VISUAL_FLAW_MARKERS):
+                return True
+        return False
+
     @staticmethod
     def _build_prompt(
         company: str,
@@ -555,6 +734,7 @@ class AIAuditor:
         """
         Assemble the audit prompt using real data from *ig* and *web*.
         """
+        has_visual_evidence = AIAuditor._has_visual_evidence(web)
         # --- Instagram section ---
         if ig:
             ig_section = (
@@ -693,7 +873,27 @@ class AIAuditor:
             "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot (e.g., 'I attached a screenshot of your site—the red box highlights a button that is completely invisible to screen readers, which is hurting your SEO').\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
-            + ("CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE based on the image, specifically covering LAYOUT, TYPOGRAPHY, and ALIGNMENT! Look beyond just the red box (if present) — actually study the screenshot for: inconsistent or clashing fonts/typography, text or elements that are misaligned or not evenly spaced, mismatched colors, cluttered/unbalanced layout, low-quality or stretched/blurry images, awkward spacing. You MUST mention the screenshot in your flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...' or 'the fonts in your hero section and navigation don't match, which looks inconsistent and unprofessional to a first time visitor').\n" if has_image else "")
+            # The visual instruction is deliberately split in two. It used to
+            # be one unconditional "ONE OF YOUR FLAWS MUST BE A VISUAL
+            # CRITIQUE", which forced a design criticism on every single
+            # email even when nothing visual was actually measured — a site
+            # with clean design left the model no honest way to comply, so
+            # it invented one. It also directly contradicted the source_quote
+            # rule below ("if you cannot copy an exact line for this claim,
+            # do not make the claim at all"), since a typography/alignment
+            # claim usually has no matching line in FLAWS DETECTED. The
+            # demand now only appears when something visual was really
+            # detected; otherwise a visual claim is permitted but explicitly
+            # optional and must describe only what is plainly visible.
+            + (
+                (
+                    "CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email, and the visual/design problems listed in FLAWS DETECTED above were really measured on this site. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE covering what was detected (LAYOUT, TYPOGRAPHY, or ALIGNMENT) — anchor it to the detected flaw and to what you can actually see in the image. You MUST mention the screenshot in that flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...' or 'the fonts in your hero section and navigation don't match, which looks inconsistent and unprofessional to a first time visitor').\n"
+                    if has_visual_evidence
+                    else "NOTE ON THE SCREENSHOT: I am attaching a desktop screenshot of their website in the email, but our automated design checks did NOT detect any typography, alignment, or image-quality problem on this site. Do NOT invent a visual criticism to fill a quota — a clean design is a perfectly normal result. Only make a visual claim if something is unmistakably and obviously wrong in the image itself, and if you do, describe only what is plainly visible rather than implying we measured it. Otherwise pick your flaws entirely from FLAWS DETECTED above and do not comment on the design at all.\n"
+                )
+                if has_image
+                else ""
+            )
             + ("A SECOND image is also attached showing the site on an actual MOBILE PHONE screen. Compare it against the desktop screenshot and look specifically for mobile only problems: text or buttons cut off or overlapping, horizontal scrolling, tiny unreadable font, a hamburger menu that looks broken, a hero image that doesn't adapt. If you spot a mobile specific issue, make ONE of your flaws about it and say explicitly that it is how the site looks on a phone (e.g. 'on your phone, the navigation menu overlaps your logo').\n" if has_mobile_image else "")
             + ("If GOOGLE BUSINESS RATING is 4 stars or higher, use it as a personalization hook, e.g. contrast their strong reputation with a website flaw ('you've clearly got happy customers, X reviews at Y stars, but the website doesn't reflect that trust'). Do not mention the rating if it is below 4 stars or reviews_count is under 10, it is not a strong enough signal to reference.\n" if rating else "")
             + "\n"

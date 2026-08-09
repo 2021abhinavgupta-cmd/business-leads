@@ -3,6 +3,7 @@ import os
 import random
 import time
 from collections import defaultdict, deque
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -187,6 +188,11 @@ class SendRequest(BaseModel):
     body: str
     company: str
     website: str
+    # Set by the frontend only after a human has seen and dismissed the
+    # draft's review warnings / staleness notice. Defaults to False so the
+    # gate in /api/send fails closed: a caller that doesn't know about the
+    # check can't accidentally bypass it.
+    acknowledge_warnings: bool = False
 
 maps_scraper = GoogleMapsScraper()
 web_scraper = WebsiteScraper()
@@ -456,6 +462,43 @@ async def send_email(
                     "gradually once Postmaster Tools shows spam placement improving."
                 ),
             )
+
+        # The five accuracy checks in analyzer/ai_audit.py already flag a
+        # draft whose copy looks fabricated, and their output has been
+        # visible in the Drafts UI since 2026-08-07 — but nothing stopped a
+        # flagged draft being sent anyway, so the whole safety net came down
+        # to whether a human happened to read a red banner before clicking.
+        # A draft's audit data is also frozen at generation time while the
+        # draft itself sits in the inbox indefinitely, so an old draft can
+        # cite findings that are no longer true. Both now need one explicit
+        # acknowledgement rather than passing silently.
+        draft = await asyncio.to_thread(db.get_draft_by_website, req.website)
+        if draft and not req.acknowledge_warnings:
+            blockers = list(draft.get("review_warnings") or [])
+
+            if config.DRAFT_STALE_DAYS > 0 and draft.get("timestamp"):
+                try:
+                    drafted_at = datetime.fromisoformat(str(draft["timestamp"]))
+                    age_days = (datetime.now() - drafted_at).days
+                    if age_days >= config.DRAFT_STALE_DAYS:
+                        blockers.append(
+                            f"This draft was generated {age_days} days ago — the site may have changed since, "
+                            f"so its findings may no longer be accurate. Re-audit to be sure."
+                        )
+                except (TypeError, ValueError):
+                    # An unparseable timestamp shouldn't block a send that is
+                    # otherwise fine — the warnings check above still applies.
+                    pass
+
+            if blockers:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "This draft was flagged during review and hasn't been acknowledged yet.",
+                        "warnings": blockers,
+                        "resend_with": "acknowledge_warnings: true",
+                    },
+                )
 
         # Use existing screenshot (same collision-safe name generate_audit_screenshot wrote)
         image_path = None
