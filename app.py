@@ -188,6 +188,11 @@ class AuditRequest(BaseModel):
     reviews_count: int = 0
     gbp_phone: str = ""
     gbp_address: str = ""
+    # Bypass the short-TTL result cache. The cache exists to stop a
+    # double-click re-running the whole scrape+AI pipeline, but a DELIBERATE
+    # re-audit (the retry button, or checking whether a site was fixed) wants
+    # fresh data and would otherwise silently get a stale verdict back.
+    force: bool = False
 
 class SendRequest(BaseModel):
     email: str
@@ -309,9 +314,13 @@ async def audit_lead(
         except UnsafeURLError as e:
             raise HTTPException(status_code=400, detail=f"Refusing to audit this URL: {e}")
 
-        cached = _audit_cache_get(req.website)
-        if cached is not None:
-            return cached
+        if not req.force:
+            cached = _audit_cache_get(req.website)
+            if cached is not None:
+                # Labelled so the caller can tell a fresh audit from a
+                # replayed one — a result with no timestamp and no marker is
+                # indistinguishable from a live measurement.
+                return {**cached, "cached": True}
 
     try:
         # Check SES quota (optional but good for safety)
@@ -400,6 +409,20 @@ async def audit_lead(
         dm_cost = dm.get("cost", 0.0)
         if dm_cost:
             await asyncio.to_thread(db.log_cost, "AI Web Fetch", dm_cost, description=f"Contact discovery for {req.company}")
+
+        # Recipient accuracy is worth more than claim accuracy: a perfectly
+        # true email sent to an address nobody owns is a hard bounce, and
+        # bounces damage sender reputation for every future send. These ride
+        # the existing review_warnings channel so they surface on the draft
+        # card AND trip /api/send's acknowledgement gate.
+        if dm.get("domain_accepts_mail") is False:
+            analysis.setdefault("review_warnings", []).append(
+                f"{email} — this domain does not resolve or accept mail at all. Sending here is a guaranteed hard bounce, which damages sender reputation for every future email. Verify the address before sending."
+            )
+        elif dm.get("is_guess"):
+            analysis.setdefault("review_warnings", []).append(
+                f"{email} was GUESSED from a common pattern, not found on the site — no lookup confirmed this mailbox exists. Check it before sending; a wrong address bounces, and bounces hurt deliverability for every later email."
+            )
 
         # Generate Draft
         YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")

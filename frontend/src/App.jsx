@@ -170,7 +170,10 @@ function App() {
     setManualWebsite('');
   };
 
-  const handleAudit = async (index) => {
+  // `force` bypasses the server's short-TTL result cache — set by the
+  // Retry button, since a deliberate re-audit wants fresh data rather
+  // than a replay of the verdict that just failed or looked wrong.
+  const handleAudit = async (index, force = false) => {
     const lead = leadsRef.current[index];
     setLeads(prev => {
       const newLeads = [...prev];
@@ -216,7 +219,11 @@ function App() {
         rating: lead.Rating || '',
         reviews_count: Number(lead['Reviews Count']) || 0,
         gbp_phone: lead.Phone || '',
-        gbp_address: lead.Address || ''
+        // Manually-added leads carry the literal placeholder 'Added Manually'
+        // in Address and have no Google listing at all — sending it would
+        // feed a non-address into the NAP comparison.
+        gbp_address: lead.Address === 'Added Manually' ? '' : (lead.Address || ''),
+        force
       });
 
       setLeads(prev => {
@@ -526,7 +533,7 @@ function App() {
               {lead.auditState === 'failed' && (
                 <div className="auditing-state" style={{ flexDirection: 'column', gap: '8px' }}>
                   <p className="error-text">Audit failed.</p>
-                  <button className="audit-btn" onClick={() => handleAudit(i)}><Activity size={18} /> Retry Audit</button>
+                  <button className="audit-btn" onClick={() => handleAudit(i, true)}><Activity size={18} /> Retry Audit</button>
                 </div>
               )}
               {lead.auditState === 'sending' && <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>}

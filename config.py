@@ -132,6 +132,15 @@ AI_SELF_CONSISTENCY = os.getenv("AI_SELF_CONSISTENCY", "true").strip().lower() n
 # than going out unnoticed. Set to 0 to disable the staleness gate entirely.
 DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 
+# Only leads scoring BELOW this are contacted — above it the site is
+# considered healthy enough not to be worth a cold email. Lives here rather
+# than as a bare module constant in analyzer/ai_audit.py so it can be tuned
+# per deployment like every other threshold. Note a partially-failed audit
+# inflates the score (fewer detected flaws = higher score), which is exactly
+# why should_contact() bypasses this entirely when partial_coverage is
+# non-empty — see CLAUDE.md §8.
+CONTACT_THRESHOLD = int(os.getenv("CONTACT_THRESHOLD", "70"))
+
 # === API Auth ===
 # Required header (X-API-Key) for all /api/* routes. If unset, the API is
 # wide open — set this before deploying anywhere reachable from the internet.

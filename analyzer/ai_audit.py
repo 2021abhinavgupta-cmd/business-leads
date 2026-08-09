@@ -23,9 +23,12 @@ from scrapers.instagram import InstagramData
 from scrapers.website import WebsiteData
 
 # ---------------------------------------------------------------------------
-# Score threshold — only contact leads below this
+# Score threshold — only contact leads below this.
+# Re-exported from config so existing `from analyzer.ai_audit import
+# CONTACT_THRESHOLD` imports keep working, but the value is configurable
+# (CONTACT_THRESHOLD env var) rather than a hardcoded constant.
 # ---------------------------------------------------------------------------
-CONTACT_THRESHOLD = 70
+CONTACT_THRESHOLD = config.CONTACT_THRESHOLD
 
 # Low, near-deterministic temperature — this task is "quote exact numbers
 # and facts from the data you were given" not creative writing, so we want
@@ -153,13 +156,21 @@ class AIAuditor:
             if parsed is not None:
                 parsed["ai_cost"] = cost
 
+                # Self-consistency is effectively a seventh review check, and
+                # its total-disagreement case is the STRONGEST fabrication
+                # signal available here (two independent samples of the same
+                # prompt citing no finding in common). It was log-only until
+                # 2026-08-09 — the same gap the other checks had before their
+                # 2026-08-07 fix, missed then because it lives on this
+                # separate code path rather than in the check list below.
+                consistency_warning = None
                 if config.AI_SELF_CONSISTENCY:
                     second = call_fn(prompt, base64_image, base64_mobile_image)
                     if second is not None:
                         second_parsed = self._parse_json(second[0])
                         parsed["ai_cost"] = cost + second[1]
                         if second_parsed is not None:
-                            self._apply_self_consistency(parsed, second_parsed, company)
+                            consistency_warning = self._apply_self_consistency(parsed, second_parsed, company)
 
                 # Each check below used to only print()  its warning — real,
                 # useful signal that nobody was actually watching, since
@@ -169,6 +180,7 @@ class AIAuditor:
                 # instead of the warning existing only in a log line no one
                 # will read before the email goes out.
                 review_warnings = [w for w in (
+                    consistency_warning,
                     self._check_number_hallucination(parsed, prompt, company),
                     self._verify_source_quotes(parsed, prompt, company),
                     self._verify_grounding(parsed, prompt, company),
@@ -331,7 +343,7 @@ class AIAuditor:
         return None
 
     @staticmethod
-    def _apply_self_consistency(parsed: dict, second: dict, company: str) -> None:
+    def _apply_self_consistency(parsed: dict, second: dict, company: str) -> str | None:
         """
         Keep only the claims that BOTH independent samples chose to write
         about, identified by the source line each one cites.
@@ -355,7 +367,7 @@ class AIAuditor:
             if f.get("source_quote")
         }
         if not first_flaws or not second_quotes:
-            return
+            return None
 
         agreed = [
             f for f in first_flaws
@@ -364,12 +376,23 @@ class AIAuditor:
         dropped = len(first_flaws) - len(agreed)
 
         if not agreed:
+            message = (
+                "The two independent AI samples cited entirely NO findings in common — "
+                "the strongest available signal that these claims may be invented. The first "
+                "sample was kept unchanged (an empty email is worse), but read this one closely."
+            )
             print(f"[AIAuditor] Self-consistency: the two samples for '{company}' cited entirely different findings — keeping the first sample unchanged, but this email is worth a closer read before sending.")
-            return
+            return message
 
+        parsed["flaws"] = agreed
         if dropped:
             print(f"[AIAuditor] Self-consistency: dropped {dropped} of {len(first_flaws)} claim(s) for '{company}' that only appeared in one of two samples (kept {len(agreed)}).")
-        parsed["flaws"] = agreed
+            return (
+                f"Dropped {dropped} of {len(first_flaws)} claim(s) that appeared in only one of two "
+                f"independent AI samples (kept {len(agreed)}) — a claim that doesn't recur is more "
+                "likely to have been invented."
+            )
+        return None
 
     @staticmethod
     def _normalise_for_match(text: str) -> str:

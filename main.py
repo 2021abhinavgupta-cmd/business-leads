@@ -88,6 +88,16 @@ async def process_single_lead(lead: dict) -> str:
         print(f"  No email found for {company}")
         return "failed_no_email"
 
+    # A domain that resolves nowhere is a guaranteed hard bounce, and bounces
+    # damage sender reputation for every later send — not worth spending an
+    # audit and an AI call on either. A guessed-but-plausible address still
+    # gets drafted (a human reviews it in the inbox), just noisily.
+    if dm.get("domain_accepts_mail") is False:
+        print(f"  {email} — domain does not accept mail at all; skipping {company} rather than risking a hard bounce.")
+        return "failed_no_email"
+    if dm.get("is_guess"):
+        print(f"  WARNING: {email} was guessed from a pattern, not found on {website} — verify before this one is sent.")
+
     # Step 5: Audit website (with Playwright HTML)
     web_data = await web_scraper.audit_website(
         website,

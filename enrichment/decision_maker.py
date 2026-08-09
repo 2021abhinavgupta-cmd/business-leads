@@ -17,7 +17,7 @@ import anthropic
 import httpx
 from ddgs import DDGS
 from googlesearch import search as google_search
-from email_validator import validate_email, EmailNotValidError
+from email_validator import validate_email, EmailNotValidError, EmailUndeliverableError
 
 import config
 
@@ -120,11 +120,19 @@ class DecisionMaker:
             html_content: Pre-rendered Playwright HTML of the homepage (optional).
 
         Returns:
-            ``{"name": str, "email": str, "title": str}``
+            ``{"name", "email", "title", "is_guess", "domain_accepts_mail"}``
+
+            ``is_guess`` is the important one: strategies 2 and 5 CONSTRUCT
+            an address from a name or a common pattern and cannot confirm the
+            mailbox exists, while 1, 3 and 4 read a real published address.
+            Both used to return the identical dict shape, so nothing
+            downstream could tell a scraped address from a fabricated one —
+            and a fabricated one is a hard bounce, which damages sender
+            reputation for every future send. See CLAUDE.md §8.
         """
         domain = self._extract_domain(website)
         if not domain:
-            return {"name": "", "email": "", "title": ""}
+            return {"name": "", "email": "", "title": "", "is_guess": False, "domain_accepts_mail": None}
 
         if not website.startswith(("http://", "https://")):
             website = f"https://{website}"
@@ -137,30 +145,23 @@ class DecisionMaker:
         # Strategy 1 — Internal Scraper (Now powered by Playwright HTML)
         scraped_email = self._scrape_website_for_email(website, html_content)
         if scraped_email:
-            return {
-                "name": generic_name,
-                "email": scraped_email,
-                "title": ""
-            }
+            # Read off the business's own site — a real published address.
+            return self._finalise(generic_name, scraped_email, "", is_guess=False)
 
         # Strategy 2 — LinkedIn OSINT (CEO Discovery)
         ceo_name = self._find_ceo_name(company_name)
         if ceo_name:
-            verified_email = self._guess_and_verify_email(ceo_name, domain)
-            return {
-                "name": ceo_name,
-                "email": verified_email,
-                "title": "Founder / CEO"
-            }
+            guessed = self._guess_email_from_name(ceo_name, domain)
+            if guessed:
+                # Constructed from a name pattern — nothing here can confirm
+                # the mailbox exists, so it is always a guess.
+                return self._finalise(ceo_name, guessed, "Founder / CEO", is_guess=True)
 
         # Strategy 3 — OSINT Email Dork
         osint_email = self._find_email_via_osint(company_name, domain)
         if osint_email:
-            return {
-                "name": generic_name,
-                "email": osint_email,
-                "title": ""
-            }
+            # Appeared verbatim in a real search result, not constructed.
+            return self._finalise(generic_name, osint_email, "", is_guess=False)
 
         # Strategy 4 — Claude web_fetch (last resort, real API cost — only
         # reached when the three free strategies above all came up empty,
@@ -169,12 +170,14 @@ class DecisionMaker:
         claude_cost = claude_result.get("cost", 0.0)
 
         if claude_result.get("email"):
-            return {
-                "name": claude_result.get("name") or generic_name,
-                "email": claude_result["email"],
-                "title": "Founder / CEO" if claude_result.get("name") else "",
-                "cost": claude_cost,
-            }
+            result = self._finalise(
+                claude_result.get("name") or generic_name,
+                claude_result["email"],
+                "Founder / CEO" if claude_result.get("name") else "",
+                is_guess=False,
+            )
+            result["cost"] = claude_cost
+            return result
 
         # Strategy 5 — generic email patterns. Still surface claude_cost here
         # if the web_fetch call above was actually made but came up empty —
@@ -294,44 +297,68 @@ class DecisionMaker:
                 return name
         return ""
 
-    def _guess_and_verify_email(self, name: str, domain: str) -> str:
-        """Generate common email patterns for a name and verify via SMTP."""
+    def _guess_email_from_name(self, name: str, domain: str) -> str:
+        """
+        Construct the most likely address for a person at *domain*.
+
+        Was `_guess_and_verify_email`, and the "verify" half was dead code:
+        it tried to detect a catch-all domain by checking whether an obviously
+        fake address validated, then only tried the real patterns if it
+        didn't. But `email-validator`'s `check_deliverability` resolves DNS/MX
+        records ONLY — it never opens an SMTP connection and cannot tell
+        whether a specific mailbox exists, contrary to the old docstring. So
+        the fake address validated on every domain that has mail at all,
+        `is_catch_all` was always True, the pattern loop never ran once, and
+        the function always returned patterns[0] anyway. Verified empirically
+        against gmail.com and mmga.agency before removing it.
+
+        Nothing available here can confirm a mailbox exists, so this is
+        honestly named and its result is always marked is_guess=True by the
+        caller. `check_deliverability` is still genuinely useful, just for a
+        different question — see `domain_accepts_mail`.
+        """
         parts = name.lower().split()
         if not parts:
             return ""
-            
+
         first = re.sub(r'[^a-z]', '', parts[0])
         last = re.sub(r'[^a-z]', '', parts[-1]) if len(parts) > 1 else ""
-        
-        patterns = [f"{first}@{domain}"]
-        if last:
-            patterns.extend([
-                f"{first}.{last}@{domain}",
-                f"{first}{last}@{domain}",
-                f"{first[0]}{last}@{domain}",
-                f"{first[0]}.{last}@{domain}"
-            ])
-            
-        # Catch-all detection: if a completely fake email validates, the domain is a catch-all
-        # and SMTP guessing is useless.
-        is_catch_all = False
+        if not first:
+            return ""
+
+        return f"{first}.{last}@{domain}" if last else f"{first}@{domain}"
+
+    @staticmethod
+    def domain_accepts_mail(email: str) -> bool | None:
+        """
+        Can this address's domain receive mail at all?
+
+        True  — the domain publishes MX (or A) records; a mailbox may or may
+                not exist, but mail will at least be accepted for delivery.
+        False — the domain resolves nowhere. Sending here is a GUARANTEED
+                hard bounce, and hard bounces are the single most damaging
+                thing for sender reputation (AWS reviews accounts at a ~5%
+                bounce rate — one bad address in a 20-send batch clears that
+                bar on its own, which has already nearly happened here once).
+        None  — the lookup itself failed. Deliberately NOT treated as False:
+                DNS from a cloud host is unreliable enough that a timeout
+                would otherwise block real, valid leads (see CLAUDE.md §8 on
+                exactly this, which is why scraped addresses fall back to
+                format-only validation).
+        """
+        if not email or "@" not in email:
+            return None
         try:
-            validate_email(f"bounce-test-992384@{domain}", check_deliverability=True)
-            is_catch_all = True
+            validate_email(email, check_deliverability=True)
+            return True
+        except EmailUndeliverableError:
+            return False
+        except EmailNotValidError:
+            # Malformed rather than undeliverable — a different problem, and
+            # not one this function is meant to answer.
+            return None
         except Exception:
-            pass
-            
-        if not is_catch_all:
-            for candidate in patterns:
-                try:
-                    # check_deliverability=True performs DNS MX and SMTP checks
-                    valid = validate_email(candidate, check_deliverability=True)
-                    return valid.normalized
-                except EmailNotValidError:
-                    continue
-                
-        # Fallback to firstname if all verification fails (or if it's a catch-all)
-        return patterns[0]
+            return None
 
     def _find_email_via_osint(self, company_name: str, domain: str) -> str:
         """Fallback OSINT search to scrape emails directly off Google/DDG."""
@@ -468,22 +495,34 @@ class DecisionMaker:
     # Fallback generic patterns
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _fallback_patterns(domain: str, generic_name: str = "Marketing Team") -> dict:
+    def _finalise(self, name: str, email: str, title: str, *, is_guess: bool) -> dict:
+        """
+        Build the contact result, recording how much to trust the address.
+
+        Every strategy funnels through here so `is_guess` can never be
+        forgotten on a new one, and so the domain deliverability check runs
+        exactly once per lead regardless of which strategy won.
+        """
+        return {
+            "name": name,
+            "email": email,
+            "title": title,
+            "is_guess": is_guess,
+            "domain_accepts_mail": self.domain_accepts_mail(email),
+        }
+
+    def _fallback_patterns(self, domain: str, generic_name: str = "Marketing Team") -> dict:
         """
         Return a generic marketing email for *domain* when all
         external lookups fail.
+
+        This address is INVENTED — nothing has confirmed it exists — so it is
+        always flagged is_guess=True. It used to be returned in the same
+        shape as a genuinely scraped address, which meant the drafts inbox
+        showed no difference between "we found their real email" and "we made
+        one up", and a made-up address is a hard bounce.
         """
-        patterns = [
-            f"marketing@{domain}",
-            f"info@{domain}",
-            f"hello@{domain}",
-        ]
-        return {
-            "name": generic_name,
-            "email": patterns[0],
-            "title": "",
-        }
+        return self._finalise(generic_name, f"marketing@{domain}", "", is_guess=True)
 
     # ------------------------------------------------------------------
     # Helpers
