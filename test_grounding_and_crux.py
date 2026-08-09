@@ -10,7 +10,7 @@ import pytest
 
 from analyzer.crux import extract_crux_from_pagespeed, _metrics_to_vitals
 from analyzer.ai_audit import AIAuditor
-from scrapers.website import WebsiteScraper
+from scrapers.website import WebsiteScraper, _is_metric_plausible
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +88,49 @@ def test_unparseable_metric_is_dropped_not_stored_as_none():
     """
     vitals = _metrics_to_vitals({"cumulative_layout_shift": {"percentiles": {"p75": "not-a-number"}}})
     assert "cls" not in vitals
+
+
+# ---------------------------------------------------------------------------
+# Sanity bounds — a broken source (the CLS 100x mismatch, the 5-10x
+# Lighthouse lab inflation) should be discarded like a missing value, not
+# quoted at a lead as fact.
+# ---------------------------------------------------------------------------
+
+def test_plausible_readings_pass():
+    assert _is_metric_plausible("lcp_ms", 2500)
+    assert _is_metric_plausible("cls", 0.15)
+    assert _is_metric_plausible("tbt_ms", 300)
+    assert _is_metric_plausible("inp_ms", 200)
+
+
+def test_implausibly_large_lcp_is_rejected():
+    # A real bug class: unit confusion (seconds vs ms) or a corrupted API
+    # response producing something no real page load can be.
+    assert not _is_metric_plausible("lcp_ms", 999_000)
+
+
+def test_zero_lcp_is_rejected():
+    # 0ms means nothing ever painted — not a real completed measurement.
+    assert not _is_metric_plausible("lcp_ms", 0)
+
+
+def test_the_actual_cls_100x_mismatch_bug_would_have_been_caught():
+    # Real incident (see analyzer/crux.py docstring): PageSpeed's integer-scale
+    # CLS accidentally treated as the decimal form lands at 100x the real
+    # value. A genuine 1.0 CLS is already about as bad as real pages get.
+    assert not _is_metric_plausible("cls", 100)
+
+
+def test_none_is_never_plausible():
+    assert not _is_metric_plausible("lcp_ms", None)
+    assert not _is_metric_plausible("inp_ms", None)
+
+
+def test_unbounded_metric_falls_back_to_not_none_check():
+    # A metric with no entry in _METRIC_BOUNDS (e.g. ttfb_ms) has no known
+    # sane range yet — don't reject it outright, just require a real value.
+    assert _is_metric_plausible("ttfb_ms", 5000)
+    assert not _is_metric_plausible("ttfb_ms", None)
 
 
 # ---------------------------------------------------------------------------

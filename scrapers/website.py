@@ -103,6 +103,34 @@ _MIN_WORDS_FOR_READABILITY = 50  # too little text and the score is meaningless 
 _AXE_SEVERITY_MAP = {"critical": "critical", "serious": "high", "moderate": "medium", "minor": "low"}
 _MAX_CONSISTENT_FONTS = 3  # most well-designed sites use 1-2 type families, occasionally 3
 
+# Physically plausible ranges for the Core Web Vitals fed into flaw copy.
+# CrUX/PageSpeed/Lighthouse have each independently produced a garbage number
+# at least once (the CLS 100x unit mismatch, the 5-10x Lighthouse lab
+# inflation — see analyzer/crux.py's docstring and CLAUDE.md §8) — a value
+# outside these bounds is a broken source, not a real measurement, and should
+# fall through to the next-best source exactly like a missing value already
+# does, rather than being quoted at a lead as fact.
+_METRIC_BOUNDS = {
+    "lcp_ms": (1, 60_000),   # 0 isn't a real paint; over 60s means the source is broken, not the page
+    "cls": (0, 10),          # Google's own "good/needs improvement/poor" scale tops out around 0.25-1
+    "tbt_ms": (0, 60_000),
+    "inp_ms": (1, 60_000),
+}
+
+
+def _is_metric_plausible(metric: str, value) -> bool:
+    """True if `value` is a sane, real-world-possible reading for `metric`."""
+    bounds = _METRIC_BOUNDS.get(metric)
+    if bounds is None:
+        return value is not None
+    if value is None:
+        return False
+    try:
+        low, high = bounds
+        return low <= float(value) <= high
+    except (TypeError, ValueError):
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -369,23 +397,37 @@ class WebsiteScraper:
         real_wv = extra.get("real_web_vitals") or {}
 
         def _pick(metric: str):
-            """Per-metric, not all-or-nothing: CrUX -> real measured -> lab."""
-            for source in (crux, real_wv, lighthouse_scores):
+            """Per-metric, not all-or-nothing: CrUX -> real measured -> lab.
+
+            A value outside _METRIC_BOUNDS is treated the same as a missing
+            one — fall through to the next source rather than reporting a
+            broken reading as fact (see _is_metric_plausible).
+            """
+            for source_name, source in (("CrUX", crux), ("real_web_vitals", real_wv), ("lighthouse", lighthouse_scores)):
                 value = source.get(metric)
-                if value is not None:
-                    return value
+                if value is None:
+                    continue
+                if not _is_metric_plausible(metric, value):
+                    print(f"[Audit] Discarding implausible {metric}={value} from {source_name} for {url} — falling through to the next source instead of reporting it.")
+                    continue
+                return value
             return None
 
         lcp_ms = _pick("lcp_ms")
         cls = _pick("cls")
         # TBT is a lab-only metric — CrUX doesn't publish it (real users
-        # can't be measured for total blocking time), so it keeps the
-        # original measured-then-lab order.
-        tbt_ms = real_wv.get("tbt_ms") if real_wv.get("tbt_ms") is not None else lighthouse_scores.get("tbt_ms")
+        # can't be measured for total blocking time), so this naturally keeps
+        # the original measured-then-lab order (crux.get("tbt_ms") is always
+        # None).
+        tbt_ms = _pick("tbt_ms")
         # INP replaced FID as Google's official responsiveness Core Web
         # Vital in March 2024 and is field-only, so it exists solely when
-        # CrUX data is available.
+        # CrUX data is available — single source, so an implausible reading
+        # here has nothing to fall through to and is just dropped.
         inp_ms = crux.get("inp_ms")
+        if inp_ms is not None and not _is_metric_plausible("inp_ms", inp_ms):
+            print(f"[Audit] Discarding implausible inp_ms={inp_ms} from CrUX for {url}.")
+            inp_ms = None
 
         # This one specifically was dead on every single site for weeks (the
         # init script was wrapped in an arrow function Playwright never
