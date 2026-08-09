@@ -574,7 +574,13 @@ async def send_email(
 
             # Log exact costs and email history
             await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
-            await asyncio.to_thread(db.log_email, req.company, req.website, req.email, config.FROM_EMAIL, req.subject, req.body, message_id=message_id)
+            # Record which copy variant this was, so a reply weeks from now
+            # can be attributed to a decision rather than to nothing.
+            await asyncio.to_thread(
+                db.log_email, req.company, req.website, req.email, config.FROM_EMAIL,
+                req.subject, req.body, message_id=message_id,
+                variant=config.EMAIL_VARIANT,
+            )
 
             # Remove from drafts since it's sent
             await asyncio.to_thread(db.delete_draft_by_website, req.website)
@@ -694,10 +700,16 @@ async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depend
         history = await asyncio.to_thread(db.get_email_history)
         # The frontend needs this to tell "nobody opened it" apart from
         # "opens were never measured" — both look like open_count 0.
+        variant_performance = await asyncio.to_thread(db.get_variant_performance)
         return {
             "history": history,
             "tracking_enabled": bool(config.EMAIL_OPEN_TRACKING and config.APP_BASE_URL),
             "reply_checking_enabled": bool(config.IMAP_HOST and config.IMAP_USER and config.IMAP_PASSWORD),
+            # Reply rate per copy variant — the point of recording `variant`
+            # at send time. Rows below the minimum-sends bar carry
+            # enough_data: false and must not be read as a result yet.
+            "variant_performance": variant_performance,
+            "current_variant": config.EMAIL_VARIANT,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

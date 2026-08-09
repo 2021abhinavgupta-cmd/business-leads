@@ -136,6 +136,17 @@ def init_db():
         cursor.execute("ALTER TABLE email_drafts ADD COLUMN review_warnings TEXT")
         cursor.execute("PRAGMA user_version = 5")
 
+    # Copy characteristics recorded at send time, so an outcome (an open, a
+    # reply) can be traced back to a choice about the email. Without these
+    # every send is structurally identical and indistinguishable after the
+    # fact, which means copy can only ever be tuned by guesswork — the
+    # engagement tables already collect real outcome data that nothing could
+    # be correlated against.
+    if schema_version < 6:
+        cursor.execute("ALTER TABLE email_history ADD COLUMN variant TEXT")
+        cursor.execute("ALTER TABLE email_history ADD COLUMN body_word_count INTEGER")
+        cursor.execute("PRAGMA user_version = 6")
+
     conn.commit()
     conn.close()
 
@@ -150,13 +161,22 @@ def log_cost(category: str, cost: float, description: str = ""):
     conn.commit()
     conn.close()
 
-def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = ""):
+def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = ""):
+    """
+    Record a real send.
+
+    `variant` exists so engagement can later be attributed to a copy decision
+    rather than to nothing — see get_variant_performance(). The word count is
+    derived here rather than passed in, so it can never disagree with the
+    body actually stored.
+    """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, sender_email, subject, body, message_id)
+        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, sender_email, subject, body, message_id,
+         variant or None, len((body or "").split()))
     )
     conn.commit()
     conn.close()
@@ -369,6 +389,71 @@ def get_email_history():
         row["reply_at"] = reply["timestamp"] if reply else None
 
     return rows
+
+# Below this many sends, a variant's reply rate is noise — a single reply on
+# 4 sends reads as 25%, which is meaningless. Reported alongside the numbers
+# rather than used to hide them, so the operator can see a variant is still
+# accumulating rather than wondering why it vanished.
+_MIN_SENDS_FOR_A_MEANINGFUL_RATE = 20
+
+
+def get_variant_performance() -> list[dict]:
+    """
+    Reply/open rates grouped by copy variant.
+
+    This is the point of recording `variant` at send time: engagement data
+    has been collected for a while (email_opens since 2026-08-06,
+    email_replies since the same day) but every email was structurally
+    identical and nothing recorded what was tried, so an outcome could never
+    be attributed to a decision. Copy could only be argued about, not
+    measured.
+
+    Replies are the number that matters — an open is distorted in both
+    directions by image pre-fetching and images-off readers (see
+    emailer/tracking.py), while a reply is exact. Open rate is returned too,
+    but treat it as directional only.
+
+    `enough_data` marks whether a row has cleared
+    _MIN_SENDS_FOR_A_MEANINGFUL_RATE. A variant below it is not evidence of
+    anything yet, however good or bad its percentage looks.
+    """
+    rows = get_email_history()
+
+    buckets: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("variant") or "(unrecorded)"
+        bucket = buckets.setdefault(key, {
+            "variant": key, "sent": 0, "replied": 0, "opened": 0,
+            "bounced": 0, "total_words": 0,
+        })
+        bucket["sent"] += 1
+        # Auto-replies and bounces are deliberately not counted as replies,
+        # for the same reason reply_checker.py separates them: an
+        # autoresponder proves the address is live, not that a human read it.
+        if row.get("replied") and not row.get("auto_replied"):
+            bucket["replied"] += 1
+        if row.get("open_count"):
+            bucket["opened"] += 1
+        if row.get("bounced"):
+            bucket["bounced"] += 1
+        bucket["total_words"] += row.get("body_word_count") or 0
+
+    results = []
+    for bucket in buckets.values():
+        sent = bucket["sent"]
+        results.append({
+            **bucket,
+            "reply_rate": round(100 * bucket["replied"] / sent, 1) if sent else 0.0,
+            "open_rate": round(100 * bucket["opened"] / sent, 1) if sent else 0.0,
+            "avg_words": round(bucket["total_words"] / sent) if sent else 0,
+            "enough_data": sent >= _MIN_SENDS_FOR_A_MEANINGFUL_RATE,
+        })
+
+    # Best reply rate first, but only among variants with enough data —
+    # otherwise a 1-of-2 fluke would permanently sit at the top and read as
+    # the winner.
+    results.sort(key=lambda r: (r["enough_data"], r["reply_rate"], r["sent"]), reverse=True)
+    return results
 
 def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None):
     init_db()

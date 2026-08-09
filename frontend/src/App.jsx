@@ -38,6 +38,8 @@ function App() {
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [replyCheckEnabled, setReplyCheckEnabled] = useState(false);
   const [checkingReplies, setCheckingReplies] = useState(false);
+  const [variantPerf, setVariantPerf] = useState([]);
+  const [currentVariant, setCurrentVariant] = useState('');
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
@@ -74,6 +76,8 @@ function App() {
         setHistoryLogs(res.data.history);
         setTrackingEnabled(!!res.data.tracking_enabled);
         setReplyCheckEnabled(!!res.data.reply_checking_enabled);
+        setVariantPerf(res.data.variant_performance || []);
+        setCurrentVariant(res.data.current_variant || '');
       }).catch(console.error);
     }
     if (currentView === 'cost') {
@@ -737,6 +741,44 @@ function App() {
         )}
       </div>
       <p style={{color: '#94a3b8', marginBottom: '16px', marginTop: '8px'}}>Persistent log of all outbound emails dispatched.</p>
+
+      {variantPerf.length > 0 && (
+        <div style={{ background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ fontWeight: 600, marginBottom: '4px' }}>Copy performance by variant</div>
+          <div style={{ color: '#94a3b8', fontSize: '12px', marginBottom: '10px' }}>
+            Currently sending: <strong>{currentVariant || 'unset'}</strong>. Reply rate is the number that matters &mdash;
+            open rate is distorted by image pre-fetching and images-off readers.
+          </div>
+          <table style={{ width: '100%', fontSize: '13px', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: '#94a3b8', textAlign: 'left' }}>
+                <th style={{ padding: '4px 8px 4px 0' }}>Variant</th>
+                <th style={{ padding: '4px 8px' }}>Sent</th>
+                <th style={{ padding: '4px 8px' }}>Replied</th>
+                <th style={{ padding: '4px 8px' }}>Reply rate</th>
+                <th style={{ padding: '4px 8px' }}>Open rate</th>
+                <th style={{ padding: '4px 8px' }}>Avg words</th>
+              </tr>
+            </thead>
+            <tbody>
+              {variantPerf.map(v => (
+                <tr key={v.variant} style={{ borderTop: '1px solid rgba(148,163,184,0.15)' }}>
+                  <td style={{ padding: '6px 8px 6px 0' }}>{v.variant}</td>
+                  <td style={{ padding: '6px 8px' }}>{v.sent}</td>
+                  <td style={{ padding: '6px 8px' }}>{v.replied}</td>
+                  <td style={{ padding: '6px 8px', fontWeight: 600 }}>
+                    {v.enough_data
+                      ? `${v.reply_rate}%`
+                      : <span style={{ color: '#fcd34d', fontWeight: 400 }}>too few sends to tell</span>}
+                  </td>
+                  <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{v.enough_data ? `${v.open_rate}%` : '—'}</td>
+                  <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{v.avg_words || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {!replyCheckEnabled && (
         <div style={{ background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', fontSize: '13px', color: '#94a3b8' }}>

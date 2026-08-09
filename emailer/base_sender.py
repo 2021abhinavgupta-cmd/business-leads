@@ -122,51 +122,113 @@ class BaseSender:
         )
 
         flaws = analysis.get("flaws", [])
+        variant = config.EMAIL_VARIANT
 
-        body_lines = [
-            f"Hi {contact_name},\n",
-            f"{opening_line}\n",
-        ]
+        # "Hi Acme Dental Care Team," is a visible mail-merge tell, and the
+        # generic name is the COMMON case (contact discovery usually can't
+        # find a real person). A bare "Hi there," reads as a human writing
+        # quickly; a company name in the salutation reads as a list.
+        greeting = f"Hi {contact_name}," if self._is_a_real_person_name(contact_name, company) else "Hi there,"
 
-        if flaws:
-            for flaw in flaws:
-                if "paragraph" in flaw:
-                    body_lines.append(f"{flaw.get('paragraph', '')}\n")
-                else:
-                    # Fallback for old AI responses
-                    body_lines.append(f"{flaw.get('headline', '')}")
-                    body_lines.append(
-                        f"{flaw.get('detail', '')} This means {flaw.get('impact', '')}.\n"
-                    )
+        body_lines = [f"{greeting}\n", f"{opening_line}\n"]
 
-        body_lines.extend([
-            "I've been helping brands fix exactly these things.",
-            "Worth a quick 10 minute call this week?\n",
-            f"{your_name}",
-        ])
+        # The "short" variant sends ONE flaw instead of all 3-4. The AI is
+        # asked for the most severe first, so [0] is the strongest card.
+        # Rationale: the full version runs ~220-260 words and reads as four
+        # consecutive criticisms of a stranger's business, where cold email
+        # that gets replies is typically 50-125. This is a hypothesis, not a
+        # fact — which is exactly why it ships as a measurable variant rather
+        # than a silent rewrite. See db.get_variant_performance().
+        shown_flaws = flaws[:1] if variant == "short" else flaws
+
+        for flaw in shown_flaws:
+            if "paragraph" in flaw:
+                body_lines.append(f"{flaw.get('paragraph', '')}\n")
+            else:
+                # Fallback for old AI responses
+                body_lines.append(f"{flaw.get('headline', '')}")
+                body_lines.append(
+                    f"{flaw.get('detail', '')} This means {flaw.get('impact', '')}.\n"
+                )
+
+        body_lines.extend(self._closing_lines(variant, your_name))
 
         return subject, "\n".join(body_lines)
+
+    # Salutation fallbacks produced by enrichment/decision_maker.py when no
+    # real person could be found — "{Company} Team" or a bare "Team".
+    @staticmethod
+    def _is_a_real_person_name(contact_name: str, company: str) -> bool:
+        name = (contact_name or "").strip()
+        if not name:
+            return False
+        if name.lower() in {"team", "there"}:
+            return False
+        # "{Company} Team" — the generic personalised fallback.
+        if company and name.lower() == f"{company.strip().lower()} team":
+            return False
+        return not name.lower().endswith(" team")
+
+    def _closing_lines(self, variant: str, your_name: str) -> list[str]:
+        """
+        The ask.
+
+        The original was one hardcoded pair of lines on every email:
+        "I've been helping brands fix exactly these things." (an unevidenced
+        claim of competence from a stranger) followed by a request for a
+        10-minute call (a high-commitment ask on first contact). Both are
+        kept as the "classic" variant so the change is measurable rather than
+        assumed — see db.get_variant_performance().
+        """
+        if variant == "short":
+            # Lower-friction ask: something they receive, not something they
+            # have to schedule and show up to.
+            return [
+                "Want me to send over the short list of what I'd fix first? No call needed.\n",
+                f"{your_name}",
+            ]
+
+        proof = config.SOCIAL_PROOF_LINE.strip()
+        return [
+            proof or "I've been helping brands fix exactly these things.",
+            "Worth a quick 10 minute call this week?\n",
+            f"{your_name}",
+        ]
 
     def generate_followup(self, contact_name: str, stage: int, your_name: str) -> str:
         """
         Generate a short, punchy follow-up email.
         stage 1 = 3 days later, stage 2 = 6 days later.
+
+        Deliberately says nothing specific about WHAT was found. This copy is
+        hardcoded and has no access to the original audit — it receives only a
+        name and a stage number — so any concrete claim here is a guess that
+        will be wrong on a predictable share of sends, to people who have
+        already ignored one email.
+
+        Two such claims were live until 2026-08-09 and both were routinely
+        false: stage 1 asked whether they'd seen "the mobile website
+        screenshot I attached" when the attachment is always the DESKTOP
+        screenshot (`_audit.jpg`; the mobile capture is only ever fed to the
+        AI, never attached), and stage 2 referred to "your mobile site" and
+        "these UI issues" when the original email's flaws are just as often
+        performance, SEO, security, certificate expiry, broken links or NAP
+        mismatches. If follow-ups ever need to reference the real findings,
+        pass the original flaws in rather than reinstating a guess here.
         """
         if stage == 1:
             body_lines = [
                 f"Hi {contact_name},\n",
-                "Just bumping this up to the top of your inbox. Did you get a chance to see the mobile website screenshot I attached?",
-                "I know you're busy, but this is causing a direct loss in conversions.\n",
-                "Let me know if you have 10 minutes this week.",
-                f"\nBest,\n{your_name}",
+                "Just bumping this up in case it got buried. Did you get a chance to look at the screenshot and notes I sent?",
+                "Happy to walk through what I'd fix first, if it's useful.\n",
+                f"Best,\n{your_name}",
             ]
         else:
             body_lines = [
                 f"Hi {contact_name},\n",
-                "I'll stop bugging you after this! Just wanted to follow up one last time regarding your mobile site.",
-                "If fixing these UI issues is a priority for this quarter, I'd love to show you how we'd tackle it.",
+                "Last one from me, promise. If any of what I sent is worth acting on this quarter, I'm glad to show you how I'd approach it.",
                 "Either way, wishing you a great week ahead.\n",
-                f"\nCheers,\n{your_name}",
+                f"Cheers,\n{your_name}",
             ]
 
         return "\n".join(body_lines)

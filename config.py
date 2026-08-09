@@ -141,6 +141,28 @@ DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 # non-empty — see CLAUDE.md §8.
 CONTACT_THRESHOLD = int(os.getenv("CONTACT_THRESHOLD", "70"))
 
+# Which copy variant outgoing emails use. Recorded on every send
+# (email_history.variant) so reply rates can actually be compared — see
+# db.get_variant_performance().
+#   "classic" — every flaw the AI picked (3-4 paragraphs, ~220-260 words),
+#               the original unevidenced "I've been helping brands..." line,
+#               and a 10-minute-call ask. What was sent before 2026-08-09.
+#   "short"   — the single most severe flaw only, and a lower-friction ask
+#               (a list they receive, not a meeting they have to attend).
+# "short" is a HYPOTHESIS about what converts better on cold email, not a
+# measured fact — which is why both exist and the outcome is tracked instead
+# of one silently replacing the other. Default stays "classic" so behaviour
+# doesn't change until deliberately switched.
+EMAIL_VARIANT = os.getenv("EMAIL_VARIANT", "classic").strip().lower()
+
+# One line of real credibility placed just before the ask. The default copy
+# ("I've been helping brands fix exactly these things") names no client, no
+# result and no number — a stranger asserting competence, which carries
+# roughly no weight. Set this to something specific and TRUE, e.g.
+# "I did this for two dental clinics in Pune last month — both are now
+# loading in under 2s." Left unset, the original generic line is used.
+SOCIAL_PROOF_LINE = os.getenv("SOCIAL_PROOF_LINE", "")
+
 # === API Auth ===
 # Required header (X-API-Key) for all /api/* routes. If unset, the API is
 # wide open — set this before deploying anywhere reachable from the internet.
