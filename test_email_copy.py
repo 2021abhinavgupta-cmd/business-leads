@@ -221,3 +221,74 @@ def test_a_small_sample_is_flagged_as_not_enough_data(tmp_path, monkeypatch):
 def test_sends_predating_variant_tracking_are_bucketed_not_dropped(tmp_path, monkeypatch):
     db = _seed(tmp_path, monkeypatch, [("a", "", "body")])
     assert db.get_variant_performance()[0]["variant"] == "(unrecorded)"
+
+
+# ---------------------------------------------------------------------------
+# Prompt hygiene — a worked example is the strongest signal in a prompt, so
+# an example that breaks the prompt's own rules teaches the model to break
+# them. Added 2026-08-09.
+# ---------------------------------------------------------------------------
+
+def test_the_red_box_example_does_not_claim_accessibility_hurts_seo():
+    """
+    The old example ended "...invisible to screen readers, which is hurting
+    your SEO" — an accessibility problem asserted as an SEO one. That exact
+    unsupported leap produced a real false claim on a live lead.
+    """
+    from analyzer.ai_audit import AIAuditor
+    from scrapers.website import WebsiteData
+
+    web = WebsiteData(
+        url="https://example.com", reachable=True, load_time_ms=1200,
+        page_speed_score=55, seo_score=70, mobile_score=60,
+        has_cta=True, has_contact=True, has_testimonials=True, has_blog=True,
+        has_ssl=True, meta_title="Acme", meta_description="We do things",
+    )
+    prompt = AIAuditor._build_prompt("Acme", None, web)
+
+    assert "which is hurting your SEO" not in prompt
+    assert "do NOT claim an accessibility problem affects SEO" in prompt
+
+
+def test_prompt_examples_do_not_contain_the_dashes_they_forbid():
+    """
+    The prompt says "NEVER use hyphens (-) or dashes (—) anywhere in your
+    response", then demonstrated an em dash inside a quoted example of
+    desired output.
+    """
+    import re
+    from analyzer import ai_audit
+
+    source = open(ai_audit.__file__, encoding="utf-8").read()
+    examples = re.findall(r"\(e\.g\., '([^']+)'", source)
+    assert examples, "expected to find worked examples in the prompt"
+    for example in examples:
+        assert "\u2014" not in example, f"example demonstrates a forbidden em dash: {example[:70]}"
+
+
+def test_forbidden_dashes_are_detected_in_generated_copy(capsys):
+    from analyzer.ai_audit import AIAuditor
+
+    parsed = {"email_subject": "s", "opening_line": "o",
+              "flaws": [{"paragraph": "Your site is slow \u2014 that costs you customers."}]}
+    warning = AIAuditor._check_forbidden_dashes(parsed, "Acme")
+    capsys.readouterr()
+    assert warning is not None
+    assert "\u2014" in warning
+
+
+def test_clean_copy_produces_no_dash_warning(capsys):
+    from analyzer.ai_audit import AIAuditor
+
+    parsed = {"email_subject": "s", "opening_line": "o",
+              "flaws": [{"paragraph": "Your site is slow and that costs you customers."}]}
+    assert AIAuditor._check_forbidden_dashes(parsed, "Acme") is None
+    capsys.readouterr()
+
+
+def test_the_dash_check_is_collected_into_review_warnings():
+    import inspect
+    from analyzer.ai_audit import AIAuditor
+
+    source = inspect.getsource(AIAuditor.analyze_lead)
+    assert "_check_forbidden_dashes" in source

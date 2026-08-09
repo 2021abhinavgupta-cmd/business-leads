@@ -186,6 +186,7 @@ class AIAuditor:
                     self._verify_grounding(parsed, prompt, company),
                     self._verify_visual_claims(parsed, company, image_path),
                     self._check_spam_trigger_words(parsed, company),
+                    self._check_forbidden_dashes(parsed, company),
                     self._check_body_length(parsed, company, has_image=bool(image_path)),
                 ) if w]
                 parsed["review_warnings"] = review_warnings
@@ -316,6 +317,45 @@ class AIAuditor:
             print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
             return message
         return None
+
+    # Characters the prompt explicitly forbids ("NEVER use hyphens (-) or
+    # dashes (—) anywhere in your response"), so that the copy reads like a
+    # person typing quickly rather than like generated text.
+    _FORBIDDEN_DASHES = ("—", "–", "-")
+
+    @staticmethod
+    def _check_forbidden_dashes(parsed: dict, company: str) -> str | None:
+        """
+        Verify the no-dashes instruction was actually followed.
+
+        Worth checking rather than trusting, for two reasons. First, nothing
+        verified it before — it was one instruction among a dozen competing
+        CRITICAL INSTRUCTIONs. Second, and more importantly, **the prompt
+        itself is written in em dashes**: nearly every instruction line uses
+        one, and until 2026-08-09 so did the red-box worked example. A model
+        mirrors the style of what it is shown, so a rule stated in prose that
+        the prose then violates is a weak rule fighting a strong
+        demonstration. Cheap, deterministic, no API call.
+
+        Log-and-flag only, like every other check here — an em dash is a tone
+        problem, not a false claim, and blocking a send over one would be
+        worse than the dash.
+        """
+        subject = parsed.get("email_subject", "") or ""
+        opening = parsed.get("opening_line", "") or ""
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        full_text = f"{subject} {opening} {paragraphs}"
+
+        found = sorted({d for d in AIAuditor._FORBIDDEN_DASHES if d in full_text})
+        if not found:
+            return None
+
+        message = (
+            f"Copy contains dash character(s) {found}, which the prompt forbids — "
+            "em dashes in particular read as generated text rather than a person typing."
+        )
+        print(f"[AIAuditor] WARNING: email for '{company}' contains forbidden dash character(s) {found}.")
+        return message
 
     # Below this, an embedded screenshot dominates the message and the
     # text:image ratio itself reads as spammy to some filters regardless of
@@ -902,7 +942,20 @@ class AIAuditor:
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If a flaw includes a specific number (score, ms, word count), QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
             "If any [ACCESSIBILITY] flaws are in the list, mention the specific violation by name.\n"
-            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot (e.g., 'I attached a screenshot of your site—the red box highlights a button that is completely invisible to screen readers, which is hurting your SEO').\n"
+            # This example previously demonstrated two things it forbids
+            # elsewhere: it contained an em dash (the no-dashes rule three
+            # lines above), and it ended "...invisible to screen readers,
+            # which is hurting your SEO" — an accessibility problem asserted
+            # as an SEO one, which is exactly the unsupported leap that
+            # produced a real false claim on a live lead (tubersstudio.com,
+            # see CLAUDE.md §8). A worked example is the strongest signal in
+            # a prompt, so an example that breaks the rules teaches the model
+            # to break them.
+            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot "
+            "(e.g., 'I attached a screenshot of your homepage. The red box is around a button that screen "
+            "readers cannot announce at all, so customers using one have no way to find it'). "
+            "Describe only what the flaw text actually says. Do NOT add a consequence it does not state, "
+            "and in particular do NOT claim an accessibility problem affects SEO or Google ranking.\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
             "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
             # The visual instruction is deliberately split in two. It used to
