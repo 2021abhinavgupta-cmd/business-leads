@@ -141,6 +141,16 @@ DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 # non-empty — see CLAUDE.md §8.
 CONTACT_THRESHOLD = int(os.getenv("CONTACT_THRESHOLD", "70"))
 
+# Re-check the drafted email's factual claims against the live site before the
+# draft is accepted (analyzer/claim_verifier.py). Every other accuracy check
+# reads the same audit data the drafting model read, so a claim that was wrong
+# BEFORE the AI saw it — a mis-parsed phone number, a mis-probed link, a
+# desktop measurement labelled as mobile — is invisible to all of them. This
+# is the only check that goes back to the source, and it caught all three of
+# those on a real lead. Costs one page fetch, up to 25 link probes and two
+# PageSpeed calls per drafted lead, and no model tokens. Set to 0 to disable.
+VERIFY_CLAIMS_LIVE = os.getenv("VERIFY_CLAIMS_LIVE", "1") not in ("0", "false", "False", "")
+
 # Which copy variant outgoing emails use. Recorded on every send
 # (email_history.variant) so reply rates can actually be compared — see
 # db.get_variant_performance().

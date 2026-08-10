@@ -404,6 +404,51 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
                     pass
                 await page.wait_for_timeout(10000)
 
+                # Web fonts settle AFTER networkidle on plenty of sites (a font
+                # requested from inside a stylesheet that itself loaded late),
+                # and text rendered mid-swap either shows in the fallback face
+                # or, during the block period, not at all. document.fonts.ready
+                # is the browser's own "all @font-face loads have resolved"
+                # signal, so this waits for the real thing rather than guessing
+                # with another sleep.
+                try:
+                    await page.evaluate("() => document.fonts.ready")
+                except Exception:
+                    pass
+
+                # Scroll the full height and come back. Entrance animations
+                # (AOS/GSAP/Framer and every theme that ships one) hold their
+                # elements at opacity 0 until an IntersectionObserver fires,
+                # and lazy-loaded images do not decode until they approach the
+                # viewport — neither happens for a browser that never scrolls,
+                # so the screenshot captures placeholders and invisible text
+                # that a real visitor never sees. Measured on
+                # namasteyogaclasses.com: 22 elements at opacity 0 before this
+                # pass, 11 after. Best-effort — never fail the audit over it.
+                try:
+                    await page.evaluate(
+                        """async () => {
+                            const step = window.innerHeight;
+                            const height = document.body.scrollHeight;
+                            for (let y = 0; y < height; y += step) {
+                                window.scrollTo(0, y);
+                                await new Promise(r => setTimeout(r, 150));
+                            }
+                            window.scrollTo(0, 0);
+                        }"""
+                    )
+                    await page.wait_for_timeout(2000)
+                except Exception:
+                    pass
+
+                # Can this browser draw text AT ALL? A container with no font
+                # packages installed renders images and shapes normally while
+                # every text node comes out blank, which is indistinguishable
+                # from a genuine design flaw to the vision model and produces
+                # an attached screenshot of the prospect's site with nothing
+                # written on it. See the fonts-* block in the Dockerfile.
+                text_renderable = await _can_render_text(page)
+
                 # --- 1. Take screenshot ---
                 screenshot_bytes = await page.screenshot(full_page=False)
 
@@ -557,6 +602,7 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             "pages_audited": [p["label"] for p in pages_checked],
             "mobile_image_path": mobile_filepath,
             "real_web_vitals": real_web_vitals,
+            "text_renderable": text_renderable,
         }
 
         return filepath, html_content, extra_audit_data
@@ -779,6 +825,82 @@ async def _check_stretched_images(page) -> int:
         return 0
 
 
+async def _can_render_text(page) -> bool:
+    """
+    True if this browser can actually draw text.
+
+    Measures a hidden probe span in each generic family. When no font packages
+    are installed — the default for python:*-slim, which is what this project
+    deploys on — the glyphs have no outlines and every run collapses to zero
+    width, so the page screenshots with images and colours intact and not one
+    word visible. Nothing downstream can tell that apart from a site whose
+    text genuinely doesn't show, so it has to be measured rather than assumed.
+
+    Returns True on any error: an unverifiable probe must not be reported as
+    a rendering failure.
+    """
+    try:
+        width = await page.evaluate(
+            """() => {
+                const probe = document.createElement('span');
+                probe.textContent = 'ABCDEFGabcdefg0123456789';
+                probe.style.cssText = 'position:absolute;left:-9999px;top:0;'
+                    + 'visibility:hidden;font-size:48px;white-space:nowrap;';
+                document.body.appendChild(probe);
+                let widest = 0;
+                for (const family of ['serif', 'sans-serif', 'monospace']) {
+                    probe.style.fontFamily = family;
+                    widest = Math.max(widest, probe.getBoundingClientRect().width);
+                }
+                probe.remove();
+                return widest;
+            }"""
+        )
+    except Exception as exc:
+        print(f"[Visuals] Font-rendering probe failed (assuming text renders): {exc}")
+        return True
+
+    # 24 characters at 48px cannot legitimately measure under ~50px unless
+    # nothing is being drawn.
+    if width < 50:
+        print(
+            f"[Visuals] WARNING: this browser cannot render text (probe width {width}px). "
+            "The screenshot will show images but no words, and any visual critique of it "
+            "would be describing the container's missing fonts, not the site. "
+            "Install the fonts-* packages listed in the Dockerfile."
+        )
+        return False
+    return True
+
+
+# Hosts that refuse automated clients regardless of whether the link works.
+# Their 400/403/429 says "you are not a browser", not "this link is dead", but
+# the probe cannot tell the difference and the flaw copy that results tells a
+# business owner their Facebook link is broken when it opens fine for every
+# real visitor. Live-verified on yogahouse.in: of 111 assets probed, the only
+# failure was facebook.com/theyogahousemumbai, which returns 400 to BOTH HEAD
+# and GET, so the existing GET retry cannot rescue it. This gets worse from a
+# datacenter IP like the Railway deploy, where more of these refuse outright.
+#
+# Excluded rather than probed-and-ignored: they occupy slots in the capped
+# asset sample, so probing them costs coverage of links we can actually judge.
+_BOT_HOSTILE_HOSTS = (
+    "facebook.com", "fb.com", "instagram.com", "linkedin.com", "twitter.com",
+    "x.com", "tiktok.com", "pinterest.com", "threads.net", "whatsapp.com",
+    "wa.me", "t.me",
+)
+
+
+def _is_bot_hostile(url: str) -> bool:
+    """True if *url* points at a host known to block automated requests."""
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower().removeprefix("www.")
+    return any(host == h or host.endswith("." + h) for h in _BOT_HOSTILE_HOSTS)
+
+
 async def _check_broken_assets(page, context) -> tuple[list, int]:
     """
     Check for broken links and images on the page.
@@ -793,8 +915,27 @@ async def _check_broken_assets(page, context) -> tuple[list, int]:
     checked = 0
     try:
         # Extract all links and images
+        # `a.href` is the DOM-RESOLVED absolute URL, so <a href="#content">
+        # arrives here as "https://site.com/#content" and sails through a
+        # startsWith('http') filter as if it were an ordinary outbound link.
+        # It then gets probed, and any hiccup on that request reports the
+        # page's own skip-link as broken — live-observed on yogahouse.in,
+        # where the drafted email told the owner "the anchor link to your
+        # content section goes nowhere" about a link that returns 200 and
+        # cannot go anywhere but the current page. Compare against the raw
+        # attribute so same-page fragments are excluded at the source.
         assets = await page.evaluate("""() => {
+            const isSamePageFragment = (a) => {
+                const raw = a.getAttribute('href') || '';
+                if (raw.startsWith('#')) return true;
+                try {
+                    const u = new URL(a.href);
+                    return u.hash && (u.origin + u.pathname + u.search)
+                        === (location.origin + location.pathname + location.search);
+                } catch (e) { return false; }
+            };
             const links = Array.from(document.querySelectorAll('a[href]'))
+                .filter(a => !isSamePageFragment(a))
                 .map(a => ({type: 'link', url: a.href, text: a.textContent.trim().substring(0, 50)}))
                 .filter(l => l.url.startsWith('http'));
             const images = Array.from(document.querySelectorAll('img[src]'))
@@ -802,6 +943,8 @@ async def _check_broken_assets(page, context) -> tuple[list, int]:
                 .filter(i => i.url.startsWith('http'));
             return [...links.slice(0, 15), ...images.slice(0, 10)];
         }""")
+
+        assets = [a for a in assets if not _is_bot_hostile(a["url"])]
         
         # Check each asset with a HEAD request first (fast, no body download).
         # Some servers/WAFs specifically reject or rate-limit HEAD probes from

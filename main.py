@@ -128,6 +128,7 @@ async def process_single_lead(lead: dict) -> str:
         mobile_image_path=mobile_image_path,
         rating=rating,
         reviews_count=reviews_count,
+        gbp_phone=str(lead.get("Phone", "") or ""),
     )
     if not analysis:
         print(f"  AI audit failed for {company}")

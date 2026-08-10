@@ -86,9 +86,55 @@ _BUSINESS_SCHEMA_TYPES = {
     "realestateagent", "attorney", "accountingservice",
 }
 
+# The previous pattern ended in `\d{3,4}[\s\-.]?\d{3,4}`, so it could only
+# consume 8 digits after the country code — one short of the "+91 86559 30022"
+# grouping that is the single most common way an Indian mobile is written.
+# It silently dropped the final digit, and since nap_check.normalise_phone
+# compares the LAST 8 digits, a truncated capture shifts the whole comparison
+# window: "+91 86559 30022" normalised to 65593002 instead of 55930022, so a
+# site whose number matched its Google listing exactly was reported as a
+# mismatch. Live-verified against yogahouse.in.
+#
+# This pattern takes 1-3 further digit groups of up to 6 digits each instead
+# of a fixed 4+4 tail, and the digit-count bounds below reject the long runs
+# (GSTINs, years, prices) that a looser pattern would otherwise sweep up.
 _PHONE_PATTERN = re.compile(
-    r"(\+?\d{1,4}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}"
+    r"(?<!\d)"                      # not mid-way through a longer digit run
+    r"(?:\+\d{1,3}[\s\-.]?)?"       # optional country code
+    r"(?:\(\d{2,5}\)|\d{2,5})"      # first group, optionally bracketed STD code
+    r"(?:[\s\-.]?\d{2,6}){1,3}"     # 1-3 further groups
+    r"(?!\d)"
 )
+
+# E.164 allows at most 15 digits; 8 is the shortest run worth treating as a
+# phone number rather than a coincidence.
+_MIN_PHONE_DIGITS = 8
+_MAX_PHONE_DIGITS = 15
+
+# How much homepage copy to keep. Was 3000, which cut the page off before its
+# footer on any site of normal length — and the footer is exactly where the
+# NAP facts live (phone, address, hours). Live-verified on yogahouse.in: the
+# phone sits at character 6263 of 6659, so neither the drafting model nor the
+# grounding judge could ever see the number the email was making claims about.
+# Readability is still scored on the first _READABILITY_SAMPLE_CHARS so that
+# signal is unaffected by the widening.
+_HOMEPAGE_TEXT_CHARS = 8000
+_READABILITY_SAMPLE_CHARS = 3000
+
+
+def _extract_phones(text: str) -> list[str]:
+    """
+    Phone numbers found in *text*, whole rather than truncated.
+
+    The regex is deliberately permissive about grouping, so the digit-count
+    bounds — not the pattern — are what keep years, prices and tax IDs out.
+    """
+    found = []
+    for match in _PHONE_PATTERN.finditer(text or ""):
+        candidate = match.group(0).strip()
+        if _MIN_PHONE_DIGITS <= len(re.sub(r"\D", "", candidate)) <= _MAX_PHONE_DIGITS:
+            found.append(candidate)
+    return found
 _EMAIL_PATTERN = re.compile(
     r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
 )
@@ -117,6 +163,18 @@ _METRIC_BOUNDS = {
     "cls": (0, 10),          # Google's own "good/needs improvement/poor" scale tops out around 0.25-1
     "tbt_ms": (0, 60_000),
     "inp_ms": (1, 60_000),
+}
+
+
+# Appended to the LCP flaw so the measurement carries the device it was taken
+# on into the prompt. Without it the AI is free to attach a desktop number to
+# a sentence about mobile visitors, which is what happened on yogahouse.in.
+# Phrased as plain fact rather than a caveat, because this text is quoted more
+# or less verbatim into copy a business owner reads.
+_LCP_MEASURED_ON = {
+    "CrUX": " for real visitors over the last 28 days",
+    "real_web_vitals": " on a desktop browser over a fast connection, so phone visitors will be slower still",
+    "lighthouse": " on a simulated mobile phone over a slow-4G connection",
 }
 
 
@@ -164,6 +222,11 @@ class WebsiteData:
     perf_timing: dict = field(default_factory=dict)
     lighthouse_scores: dict = field(default_factory=dict)
     visual_flaw_context: str = ""
+    # Phone numbers found on the page, verbatim. Carried through so the NAP
+    # claim in a draft can be checked against what the site actually shows
+    # rather than against a derived boolean — a mismatch flaw asserts a
+    # specific fact about the page, and nothing downstream could see the page.
+    site_phones: list[str] = field(default_factory=list)
     flaws: list[Flaw] = field(default_factory=list)
     # Which audit signals actually produced data on this run, keyed by
     # signal name -> "ok" | "no_data" | "failed". Every check in this
@@ -350,7 +413,11 @@ class WebsiteScraper:
         # security headers, and a real crawl-based SEO pass (pyseoanalyzer).
         has_structured_data = self._check_structured_data(html)
         has_business_schema = self._check_business_schema_type(html) if has_structured_data else False
-        readability_score = self._check_readability(parsed["homepage_text"])
+        # Scored on the same leading slice as before homepage_text was widened,
+        # so the readability threshold keeps its calibration.
+        readability_score = self._check_readability(
+            parsed["homepage_text"][:_READABILITY_SAMPLE_CHARS]
+        )
         security_flaws = self._check_security_headers(extra.get("response_headers", {}), has_ssl)
         seo_page = await self._run_pyseoanalyzer(url)
         robots_blocked, robots_checked = await self._check_robots_disallow_all(url)
@@ -365,6 +432,14 @@ class WebsiteScraper:
         # an unreachable robots.txt -> "not blocked"), so without this the
         # AI would be free to imply those areas are fine when they were
         # simply never measured.
+        # A browser that cannot draw text screenshots the site with every word
+        # missing, so the image is evidence of the container's font setup and
+        # not of the page. Recorded as a failed signal so the visual critique
+        # is suppressed rather than describing our own rendering as the
+        # prospect's design problem.
+        if extra.get("text_renderable") is False:
+            signal_status["screenshot_text_rendering"] = "no_data"
+
         signal_status["security_headers"] = "ok" if extra.get("response_headers") else "no_data"
         signal_status["broken_links"] = "ok" if extra.get("checked_links") else "no_data"
         signal_status["robots_txt"] = "ok" if robots_checked else "no_data"
@@ -419,6 +494,23 @@ class WebsiteScraper:
 
         real_wv = extra.get("real_web_vitals") or {}
 
+        # Which source each metric actually came from. The three sources do
+        # NOT measure the same thing, and the difference is large enough to
+        # change what the number means:
+        #
+        #   CrUX            real visitors, real devices and networks
+        #   real_web_vitals our Playwright browser: DESKTOP, unthrottled, on a
+        #                   datacenter connection — a best case, not a typical one
+        #   lighthouse      lab run, mobile form factor with slow-4G throttling
+        #                   (PAGESPEED_URL is called with strategy=mobile)
+        #
+        # Live-verified on yogahouse.in: real_web_vitals-class desktop LCP was
+        # 4.1s while throttled mobile LCP was 15.9s. A drafted email quoted the
+        # ~5s figure and told the owner it was what "visitors on mobile or
+        # slower connections" experience. The number was real; the device it
+        # was attributed to was not. _build_flaws uses this to say which.
+        metric_sources: dict[str, str] = {}
+
         def _pick(metric: str):
             """Per-metric, not all-or-nothing: CrUX -> real measured -> lab.
 
@@ -433,6 +525,7 @@ class WebsiteScraper:
                 if not _is_metric_plausible(metric, value):
                     print(f"[Audit] Discarding implausible {metric}={value} from {source_name} for {url} — falling through to the next source instead of reporting it.")
                     continue
+                metric_sources[metric] = source_name
                 return value
             return None
 
@@ -499,6 +592,7 @@ class WebsiteScraper:
             mobile_score=mobile_score,
             best_practices_score=lighthouse_scores.get("best_practices", 0),
             lcp_ms=lcp_ms,
+            lcp_source=metric_sources.get("lcp_ms", ""),
             cls=cls,
             tbt_ms=tbt_ms,
             inp_ms=inp_ms,
@@ -543,6 +637,7 @@ class WebsiteScraper:
             meta_description=parsed["meta_description"],
             h1_tags=parsed["h1_tags"],
             homepage_text=parsed["homepage_text"],
+            site_phones=parsed.get("site_phones") or [],
             company_context=company_context,
             technologies=technologies,
             instagram_url=parsed.get("instagram_url", ""),
@@ -775,12 +870,11 @@ class WebsiteScraper:
         # Testimonials detection
         has_testimonials = any(kw in page_text for kw in _TESTIMONIAL_KEYWORDS)
 
-        # Contact detection — phone or email on page.
-        # finditer (not findall): _PHONE_PATTERN has an optional capture group
-        # for the country code, so findall would return just that group's text
-        # instead of the whole number. The full matches are what the NAP
-        # consistency check compares against the Google listing.
-        site_phones = [m.group(0) for m in _PHONE_PATTERN.finditer(page_text)]
+        # Contact detection — phone or email on page. _extract_phones returns
+        # whole numbers and applies the digit-count bounds; these are what the
+        # NAP consistency check compares against the Google listing, so a
+        # truncated capture here becomes a false mismatch claim in the email.
+        site_phones = _extract_phones(page_text)
         has_contact = bool(site_phones or _EMAIL_PATTERN.search(page_text))
 
         # Blog detection — any anchor href containing blog-like paths
@@ -823,13 +917,14 @@ class WebsiteScraper:
                 has_menu_or_pricing = True
                 break
 
-        # Homepage text (converted to LLM-ready Markdown, truncated to 3000 chars).
+        # Homepage text (converted to LLM-ready Markdown, truncated to
+        # _HOMEPAGE_TEXT_CHARS).
         # Crawl4AI's own markdown output keeps raw [text](url) link syntax (unlike
         # the markdownify fallback, which strips anchors via strip=['a']) — strip
         # it here so link noise doesn't skew the readability score or distract the
         # AI's personalization/opening-line generation.
         clean_markdown = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", markdown_text)
-        homepage_text = clean_markdown[:3000]
+        homepage_text = clean_markdown[:_HOMEPAGE_TEXT_CHARS]
 
         # Instagram link extraction
         instagram_url = ""
@@ -1164,6 +1259,7 @@ class WebsiteScraper:
         mobile_score: int,
         best_practices_score: int,
         lcp_ms: int | None = None,
+        lcp_source: str = "",
         inp_ms: int | None = None,
         cls: float | None = None,
         tbt_ms: int | None = None,
@@ -1221,7 +1317,7 @@ class WebsiteScraper:
         # Thresholds are Google's own "good" cutoffs.
         if lcp_ms is not None and lcp_ms > 2500:
             sev = "critical" if lcp_ms > 4000 else "high"
-            flaws.append(Flaw("performance", sev, f"Largest Contentful Paint takes {lcp_ms / 1000:.1f}s to render (Google's 'good' threshold is 2.5s) — the main hero content is visibly slow to appear."))
+            flaws.append(Flaw("performance", sev, f"Largest Contentful Paint takes {lcp_ms / 1000:.1f}s to render{_LCP_MEASURED_ON.get(lcp_source, '')} (Google's 'good' threshold is 2.5s) — the main hero content is visibly slow to appear."))
 
         if cls is not None and cls > 0.1:
             sev = "high" if cls > 0.25 else "medium"

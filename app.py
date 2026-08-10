@@ -391,6 +391,7 @@ async def audit_lead(
             mobile_image_path=(extra_audit_data or {}).get("mobile_image_path"),
             rating=req.rating,
             reviews_count=req.reviews_count,
+            gbp_phone=req.gbp_phone,
         )
 
         image_url = None

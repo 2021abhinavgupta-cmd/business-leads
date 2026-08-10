@@ -25,6 +25,21 @@ WORKDIR /app
 # shells out to the `lighthouse` CLI binary — without a `node` executable in
 # this final image, every Lighthouse run silently fails (falls through to
 # the PageSpeed API fallback, or to hardcoded 0 scores if that also fails).
+#
+# The fonts-* packages are NOT optional polish. python:3.11-slim ships with no
+# fonts whatsoever, and this dependency list was hand-written rather than taken
+# from `playwright install --with-deps`, so it omitted them. Chromium then has
+# nothing to rasterize text with: images, shapes and colours render normally
+# while EVERY text node comes out blank. Live-observed on namasteyogaclasses.com
+# — the audit screenshot showed the hero photo and buttons but no headline, no
+# nav labels and no logo wordmark, and that image is both attached to the
+# outgoing email and fed to the vision model, which then has an invisible-text
+# "design flaw" to describe on a site that renders perfectly for real visitors.
+#
+# fonts-indic and fonts-noto-core specifically because the leads are Indian
+# businesses: Devanagari copy is common and Liberation/DejaVu do not cover it,
+# so without these the same blank-text failure recurs on any Marathi or Hindi
+# page even once Latin text works.
 RUN apt-get update && apt-get install -y \
     libnss3 \
     libnspr4 \
@@ -39,6 +54,11 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     libgbm1 \
     libasound2 \
+    fonts-liberation \
+    fonts-dejavu-core \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
+    fonts-indic \
     curl \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

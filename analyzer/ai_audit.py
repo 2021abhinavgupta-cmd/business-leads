@@ -18,6 +18,7 @@ import google.generativeai as genai
 import openai
 
 import config
+from analyzer import claim_verifier
 from analyzer.flaws import compute_score
 from scrapers.instagram import InstagramData
 from scrapers.website import WebsiteData
@@ -29,6 +30,14 @@ from scrapers.website import WebsiteData
 # (CONTACT_THRESHOLD env var) rather than a hardcoded constant.
 # ---------------------------------------------------------------------------
 CONTACT_THRESHOLD = config.CONTACT_THRESHOLD
+
+# How much homepage copy reaches the model. Was 2000, which on a site of
+# ordinary length stopped before the footer — where the phone, address and
+# hours live. Every NAP claim is a claim about that footer, so neither the
+# drafting model nor the grounding judge could see the evidence for or
+# against the sentence they were writing. scrapers/website.py now keeps
+# _HOMEPAGE_TEXT_CHARS (8000) of text; this is what we spend on the prompt.
+_PROMPT_HOMEPAGE_CHARS = 6000
 
 # Low, near-deterministic temperature — this task is "quote exact numbers
 # and facts from the data you were given" not creative writing, so we want
@@ -117,6 +126,7 @@ class AIAuditor:
         mobile_image_path: str | None = None,
         rating: str = "",
         reviews_count: int = 0,
+        gbp_phone: str = "",
     ) -> dict | None:
         """
         Analyse a lead's digital presence via an AI fallback chain.
@@ -189,6 +199,17 @@ class AIAuditor:
                     self._check_forbidden_dashes(parsed, company),
                     self._check_body_length(parsed, company, has_image=bool(image_path)),
                 ) if w]
+
+                # Everything above reads the same audit data the drafting
+                # model read, so a claim that was already wrong when it
+                # reached the prompt passes all of them. This one goes back
+                # to the live site instead — the only check that can catch a
+                # bad number the AI faithfully repeated.
+                review_warnings.extend(
+                    claim_verifier.verify_claims(
+                        parsed, getattr(web, "url", ""), gbp_phone=gbp_phone
+                    )
+                )
                 parsed["review_warnings"] = review_warnings
                 # overall_score drives should_contact()/the skip-if-too-good
                 # decision, but as returned by the AI it's pure self-report
@@ -776,6 +797,14 @@ class AIAuditor:
         may *demand* a visual critique — see the visual instruction in
         _build_prompt for why demanding one unconditionally is a bug.
         """
+        # A screenshot taken by a browser with no usable fonts shows the
+        # layout and images but not a single word. Every "visual" observation
+        # available from that image is really an observation about our own
+        # container, so there is no visual evidence here no matter what else
+        # fired — see _can_render_text in analyzer/visuals.py.
+        if (getattr(web, "signal_status", None) or {}).get("screenshot_text_rendering") == "no_data":
+            return False
+
         if getattr(web, "visual_flaw_context", None):
             return True
         for flaw in getattr(web, "flaws", None) or []:
@@ -841,12 +870,25 @@ class AIAuditor:
             if web.seo_score
             else "- SEO score: COULD NOT BE MEASURED (measurement tool failed — do NOT mention an SEO score at all, and never claim it scored 0)\n"
         )
+        # Phone numbers lifted verbatim off the page. Stated explicitly rather
+        # than left for the model to find in the homepage text, because the
+        # NAP flaw asserts a specific fact about these numbers and both the
+        # drafting model and _verify_grounding need something to check it
+        # against — on yogahouse.in the number sat at character 6263 of the
+        # page, past every slice anything downstream could see.
+        phones_line = (
+            f"- Phone numbers printed on the site: {', '.join(web.site_phones[:5])}\n"
+            if getattr(web, "site_phones", None)
+            else ""
+        )
+
         web_section = (
             f"WEBSITE DATA:\n"
             f"{speed_line}"
             f"{seo_line}"
             f"- Tech Stack: {web.technologies}\n"
-            f"- Homepage text: {web.homepage_text[:2000]}\n"
+            f"{phones_line}"
+            f"- Homepage text: {web.homepage_text[:_PROMPT_HOMEPAGE_CHARS]}\n"
         )
 
         # --- Performance Timing (real browser data — context/color, not a flaw itself) ---
