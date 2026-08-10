@@ -112,6 +112,47 @@ def _audit_cache_set(website: str, data: dict) -> None:
     _audit_cache[_audit_cache_key(website)] = (time.monotonic(), data)
 
 
+# How recent a draft has to be to count as "produced by the audit that just
+# appeared to fail" — see /api/audit/recover below. Reuses _AUDIT_CACHE_TTL
+# rather than choosing an independent number: it's already this codebase's
+# definition of "still the same audit, don't treat it as new."
+_RECOVERABLE_DRAFT_WINDOW_SECONDS = _AUDIT_CACHE_TTL
+
+
+def _is_recoverable(draft: dict | None) -> bool:
+    """
+    True if *draft* is fresh enough to be the product of a just-failed
+    /api/audit call rather than an unrelated older draft for the same site.
+
+    /api/audit is a single request that runs for a couple of minutes with
+    nothing in this codebase that cancels the coroutine if the client's
+    connection drops mid-request — Starlette does not do this on its own for
+    a plain response, only if the handler explicitly polls
+    request.is_disconnected(). A dropped connection (an edge/proxy idle
+    timeout, a flaky network) therefore looks like a failed audit to the
+    browser while the backend keeps running to completion and saves a real
+    draft anyway — live-reported: the UI showed "Audit failed" for a lead
+    that had a usable draft sitting in the database the whole time.
+
+    Without this recency check, /api/audit/recover would also hand back a
+    genuinely stale, unrelated draft from a much earlier audit whenever the
+    CURRENT attempt failed for a real reason (the AI truly erroring, say),
+    making a real failure look like a success. sqlite's CURRENT_TIMESTAMP is
+    UTC, so this compares against datetime.utcnow() rather than
+    datetime.now() — unlike the day-granularity staleness check in
+    /api/send, which is forgiving enough that datetime.now()'s local-vs-UTC
+    skew doesn't matter, a minute-granularity check needs to get this right.
+    """
+    if not draft or not draft.get("timestamp"):
+        return False
+    try:
+        drafted_at = datetime.fromisoformat(str(draft["timestamp"]))
+    except (TypeError, ValueError):
+        return False
+    age_seconds = (datetime.utcnow() - drafted_at).total_seconds()
+    return age_seconds <= _RECOVERABLE_DRAFT_WINDOW_SECONDS
+
+
 # Live progress for an in-flight /api/audit run, keyed by the same
 # normalized URL as the cache above. /api/audit is one long blocking POST
 # (a full audit is a couple of minutes now that timeouts were raised for
@@ -494,6 +535,32 @@ async def audit_lead(
         # Always clear, including on the error path — a failed audit must
         # not leave a stale "still running" entry the frontend keeps polling.
         _progress_clear(req.website)
+
+@app.get("/api/audit/recover")
+async def recover_audit(
+    website: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(30, 60)),
+):
+    """
+    Was a draft actually produced for *website* despite /api/audit appearing
+    to fail? See _is_recoverable's docstring for why this can happen — the
+    short version is that a dropped connection mid-request looks identical
+    to a real failure to the browser, but the backend has already finished
+    and paid for the whole pipeline by the time that happens.
+
+    The frontend calls this from handleAudit's catch block before settling
+    on 'failed', so a client-side network hiccup doesn't throw away real,
+    already-completed work or send the human on a wasted, cost-incurring
+    retry of an audit that in fact succeeded.
+    """
+    try:
+        draft = await asyncio.to_thread(db.get_draft_by_website, website)
+        if not _is_recoverable(draft):
+            return {"draft": None}
+        return {"draft": draft}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send")
 async def send_email(

@@ -408,6 +408,20 @@ h1 {
   border-radius: 8px;
 }
 
+/* A dropped connection made a backend-completed audit LOOK failed to the
+   browser — see _is_recoverable in app.py. This explains the recovered draft
+   and why its score cards read "n/a" (that data lives only on the in-memory
+   /api/audit response, not the persisted draft row). */
+.recovered-note {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #1e3a8a;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+}
+
 .image-removed-note button {
   background: none;
   border: none;

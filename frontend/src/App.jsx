@@ -243,9 +243,44 @@ function App() {
       });
     } catch (err) {
       console.error(`Audit failed for ${lead.Company}:`, err.response?.data?.detail || err.message, err);
+
+      // /api/audit runs for a couple of minutes with nothing that cancels it
+      // if the client's connection drops mid-request — the backend finishes
+      // and saves a real draft regardless of whether this response ever
+      // arrives. A network hiccup here can therefore look identical to a
+      // real failure while a usable draft already exists; check for it
+      // before showing "failed" and sending the human on a wasted, paid-for
+      // retry of an audit that in fact already succeeded.
+      let recovered = null;
+      if (lead.Website) {
+        try {
+          const r = await axios.get(`${API_BASE}/api/audit/recover`, { params: { website: lead.Website } });
+          recovered = r.data?.draft || null;
+        } catch {
+          // The recovery check itself failing just means "can't tell" —
+          // fall through to the normal failed state below.
+        }
+      }
+
       setLeads(prev => {
         const updatedLeads = [...prev];
-        updatedLeads[index].auditState = 'failed';
+        if (recovered) {
+          updatedLeads[index].auditState = 'done';
+          updatedLeads[index].auditData = {
+            email: recovered.target_email,
+            subject: recovered.subject,
+            body: recovered.body,
+            image_url: recovered.image_url || null,
+            review_warnings: recovered.review_warnings || [],
+            // Not stored on the draft row, so left absent — the card
+            // already renders these as "n/a" rather than a wrong 0.
+            page_speed_score: null,
+            seo_score: null,
+            recoveredAfterDroppedConnection: true,
+          };
+        } else {
+          updatedLeads[index].auditState = 'failed';
+        }
         updatedLeads[index].auditProgress = null;
         return updatedLeads;
       });
@@ -548,6 +583,14 @@ function App() {
 
               {lead.auditState === 'done' && lead.auditData && (
                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="audit-results">
+                  {lead.auditData.recoveredAfterDroppedConnection && (
+                    <div className="recovered-note">
+                      The connection dropped while this audit was running, but it finished on the
+                      server and this draft is real — recovered automatically. Speed/SEO scores
+                      aren't stored with the draft, so they show as n/a here; re-run the audit if
+                      you need them.
+                    </div>
+                  )}
                   <div className="stats-row">
                     {/* A 0 here means the measurement tool failed, not that the
                         site genuinely scored zero — showing "0/100" made a
