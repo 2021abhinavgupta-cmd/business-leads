@@ -40,16 +40,21 @@ def _run_sync(url: str) -> list[dict]:
             [binary, "--reporter", "json", "--timeout", "40000", url],
             capture_output=True, text=True, timeout=50,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
         # See analyzer/html_validate.py's matching comment — OSError (not
         # just FileNotFoundError) so the Windows "WinError 193" shim-exec
         # failure falls through to npx instead of being silently swallowed.
+        print(f"[Pa11y] Local CLI unavailable ({e}) — trying npx.")
         try:
             result = subprocess.run(
                 ["npx", "--yes", "pa11y", "--reporter", "json", "--timeout", "40000", url],
                 capture_output=True, text=True, timeout=60,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as npx_error:
+            # Logged, not swallowed — an empty list is exactly what a clean
+            # page produces, so a silent return here is indistinguishable
+            # from "no accessibility errors found".
+            print(f"[Pa11y] npx fallback also failed ({npx_error}) — skipping the Pa11y pass for this lead.")
             return []
         except Exception as e:
             print(f"[Pa11y] npx fallback failed: {e}")

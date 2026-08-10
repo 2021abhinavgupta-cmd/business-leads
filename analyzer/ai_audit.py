@@ -232,8 +232,18 @@ class AIAuditor:
                 # (skipped). That's the default state on a Windows dev box
                 # and reachable in Docker, so real leads were being thrown
                 # away for want of a measurement, with nothing logged.
+                # "unavailable" is excluded deliberately: it marks a source
+                # that has no data for this site and never will (CrUX field
+                # data on a low-traffic local business), which is not the
+                # same as a measurement that failed. Counting it made
+                # partial_coverage non-empty on nearly every lead, which
+                # disabled the skip-if-healthy rule below and made the UI's
+                # coverage banner permanent — see WebsiteData.signal_status.
                 signal_status = getattr(web, "signal_status", None) or {}
-                degraded = [name for name, state in signal_status.items() if state != "ok"]
+                degraded = [
+                    name for name, state in signal_status.items()
+                    if state not in ("ok", "unavailable")
+                ]
                 parsed["partial_coverage"] = degraded
                 if degraded:
                     print(f"[AIAuditor] '{company}' audited with partial signal coverage (no data from: {', '.join(sorted(degraded))}) — score {parsed['overall_score']} is an upper bound, real flaw count may be higher.")

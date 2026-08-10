@@ -40,7 +40,7 @@ def _run_sync(html: str) -> dict:
                 [binary, "--formatter", "json", tmp_path],
                 capture_output=True, text=True, timeout=20,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as e:
             # OSError (not just FileNotFoundError) — on Windows, executing
             # the node_modules/.bin shim directly raises "WinError 193: %1
             # is not a valid Win32 application" rather than a not-found
@@ -49,12 +49,20 @@ def _run_sync(html: str) -> dict:
             # machines instead of falling through to npx. Same underlying
             # Windows/Linux parity gotcha already documented for Lighthouse
             # in CLAUDE.md — works fine in the Docker/Linux deploy target.
+            print(f"[HTMLValidate] Local CLI unavailable ({e}) — trying npx.")
             try:
                 result = subprocess.run(
                     ["npx", "--yes", "html-validate", "--formatter", "json", tmp_path],
                     capture_output=True, text=True, timeout=30,
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired) as npx_error:
+                # Logged, not swallowed. This used to return {} in total
+                # silence, which is indistinguishable in the audit output
+                # from "the HTML is valid" — the reader of a Partial coverage
+                # banner had no way to tell whether the tool broke or the
+                # page is clean. Lighthouse has always logged its equivalent
+                # failure; these two did not.
+                print(f"[HTMLValidate] npx fallback also failed ({npx_error}) — skipping HTML validation for this lead.")
                 return {}
 
         # html-validate exits non-zero when it finds errors — expected,

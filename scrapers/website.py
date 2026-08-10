@@ -229,7 +229,20 @@ class WebsiteData:
     site_phones: list[str] = field(default_factory=list)
     flaws: list[Flaw] = field(default_factory=list)
     # Which audit signals actually produced data on this run, keyed by
-    # signal name -> "ok" | "no_data" | "failed". Every check in this
+    # signal name -> "ok" | "no_data" | "failed" | "unavailable".
+    #
+    # "unavailable" is distinct on purpose and does NOT count as degraded
+    # coverage: it means the source has no data to give for this site and
+    # never will, as opposed to "we tried to measure and could not". CrUX is
+    # the case it exists for — Google publishes field data only for origins
+    # with enough real Chrome traffic, which almost no small local business
+    # has. Counting that as a failure made partial_coverage non-empty on
+    # nearly every lead, which disabled should_contact()'s skip-if-healthy
+    # rule outright and made the UI banner permanent, so it stopped carrying
+    # information. Same reasoning as the applicability gating on
+    # nap_consistency/ssl_expiry below: "not applicable" is not "failed".
+    #
+    # Every check in this
     # pipeline degrades to an empty value on failure and lets the audit
     # continue, which is correct behaviour (one dead tool shouldn't sink a
     # lead) but leaves no trace that it happened — two separate bugs
@@ -551,7 +564,18 @@ class WebsiteScraper:
         # Lighthouse's lab numbers looks identical to working. Tracked
         # explicitly so a silent regression here is visible immediately.
         signal_status["real_web_vitals"] = "ok" if real_wv else "no_data"
-        signal_status["crux_field_data"] = "ok" if crux else "no_data"
+
+        # "unavailable", NOT "no_data" — see the signal_status docstring on
+        # WebsiteData. Google only publishes CrUX for origins with enough
+        # real Chrome traffic to be statistically meaningful, and essentially
+        # no lead this tool targets clears that bar (verified on
+        # yogawithrajani.com: "No field data published ... not enough
+        # real-user traffic"). Recording that as a failed signal made
+        # partial_coverage non-empty on virtually every lead, which silently
+        # disabled should_contact()'s skip-if-healthy rule entirely and put a
+        # "Partial coverage" banner on every single card until it read as
+        # background noise. Nothing failed here: the data does not exist.
+        signal_status["crux_field_data"] = "ok" if crux else "unavailable"
         signal_status["axe_core"] = "ok" if extra.get("accessibility_violations") else "no_data"
         signal_status["screenshot"] = "ok" if extra.get("visual_flaw_context") or extra.get("pages_audited") else "no_data"
         signal_status["mobile_screenshot"] = "ok" if extra.get("mobile_image_path") else "no_data"
@@ -1240,10 +1264,73 @@ class WebsiteScraper:
             return {}
 
     @staticmethod
+    def _patch_pyseoanalyzer_headers() -> None:
+        """
+        Give pyseoanalyzer a real browser's headers before it fetches.
+
+        It ships a module-level `Http` singleton whose PoolManager is built
+        with `{"User-Agent": "Mozilla/5.0"}` and nothing else. That truncated
+        UA is a well-known bot signature, and mod_security — which fronts a
+        large share of shared-hosting sites, i.e. exactly the small-business
+        leads this tool targets — answers it with **406 Not Acceptable**.
+        Live-verified on yogawithrajani.com: the bare UA gets 406 and 226
+        bytes, the full Chrome UA gets 200 and 39,419 bytes from the same URL
+        in the same second. Adding an Accept header does not help; the
+        truncated UA itself is what gets rejected.
+
+        The failure was invisible: pyseoanalyzer reports the rejection as
+        zero pages with an EMPTY errors list, so the caller's `except` never
+        fires and the audit just quietly loses its SEO crawler. Since
+        compute_score subtracts per detected flaw, losing a source silently
+        RAISES the reported SEO score.
+
+        Patching the singleton is deliberate — the headers are baked into the
+        PoolManager at construction, so there is no supported way to pass
+        per-request headers through `analyze()`.
+        """
+        try:
+            import certifi
+            from urllib3 import PoolManager, Timeout
+
+            from pyseoanalyzer import http as seo_http
+
+            seo_http.http.http = PoolManager(
+                timeout=Timeout(connect=5.0, read=15.0),
+                cert_reqs="CERT_REQUIRED",
+                ca_certs=certifi.where(),
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                    ),
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+        except Exception as e:
+            # Upstream may restructure this module. Losing the patch means
+            # going back to the old behaviour, not breaking the audit.
+            print(f"[SEOAnalyzer] Could not patch request headers ({e}) — bot-blocked sites may return no data.")
+
+    @staticmethod
     def _run_pyseoanalyzer_sync(url: str) -> dict:
         from pyseoanalyzer import analyze as seo_analyze
+
+        WebsiteScraper._patch_pyseoanalyzer_headers()
         output = seo_analyze(url, follow_links=False)
         pages = output.get("pages") or []
+        if not pages:
+            # Zero pages with no exception raised. Logged because this is
+            # what a bot-block looks like from here, and it is otherwise
+            # indistinguishable from the check having run and found nothing.
+            print(
+                f"[SEOAnalyzer] Returned no pages for {url} "
+                f"(errors: {output.get('errors') or 'none reported'}) — "
+                "the site most likely refused the request."
+            )
         return pages[0] if pages else {}
 
     # ------------------------------------------------------------------
