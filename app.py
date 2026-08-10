@@ -205,6 +205,13 @@ class SendRequest(BaseModel):
     # gate in /api/send fails closed: a caller that doesn't know about the
     # check can't accidentally bypass it.
     acknowledge_warnings: bool = False
+    # Whether to attach the audit screenshot. Defaults to True so existing
+    # callers are unaffected, but the Drafts UI can turn it off per draft —
+    # the capture is not always worth sending (a mid-animation frame, a
+    # carousel caught between slides, or a page our browser rendered badly),
+    # and until now there was no way to send the copy without also sending
+    # the picture.
+    attach_screenshot: bool = True
 
 maps_scraper = GoogleMapsScraper()
 web_scraper = WebsiteScraper()
@@ -554,7 +561,9 @@ async def send_email(
 
         # Use existing screenshot (same collision-safe name generate_audit_screenshot wrote)
         image_path = None
-        if req.company and req.website:
+        if not req.attach_screenshot:
+            print(f"[Send] Sending to {req.email} without the screenshot — attachment disabled for this draft.")
+        elif req.company and req.website:
             candidate_path = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(req.company, req.website))
             if os.path.exists(candidate_path):
                 image_path = candidate_path

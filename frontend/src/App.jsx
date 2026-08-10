@@ -316,7 +316,10 @@ function App() {
         subject: lead.auditData.subject,
         body: lead.auditData.body,
         company: lead.Company,
-        website: lead.Website
+        website: lead.Website,
+        // Undefined until the human clicks "Remove image", so the default
+        // stays "attach it" exactly as before.
+        attach_screenshot: lead.auditData.attach_screenshot !== false
       });
 
       // null means the human saw the warnings and chose not to send.
@@ -349,7 +352,8 @@ function App() {
         subject: draft.subject,
         body: draft.body,
         company: draft.company,
-        website: draft.website
+        website: draft.website,
+        attach_screenshot: draft.attach_screenshot !== false
       });
 
       if (!result) {
@@ -571,13 +575,40 @@ function App() {
                   )}
                   <div className="email-draft">
                     <h4><FileText size={16} /> Drafted Email</h4>
-                    {lead.auditData.image_url && (
+                    {lead.auditData.image_url && lead.auditData.attach_screenshot !== false && (
                       <div style={{ marginBottom: '16px', textAlign: 'center' }}>
                         <img src={lead.auditData.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
+                        <button
+                          className="remove-image-btn"
+                          onClick={() => {
+                            const newLeads = [...leads];
+                            newLeads[i].auditData.attach_screenshot = false;
+                            setLeads(newLeads);
+                          }}
+                        ><X size={14} /> Remove image</button>
+                      </div>
+                    )}
+                    {lead.auditData.image_url && lead.auditData.attach_screenshot === false && (
+                      <div className="image-removed-note">
+                        Screenshot will not be attached.{' '}
+                        <button onClick={() => {
+                          const newLeads = [...leads];
+                          newLeads[i].auditData.attach_screenshot = true;
+                          setLeads(newLeads);
+                        }}>Put it back</button>
                       </div>
                     )}
                     <p className="target-email"><strong>To:</strong> {lead.auditData.email || 'Email not found (will fail)'}</p>
-                    <p className="subject"><strong>Subject:</strong> {lead.auditData.subject}</p>
+                    <label className="subject-label">Subject</label>
+                    <input
+                      className="subject-editor"
+                      value={lead.auditData.subject || ''}
+                      onChange={(e) => {
+                        const newLeads = [...leads];
+                        newLeads[i].auditData.subject = e.target.value;
+                        setLeads(newLeads);
+                      }}
+                    />
                     <textarea 
                       className="email-body-editor" 
                       value={lead.auditData.body} 
@@ -676,12 +707,39 @@ function App() {
                 <div className="auditing-state"><Loader2 className="spin" size={24} /><p>Sending via SES...</p></div>
               ) : (
                 <div className="email-draft" style={{ marginTop: '16px' }}>
-                  {draft.image_url && (
+                  {draft.image_url && draft.attach_screenshot !== false && (
                     <div style={{ marginBottom: '16px', textAlign: 'center' }}>
                       <img src={draft.image_url} alt="Website Screenshot" style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: '8px', border: '2px solid #ef4444' }} />
+                      <button
+                        className="remove-image-btn"
+                        onClick={() => {
+                          const newDrafts = [...drafts];
+                          newDrafts[i] = { ...draft, attach_screenshot: false };
+                          setDrafts(newDrafts);
+                        }}
+                      ><X size={14} /> Remove image</button>
                     </div>
                   )}
-                  <p className="subject" style={{marginBottom: '8px'}}><strong>Subject:</strong> {draft.subject}</p>
+                  {draft.image_url && draft.attach_screenshot === false && (
+                    <div className="image-removed-note">
+                      Screenshot will not be attached.{' '}
+                      <button onClick={() => {
+                        const newDrafts = [...drafts];
+                        newDrafts[i] = { ...draft, attach_screenshot: true };
+                        setDrafts(newDrafts);
+                      }}>Put it back</button>
+                    </div>
+                  )}
+                  <label className="subject-label">Subject</label>
+                  <input
+                    className="subject-editor"
+                    value={draft.subject || ''}
+                    onChange={(e) => {
+                      const newDrafts = [...drafts];
+                      newDrafts[i] = { ...draft, subject: e.target.value };
+                      setDrafts(newDrafts);
+                    }}
+                  />
                   <textarea 
                     className="email-body-editor" 
                     value={draft.body} 

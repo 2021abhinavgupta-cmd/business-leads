@@ -1561,11 +1561,36 @@ class WebsiteScraper:
             # count is now distinct broken URLs, not one entry per page it
             # happens to appear on.
             count = len(broken_links)
+            link_count = sum(1 for b in broken_links if b.get("type") == "link")
+            image_count = count - link_count
+
+            # Spell out links and images separately. The old wording was
+            # "N broken link(s)/image(s)", which the AI reliably compressed
+            # to "N broken links" — live-observed on yogabysuravi.com, where
+            # the drafted subject line read "Your Site Has 9 Broken Links"
+            # for a count that included images.
+            parts = []
+            if link_count:
+                parts.append(f"{link_count} broken link{'s' if link_count != 1 else ''}")
+            if image_count:
+                parts.append(f"{image_count} broken image{'s' if image_count != 1 else ''}")
+            summary = " and ".join(parts)
+
+            # The example is one arbitrary entry, and naming a URL invites the
+            # AI to describe that specific page from imagination — on the same
+            # lead it told the owner their Marine Lines page "just returns a
+            # dead end" when that URL answers 200 to every method and user
+            # agent tried. The URL is still given because a concrete example
+            # is what makes the flaw actionable, but the instruction now
+            # bounds what may be said about it.
             example = broken_links[0].get("url", "")
             flaws.append(Flaw(
                 "content",
                 "high" if count > 5 else "medium",
-                f"{count} broken link(s)/image(s) found across the pages we checked, e.g. {example}",
+                f"{summary} found across the pages we checked, e.g. {example} — "
+                f"state the count and cite that URL verbatim if you mention one, but do NOT "
+                f"describe what any specific page does, name it in your own words, or claim to "
+                f"have visited it; we recorded a failed request, not the contents of the page.",
             ))
 
         if robots_blocked:
