@@ -59,28 +59,33 @@ export const NICHES = [
   'Textile Manufacturer', 'Machine Shop',
 ];
 
-// Indian metros and tier-2 cities, since that's where the SES sending domain
-// and the existing Maps queries are focused.
+// Maharashtra only. The rest of India was removed deliberately: these are
+// suggestions for a human picking a search area, and a list that spans the
+// whole country makes the operator scroll past 70 irrelevant cities to reach
+// the dozen actually worked. Still a `datalist`, so any city typed by hand
+// continues to work exactly as before — this narrows the suggestions, not
+// what the scraper accepts.
+//
+// Ordered roughly by lead density (MMR and Pune first), then the rest of the
+// state grouped by region so a nearby city is easy to find.
 export const CITIES = [
-  // Maharashtra
-  'Mumbai', 'Navi Mumbai', 'Thane', 'Pune', 'Nagpur', 'Nashik', 'Kolhapur',
-  'Solapur', 'Chhatrapati Sambhajinagar', 'Amravati', 'Nanded', 'Sangli',
-  // Metros
-  'Delhi', 'New Delhi', 'Gurgaon', 'Noida', 'Faridabad', 'Ghaziabad',
-  'Bangalore', 'Hyderabad', 'Chennai', 'Kolkata', 'Ahmedabad', 'Surat',
-  // North
-  'Jaipur', 'Lucknow', 'Kanpur', 'Chandigarh', 'Ludhiana', 'Amritsar',
-  'Jalandhar', 'Dehradun', 'Agra', 'Varanasi', 'Meerut', 'Jodhpur', 'Udaipur',
-  'Srinagar', 'Jammu', 'Shimla',
-  // West
-  'Vadodara', 'Rajkot', 'Bhavnagar', 'Jamnagar', 'Gandhinagar', 'Goa',
-  'Panaji', 'Indore', 'Bhopal', 'Gwalior', 'Jabalpur', 'Raipur',
-  // South
-  'Coimbatore', 'Madurai', 'Tiruchirappalli', 'Salem', 'Kochi',
-  'Thiruvananthapuram', 'Kozhikode', 'Thrissur', 'Mysore', 'Mangalore',
-  'Hubli', 'Belgaum', 'Vijayawada', 'Visakhapatnam', 'Guntur', 'Warangal',
-  'Puducherry',
-  // East
-  'Bhubaneswar', 'Cuttack', 'Patna', 'Ranchi', 'Jamshedpur', 'Dhanbad',
-  'Guwahati', 'Siliguri', 'Durgapur', 'Asansol', 'Shillong', 'Agartala',
+  // Mumbai Metropolitan Region
+  'Mumbai', 'Navi Mumbai', 'Thane', 'Kalyan', 'Dombivli', 'Vasai', 'Virar',
+  'Mira Bhayandar', 'Bhiwandi', 'Ulhasnagar', 'Ambernath', 'Badlapur',
+  'Panvel', 'Karjat', 'Alibag',
+  // Pune region
+  'Pune', 'Pimpri Chinchwad', 'Hinjewadi', 'Wakad', 'Baner', 'Kharadi',
+  'Hadapsar', 'Talegaon', 'Chakan', 'Lonavala', 'Baramati',
+  // North Maharashtra
+  'Nashik', 'Malegaon', 'Jalgaon', 'Dhule', 'Nandurbar', 'Ahmednagar',
+  'Shirdi', 'Sinnar',
+  // Marathwada
+  'Chhatrapati Sambhajinagar', 'Nanded', 'Latur', 'Dharashiv', 'Beed',
+  'Jalna', 'Parbhani', 'Hingoli',
+  // Vidarbha
+  'Nagpur', 'Amravati', 'Akola', 'Chandrapur', 'Yavatmal', 'Wardha',
+  'Gondia', 'Bhandara', 'Buldhana', 'Washim', 'Gadchiroli',
+  // Western Maharashtra / Konkan
+  'Kolhapur', 'Sangli', 'Satara', 'Solapur', 'Ichalkaranji', 'Miraj',
+  'Karad', 'Ratnagiri', 'Chiplun', 'Sindhudurg', 'Sawantwadi',
 ];
