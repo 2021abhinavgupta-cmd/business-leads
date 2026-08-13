@@ -598,6 +598,15 @@ function App() {
                     <div className="stat-box"><Zap size={16} /><span>Speed</span><strong>{lead.auditData.page_speed_score ? `${lead.auditData.page_speed_score}/100` : 'n/a'}</strong></div>
                     <div className="stat-box"><BarChart size={16} /><span>SEO</span><strong>{lead.auditData.seo_score ? `${lead.auditData.seo_score}/100` : 'n/a'}</strong></div>
                   </div>
+                  {lead.auditData.budget_signal && (
+                    <div
+                      className={`budget-badge budget-badge--${lead.auditData.budget_signal.tier}`}
+                      title={lead.auditData.budget_signal.signals.join(' · ') || 'No specific signals detected'}
+                    >
+                      <DollarSign size={14} />
+                      <span>{lead.auditData.budget_signal.label}</span>
+                    </div>
+                  )}
                   {lead.auditData.signal_status && Object.values(lead.auditData.signal_status).some(s => s !== 'ok') && (
                     <div style={{
                       background: '#fffbeb',

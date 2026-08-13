@@ -19,6 +19,7 @@ from emailer import get_sender
 from emailer.tracking import TRANSPARENT_GIF, hash_ip, looks_automated
 from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
+from analyzer.budget_signal import estimate_budget_fit
 from storage.sheets import SheetsStorage
 from storage import db
 from security_utils import validate_public_url, UnsafeURLError
@@ -525,6 +526,16 @@ async def audit_lead(
             # checks in analyzer/ai_audit.py) — previously only a server log
             # line, now surfaced so a flagged draft is visible before send.
             "review_warnings": analysis.get("review_warnings") or [],
+            # Prioritisation only, for the operator's own dashboard — never
+            # read by ai_audit.py or base_sender.py, so it structurally
+            # cannot leak into the drafted copy. See analyzer/budget_signal.py.
+            "budget_signal": estimate_budget_fit(
+                rating=req.rating,
+                reviews_count=req.reviews_count,
+                technologies=getattr(web_data, "technologies", None),
+                has_booking_widget=getattr(web_data, "has_booking_widget", False),
+                ig_followers=getattr(ig_data, "followers", None) if ig_data else None,
+            ),
         }
         if req.website:
             _audit_cache_set(req.website, result)

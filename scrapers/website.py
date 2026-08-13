@@ -227,6 +227,13 @@ class WebsiteData:
     # rather than against a derived boolean — a mismatch flaw asserts a
     # specific fact about the page, and nothing downstream could see the page.
     site_phones: list[str] = field(default_factory=list)
+    # Already computed for flaw generation (_build_flaws) but previously
+    # discarded with the rest of `parsed` once audit_website returned —
+    # exposed here because analyzer/budget_signal.py needs them too, and
+    # they're free: no new request, no new parsing, just not thrown away.
+    has_booking_widget: bool = False
+    has_click_to_call: bool = False
+    has_whatsapp_link: bool = False
     flaws: list[Flaw] = field(default_factory=list)
     # Which audit signals actually produced data on this run, keyed by
     # signal name -> "ok" | "no_data" | "failed" | "unavailable".
@@ -662,6 +669,9 @@ class WebsiteScraper:
             h1_tags=parsed["h1_tags"],
             homepage_text=parsed["homepage_text"],
             site_phones=parsed.get("site_phones") or [],
+            has_booking_widget=bool(parsed.get("has_booking_widget")),
+            has_click_to_call=bool(parsed.get("has_click_to_call")),
+            has_whatsapp_link=bool(parsed.get("has_whatsapp_link")),
             company_context=company_context,
             technologies=technologies,
             instagram_url=parsed.get("instagram_url", ""),

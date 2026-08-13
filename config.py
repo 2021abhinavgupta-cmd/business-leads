@@ -161,9 +161,17 @@ VERIFY_CLAIMS_LIVE = os.getenv("VERIFY_CLAIMS_LIVE", "1") not in ("0", "false", 
 #               (a list they receive, not a meeting they have to attend).
 # "short" is a HYPOTHESIS about what converts better on cold email, not a
 # measured fact — which is why both exist and the outcome is tracked instead
-# of one silently replacing the other. Default stays "classic" so behaviour
-# doesn't change until deliberately switched.
-EMAIL_VARIANT = os.getenv("EMAIL_VARIANT", "classic").strip().lower()
+# of one silently replacing the other. Default switched "classic" -> "short"
+# 2026-08-10: the founder independently reported the exact thing this
+# module's own docstring already flagged as a risk — "the email is
+# lengthy" — before any variant data existed to weigh in either direction.
+# Given a live, specific complaint about length, defaulting to the
+# ALREADY-BUILT shorter variant is the direct fix rather than waiting on
+# data that was never being collected anyway (see CLAUDE.md §8: engagement
+# tracking existed for weeks with every email structurally identical, so
+# variant is what makes an outcome attributable to a decision at all).
+# Override with EMAIL_VARIANT=classic to go back.
+EMAIL_VARIANT = os.getenv("EMAIL_VARIANT", "short").strip().lower()
 
 # One line of real credibility placed just before the ask. The default copy
 # ("I've been helping brands fix exactly these things") names no client, no

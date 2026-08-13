@@ -148,8 +148,8 @@ def test_short_variant_uses_a_lower_friction_ask(monkeypatch):
     assert "No call needed" in body
 
 
-def test_classic_variant_is_unchanged_by_default(monkeypatch):
-    """The default must not silently alter what was being sent before."""
+def test_the_classic_variant_itself_is_unchanged(monkeypatch):
+    """Explicitly selecting "classic" must still behave exactly as before."""
     monkeypatch.setattr(config, "EMAIL_VARIANT", "classic")
     monkeypatch.setattr(config, "SOCIAL_PROOF_LINE", "")
     _, body = _sender().generate_email("Acme", "Priya", _ANALYSIS, "Kshitij")
@@ -167,9 +167,15 @@ def test_a_configured_social_proof_line_replaces_the_generic_claim(monkeypatch):
     assert "I've been helping brands fix exactly these things." not in body
 
 
-def test_the_default_variant_is_classic():
+def test_the_default_variant_is_short():
+    """
+    Switched 2026-08-10: the founder independently reported the exact
+    length problem this module's own docstring had already flagged as a
+    risk, before any variant data existed. Override with EMAIL_VARIANT=
+    classic to go back.
+    """
     importlib.reload(config)
-    assert config.EMAIL_VARIANT == "classic"
+    assert config.EMAIL_VARIANT == "short"
 
 
 # ---------------------------------------------------------------------------

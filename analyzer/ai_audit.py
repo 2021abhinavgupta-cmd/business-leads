@@ -12,6 +12,7 @@ import re
 import base64
 
 import anthropic
+import textstat
 import warnings
 warnings.filterwarnings("ignore", module="google.generativeai")
 import google.generativeai as genai
@@ -198,6 +199,8 @@ class AIAuditor:
                     self._check_spam_trigger_words(parsed, company),
                     self._check_forbidden_dashes(parsed, company),
                     self._check_body_length(parsed, company, has_image=bool(image_path)),
+                    self._check_jargon_words(parsed, company),
+                    self._check_email_readability(parsed, company),
                 ) if w]
 
                 # Everything above reads the same audit data the drafting
@@ -410,6 +413,97 @@ class AIAuditor:
         if word_count < AIAuditor._MIN_BODY_WORD_COUNT:
             message = f"Only {word_count} words with an embedded screenshot attached — low text:image ratio can itself look spammy, review before sending."
             print(f"[AIAuditor] WARNING: email for '{company}' is {message[0].lower()}{message[1:]}")
+            return message
+        return None
+
+    # Terms that name a real, measured thing but mean nothing to the reader
+    # this email is actually for — a founder running a yoga studio or a
+    # dental clinic, not a web developer. Several of these come from this
+    # codebase's own flaw text: _build_flaws (scrapers/website.py) writes
+    # "Largest Contentful Paint takes X.Xs to render", and the prompt
+    # instructs the AI to quote flaw text's exact numbers — which means the
+    # jargon label is exactly as likely to survive into the email as the
+    # number is. The fix lives in the prompt (translate the LABEL, keep the
+    # number exact); this is the deterministic backstop that catches it when
+    # the instruction gets ignored, same belt-and-suspenders pattern as
+    # _check_spam_trigger_words/_check_forbidden_dashes.
+    #
+    # Kept short and unambiguous rather than exhaustive — a false positive
+    # here (flagging ordinary business language) trains you to ignore the
+    # warning; a missed jargon word just means one fewer flag on that draft.
+    _JARGON_TERMS = [
+        "largest contentful paint", "cumulative layout shift",
+        "total blocking time", "first contentful paint",
+        "time to first byte", "interaction to next paint",
+        "discernible text", "contrast ratio", "aria ", "aria-", " dom ",
+        "structured data", "schema markup", "canonical url", "hreflang",
+        "viewport meta", "z-index", "http header", "tls handshake",
+    ]
+
+    @staticmethod
+    def _check_jargon_words(parsed: dict, company: str) -> str | None:
+        """
+        Scan for technical labels a small-business owner wouldn't recognise.
+
+        Same collection pattern as every other check here: doesn't rewrite
+        anything, just flags it for a human to see before the send.
+        """
+        subject = parsed.get("email_subject", "") or ""
+        opening = parsed.get("opening_line", "") or ""
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        lower_text = f" {subject} {opening} {paragraphs} ".lower()
+
+        hits = [term.strip() for term in AIAuditor._JARGON_TERMS if term in lower_text]
+        if not hits:
+            return None
+
+        message = (
+            f"Contains technical term(s) {hits} that a non-technical founder likely won't "
+            "recognise — consider a plain-language rewrite before sending."
+        )
+        print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
+        return message
+
+    # Flesch Reading Ease below this reads as genuinely hard going for a
+    # skim-reading recipient — not "technical" exactly, just dense. 50 is
+    # "fairly difficult" on the standard scale (college-level prose); cold
+    # email that gets read on a phone between two other things should sit
+    # well above that. Reuses the same threshold semantics as
+    # scrapers/website.py's _check_readability, applied here to the email's
+    # OWN prose rather than the target site's.
+    _MIN_EMAIL_READABILITY = 50
+    _MIN_WORDS_FOR_EMAIL_READABILITY = 30
+
+    @staticmethod
+    def _check_email_readability(parsed: dict, company: str) -> str | None:
+        """
+        Flesch-score the drafted copy itself, not the site being audited.
+
+        A jargon-word scan (_check_jargon_words) only catches the specific
+        terms it knows to look for; a low Flesch score catches DENSE writing
+        in general — long sentences stacked with subordinate clauses read as
+        just as hard to skim as a technical term does, even with zero jargon
+        words in it.
+        """
+        opening = parsed.get("opening_line", "") or ""
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        text = f"{opening} {paragraphs}".strip()
+
+        if len(text.split()) < AIAuditor._MIN_WORDS_FOR_EMAIL_READABILITY:
+            return None
+
+        try:
+            score = textstat.flesch_reading_ease(text)
+        except Exception as e:
+            print(f"[AIAuditor] Email readability check failed (non-fatal) for '{company}': {e}")
+            return None
+
+        if score < AIAuditor._MIN_EMAIL_READABILITY:
+            message = (
+                f"Reads as dense (Flesch Reading Ease {score:.0f}, plain English is 60+) — "
+                "consider shorter sentences before sending to a non-technical founder."
+            )
+            print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
             return message
         return None
 
