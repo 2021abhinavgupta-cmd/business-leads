@@ -13,7 +13,23 @@ from scrapers.startup_dork import StartupDorkScraper
 from scrapers.apollo_free import ApolloFreeScraper
 from storage.sheets import SheetsStorage
 from warmup_send import run_warmup
+from emailer.reply_checker import check_replies
 import config
+
+
+def _safe_check_replies():
+    """
+    Wrapped so one bad IMAP session (a transient auth hiccup, a network
+    blip) logs and moves on rather than leaving the day's reply-check
+    silently skipped with no trace — and, more importantly, never crashes
+    the scheduler process itself, which would take the follow-up and
+    batch-send jobs down with it.
+    """
+    try:
+        summary = check_replies()
+        print(f"[Replies] Daily check: {summary}")
+    except Exception as e:
+        print(f"[Replies] Daily check failed (non-fatal): {e}")
 
 
 async def ingest_leads():
@@ -78,6 +94,25 @@ def start_scheduler():
         name="run_batch_weekdays"
     )
     
+    # 1b) Check for replies Mon-Fri at 8:55 AM IST, just before follow-ups
+    # run. run_followups() has no way to know a lead already replied unless
+    # this has run first — check_replies() is the only thing that marks a
+    # lead's Sheet row "replied" (see emailer/reply_checker.py), and without
+    # it a follow-up sequence would happily mail someone who already said
+    # yes or no. Gated on IMAP actually being configured so this doesn't
+    # fire (and log a failure every single day) on a deployment that never
+    # set it up — matches the WARMUP_ENABLED gating pattern just below.
+    if config.IMAP_HOST and config.IMAP_USER and config.IMAP_PASSWORD:
+        scheduler.add_job(
+            _safe_check_replies,
+            CronTrigger(day_of_week="mon-fri", hour=8, minute=55),
+            name="check_replies_weekdays",
+        )
+        print("Reply checking enabled: daily at 08:55 IST, before follow-ups.")
+    else:
+        print("Reply checking NOT configured (IMAP_HOST/IMAP_USER/IMAP_PASSWORD) — "
+              "follow-ups cannot detect replies automatically until this is set.")
+
     # 2) Send follow-ups Mon-Fri at 9:00 AM IST
     scheduler.add_job(
         lambda: asyncio.run(run_followups()),

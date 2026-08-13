@@ -128,6 +128,33 @@ def _match_to_sent_email(headers: dict, sent_by_msgid: dict, sent_by_address: di
     return sent_by_address.get(sender)
 
 
+def _mark_replied_in_sheet(target_email: str) -> None:
+    """
+    Best-effort: find this lead's row and set Status to "replied" so
+    run_followups stops sending it further follow-ups.
+
+    A module-level function (not inlined in check_replies) so tests can
+    monkeypatch it wholesale without needing real Sheets credentials — the
+    real SheetsStorage() is only constructed here, at call time, never at
+    import time. A Sheets API failure must not blow up the whole reply scan
+    over one row it couldn't update; the reply itself is still logged to
+    the local DB by the caller regardless of whether this succeeds.
+    """
+    if not target_email:
+        return
+    try:
+        from storage.sheets import SheetsStorage
+
+        sheets = SheetsStorage()
+        row = sheets.find_row_by_email(target_email)
+        if row:
+            sheets.mark_replied(row)
+        else:
+            print(f"[Replies] {target_email} replied but has no row in the sheet — nothing to mark.")
+    except Exception as e:
+        print(f"[Replies] Could not mark {target_email} as replied in the sheet: {e}")
+
+
 def check_replies(lookback_days: int | None = None) -> dict:
     """
     Scan the reply mailbox and record anything matching a sent email.
@@ -197,6 +224,14 @@ def check_replies(lookback_days: int | None = None) -> dict:
                     summary["auto_replies"] += 1
                 else:
                     summary["replies"] += 1
+                    # A genuine reply, not a bounce or an auto-responder, is
+                    # a decision — mark it in the Sheet, not just this local
+                    # table, because run_followups() (main.py) reads its
+                    # skip list from the Sheet's own Status column and has
+                    # no visibility into email_replies at all. Without this,
+                    # nothing stopped a follow-up going out to someone who
+                    # already said yes or no.
+                    _mark_replied_in_sheet(matched.get("target_email") or sender)
 
                 db.log_reply(
                     reply_message_id=reply_message_id,

@@ -78,4 +78,12 @@ RUN npm install --omit=dev
 RUN playwright install chromium
 
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Two Railway services run this exact image: the web app (default) and the
+# scheduler (scheduler.py — cron-fires lead ingestion, the daily send batch,
+# and follow-ups). Branching on SERVICE_ROLE instead of a second Dockerfile
+# keeps both services on one build, so a fix never has to be made twice.
+# Set SERVICE_ROLE=scheduler on the second service's env vars; leave it unset
+# on the web service. scheduler.py runs BlockingScheduler, so it stays alive
+# as a long-running process exactly like uvicorn does — nothing here exits.
+CMD ["sh", "-c", "if [ \"$SERVICE_ROLE\" = \"scheduler\" ]; then python scheduler.py; else uvicorn app:app --host 0.0.0.0 --port 8000; fi"]

@@ -200,6 +200,15 @@ class BaseSender:
         Generate a short, punchy follow-up email.
         stage 1 = 3 days later, stage 2 = 6 days later.
 
+        Three-email sequence by design (2026-08-10, on the founder's own
+        framing): email 1 states the problem (generate_email), stage 1 here
+        re-offers help, stage 2 asks for an explicit yes/no so the thread
+        actually closes instead of trailing off unanswered. Whether this
+        ever REACHES anyone depends on scheduler.py running as its own
+        always-on service and on run_followups() skipping anyone who already
+        replied (see main.py) — a follow-up sequence that mails someone who
+        already said yes or no is worse than no sequence at all.
+
         Deliberately says nothing specific about WHAT was found. This copy is
         hardcoded and has no access to the original audit — it receives only a
         name and a stage number — so any concrete claim here is a guess that
@@ -219,15 +228,15 @@ class BaseSender:
         if stage == 1:
             body_lines = [
                 f"Hi {contact_name},\n",
-                "Just bumping this up in case it got buried. Did you get a chance to look at the screenshot and notes I sent?",
-                "Happy to walk through what I'd fix first, if it's useful.\n",
+                "Wanted to follow up in case my earlier note got buried — still happy to help if it's useful.",
+                "I'm glad to walk through what I'd fix first, no pressure either way.\n",
                 f"Best,\n{your_name}",
             ]
         else:
             body_lines = [
                 f"Hi {contact_name},\n",
-                "Last one from me, promise. If any of what I sent is worth acting on this quarter, I'm glad to show you how I'd approach it.",
-                "Either way, wishing you a great week ahead.\n",
+                "Last note from me on this — just reply YES if it's worth a quick call, or NO and I'll leave it there.",
+                "Either way, thanks for reading, and wishing you a great week ahead.\n",
                 f"Cheers,\n{your_name}",
             ]
 
