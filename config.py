@@ -173,6 +173,30 @@ VERIFY_CLAIMS_LIVE = os.getenv("VERIFY_CLAIMS_LIVE", "1") not in ("0", "false", 
 # Override with EMAIL_VARIANT=classic to go back.
 EMAIL_VARIANT = os.getenv("EMAIL_VARIANT", "short").strip().lower()
 
+# data.gov.in's Open Government Data API — free, self-serve API key, no
+# payment ever involved (register at https://data.gov.in, "My Account" ->
+# "Generate API Key"). Feeds analyzer/mca_lookup.py: real financial data
+# (paid-up/authorized capital) for companies registered with India's
+# Ministry of Corporate Affairs, the strongest signal budget_signal.py can
+# get, when it applies. It usually doesn't: sole proprietorships (very
+# common for a single-location small business) have NO Ministry of
+# Corporate Affairs record at all, so this only ever fires for leads
+# registered as a Pvt Ltd/LLP. Unset by default — the lookup is skipped
+# entirely (not attempted, not logged as a miss) until both this key AND
+# MCA_COMPANY_MASTER_RESOURCE_ID are filled in.
+DATA_GOV_IN_API_KEY = os.getenv("DATA_GOV_IN_API_KEY", "").strip()
+
+# The specific dataset's resource ID on the OGD platform (the UUID that
+# appears in https://api.data.gov.in/resource/<this>). Deliberately NOT
+# hardcoded to a guessed value: resource IDs are catalog-specific and the
+# data.gov.in catalog page could not be verified against a live session
+# while this was written (returned 403 to an unauthenticated fetch). Find
+# yours from your own data.gov.in account's Company Master Data resource
+# page before setting this — a wrong ID means every lookup 404s and the
+# feature silently never fires, which is safe (see mca_lookup.py's
+# fail-closed design) but also silently useless until corrected.
+MCA_COMPANY_MASTER_RESOURCE_ID = os.getenv("MCA_COMPANY_MASTER_RESOURCE_ID", "").strip()
+
 # One line of real credibility placed just before the ask. The default copy
 # ("I've been helping brands fix exactly these things") names no client, no
 # result and no number — a stranger asserting competence, which carries

@@ -474,16 +474,38 @@ class AIAuditor:
     _MIN_EMAIL_READABILITY = 50
     _MIN_WORDS_FOR_EMAIL_READABILITY = 30
 
+    # New Dale-Chall raw score: measures VOCABULARY familiarity (percentage
+    # of words outside a fixed "commonly known" wordlist), not sentence
+    # length like Flesch does — genuinely complementary, not redundant.
+    # Calibrated empirically, not from the textbook grade-level table, which
+    # doesn't map cleanly onto short, single-sentence text: six real plain
+    # drafted-email SENTENCES scored 6.2-11.9, four genuinely jargon-heavy
+    # sentences scored 14.9-17.6. 13.0 sits with margin on both sides.
+    #
+    # Scored PER SENTENCE, not on the whole paragraph — a whole-paragraph
+    # average dilutes a single bad sentence into invisibility. Verified
+    # directly: "Your canonical URL is missing hreflang tags. This confuses
+    # search crawlers." scores a PASSING 62.8 on whole-text Flesch (short,
+    # simple sentence structure) and, embedded in an otherwise-plain
+    # paragraph, its Dale-Chall contribution gets averaged away too — but
+    # scored on its own, that one sentence is 15.3, cleanly above threshold.
+    # This is the realistic failure mode: a model mostly following the
+    # plain-language instruction with one jargon sentence slipped in, not a
+    # whole paragraph of it.
+    _MAX_EMAIL_DALE_CHALL = 13.0
+    _MIN_WORDS_PER_SENTENCE_TO_SCORE = 5
+
     @staticmethod
     def _check_email_readability(parsed: dict, company: str) -> str | None:
         """
-        Flesch-score the drafted copy itself, not the site being audited.
-
-        A jargon-word scan (_check_jargon_words) only catches the specific
-        terms it knows to look for; a low Flesch score catches DENSE writing
-        in general — long sentences stacked with subordinate clauses read as
-        just as hard to skim as a technical term does, even with zero jargon
-        words in it.
+        Score the drafted copy itself on two axes, not the site being
+        audited: Flesch, whole-text (sentence/word length — a few complex
+        sentences among many simple ones isn't "dense" overall, so averaging
+        is the right call here), and Dale-Chall, PER SENTENCE (vocabulary
+        familiarity — averaging would hide a single jargon sentence inside
+        an otherwise-plain paragraph). A jargon-word scan
+        (_check_jargon_words) only catches the specific terms it knows to
+        look for; these catch dense or obscure writing in general.
         """
         opening = parsed.get("opening_line", "") or ""
         paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
@@ -494,9 +516,26 @@ class AIAuditor:
 
         try:
             score = textstat.flesch_reading_ease(text)
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+            worst_sentence, worst_score = None, 0.0
+            for sentence in sentences:
+                if len(sentence.split()) < AIAuditor._MIN_WORDS_PER_SENTENCE_TO_SCORE:
+                    continue
+                dale_chall = textstat.dale_chall_readability_score(sentence)
+                if dale_chall > worst_score:
+                    worst_sentence, worst_score = sentence.strip(), dale_chall
         except Exception as e:
             print(f"[AIAuditor] Email readability check failed (non-fatal) for '{company}': {e}")
             return None
+
+        if worst_sentence and worst_score > AIAuditor._MAX_EMAIL_DALE_CHALL:
+            message = (
+                f"Contains a sentence with uncommon vocabulary for everyday reading "
+                f"(Dale-Chall {worst_score:.1f}): \"{worst_sentence[:100]}\" — consider simpler word choices "
+                "before sending to a non-technical founder."
+            )
+            print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
+            return message
 
         if score < AIAuditor._MIN_EMAIL_READABILITY:
             message = (

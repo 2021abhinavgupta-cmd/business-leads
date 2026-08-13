@@ -11,6 +11,15 @@ PR/news search costs real money per lead while returning almost nothing for
 a neighbourhood business that has never been written about. Querying an API
 per lead to reliably learn "no data" is a bad trade.
 
+One real, free, official signal DOES exist for the subset of leads that are
+registered as a company rather than a sole proprietorship: India's MCA
+(Ministry of Corporate Affairs) publishes paid-up/authorized capital as open
+government data via data.gov.in — see analyzer/mca_lookup.py. Added
+2026-08-10 on explicit request despite the coverage/risk caveats documented
+there (bulk-registry, exact-match-only, low hit rate for this lead
+population); wired in here as an optional `mca_match` param so the rest of
+this module works identically whether or not that lookup ever fires.
+
 Every signal here instead comes from data this pipeline ALREADY scrapes for
 other reasons, so this costs nothing extra — no new request, no new API,
 no new per-lead spend:
@@ -76,6 +85,19 @@ _TIER_LABELS = {
 }
 
 
+_INACTIVE_MCA_STATUSES = (
+    "strike off", "struck off", "dissolved", "amalgamated",
+    "under liquidation", "converted", "dormant",
+)
+
+
+def _format_inr(value) -> str | None:
+    try:
+        return f"₹{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return None
+
+
 def estimate_budget_fit(
     *,
     rating: float | str | None = None,
@@ -83,6 +105,7 @@ def estimate_budget_fit(
     technologies: list[str] | None = None,
     has_booking_widget: bool = False,
     ig_followers: int | None = None,
+    mca_match: dict | None = None,
 ) -> dict:
     """
     A rough {"tier": "established"|"growing"|"unclear", "signals": [...],
@@ -135,6 +158,24 @@ def estimate_budget_fit(
     if followers >= _HIGH_FOLLOWER_COUNT:
         points += 1
         signals.append(f"{followers:,} Instagram followers — meaningful reach")
+
+    # A confident MCA match (analyzer/mca_lookup.py) is real filed financial
+    # data, not a proxy — worth more than every other signal here combined,
+    # so it's scored high enough to guarantee "established" on its own. A
+    # dissolved/struck-off company is NOT scored positively (that status
+    # says the opposite of "can spend on this"), but also not scored
+    # negatively — stale MCA data plus a business that simply re-registered
+    # under a new entity is a real possibility, and asserting a negative
+    # from it would be a worse mistake than staying silent.
+    if mca_match:
+        status = (mca_match.get("status") or "").lower()
+        if not any(bad in status for bad in _INACTIVE_MCA_STATUSES):
+            points += 3
+            capital = _format_inr(mca_match.get("paidup_capital"))
+            detail = f" (paid-up capital {capital})" if capital else ""
+            signals.append(f"Registered with MCA as {mca_match.get('company_name') or 'a company'}{detail}")
+        else:
+            signals.append(f"MCA record found but status is '{mca_match.get('status')}' — not treated as a positive signal")
 
     if points >= 3:
         tier = "established"

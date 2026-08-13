@@ -278,12 +278,18 @@ class SheetsStorage:
         # Column N = 14
         self.sheet.update_cell(row_number, 14, body)
 
-    def mark_replied(self, row_number: int) -> None:
+    def mark_replied(self, row_number: int, sentiment: str = "") -> None:
         """
-        Update the lead's status to "replied".
+        Update the lead's status to "replied", or "replied-{sentiment}" when
+        a VADER sentiment classification is available (emailer/reply_checker.py)
+        — "positive"/"negative"/"neutral" — so the operator can tell a likely
+        yes from a likely no at a glance instead of opening every thread.
+        Any of these values is equally "not emailed" to run_followups()'s
+        `status == "emailed"` filter, so this doesn't change which leads stop
+        getting follow-ups, only what the stopped status says.
         """
         # Column O = 15
-        self.sheet.update_cell(row_number, 15, "replied")
+        self.sheet.update_cell(row_number, 15, f"replied-{sentiment}" if sentiment else "replied")
 
     def mark_unsubscribed(self, row_number: int) -> None:
         """

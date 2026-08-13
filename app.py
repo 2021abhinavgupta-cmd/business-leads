@@ -20,6 +20,7 @@ from emailer.tracking import TRANSPARENT_GIF, hash_ip, looks_automated
 from enrichment.decision_maker import DecisionMaker
 from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
 from analyzer.budget_signal import estimate_budget_fit
+from analyzer.mca_lookup import lookup_company as lookup_mca_company
 from storage.sheets import SheetsStorage
 from storage import db
 from security_utils import validate_public_url, UnsafeURLError
@@ -535,6 +536,10 @@ async def audit_lead(
                 technologies=getattr(web_data, "technologies", None),
                 has_booking_widget=getattr(web_data, "has_booking_widget", False),
                 ig_followers=getattr(ig_data, "followers", None) if ig_data else None,
+                # A no-op (returns None immediately) until DATA_GOV_IN_API_KEY
+                # and MCA_COMPANY_MASTER_RESOURCE_ID are both set — see
+                # analyzer/mca_lookup.py and config.py.
+                mca_match=await asyncio.to_thread(lookup_mca_company, req.company),
             ),
         }
         if req.website:

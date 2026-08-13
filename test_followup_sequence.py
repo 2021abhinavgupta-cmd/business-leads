@@ -74,7 +74,7 @@ class _FakeSheets:
     def find_row_by_email(self, email):
         return {"lead@acme.com": 7}.get(email.lower())
 
-    def mark_replied(self, row):
+    def mark_replied(self, row, sentiment=""):
         _FakeSheets.calls.append(row)
 
 
@@ -132,6 +132,12 @@ def _raw(**headers) -> bytes:
 
 class _FakeIMAP:
     messages: list = []
+    # message number (1-indexed) -> raw body bytes, for the SECOND fetch
+    # (BODY.PEEK[TEXT]) that check_replies now issues for a genuine reply.
+    # Empty/unset means "no body content", which scores as neutral sentiment
+    # and is-not-an-unsubscribe-request — the safe default for every test
+    # that isn't specifically about sentiment/opt-out content.
+    bodies: dict = {}
 
     def __init__(self, host, port):
         pass
@@ -146,7 +152,11 @@ class _FakeIMAP:
         return ("OK", [b" ".join(str(i).encode() for i in range(1, len(_FakeIMAP.messages) + 1))])
 
     def fetch(self, number, command):
-        return ("OK", [(b"1 (BODY[HEADER]", _FakeIMAP.messages[int(number) - 1]), b")"])
+        n = int(number)
+        if "TEXT" in command:
+            body = _FakeIMAP.bodies.get(n, b"")
+            return ("OK", [(b"1 (BODY[TEXT]", body), b")"])
+        return ("OK", [(b"1 (BODY[HEADER]", _FakeIMAP.messages[n - 1]), b")"])
 
     def logout(self):
         pass
@@ -155,6 +165,7 @@ class _FakeIMAP:
 @pytest.fixture
 def imap(monkeypatch):
     _FakeIMAP.messages = []
+    _FakeIMAP.bodies = {}
     monkeypatch.setattr(imaplib, "IMAP4_SSL", _FakeIMAP)
     monkeypatch.setattr(config, "IMAP_HOST", "imap.gmail.com")
     monkeypatch.setattr(config, "IMAP_USER", "marketing@mmga.agency")
@@ -177,7 +188,7 @@ def test_a_genuine_reply_calls_the_sheet_marker(imap, temp_db, monkeypatch):
     import emailer.reply_checker as checker
 
     marked = []
-    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email: marked.append(email))
+    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email, sentiment="": marked.append(email))
     temp_db.log_email("Acme", "acme.com", "lead@acme.com", "me@x.com", "S", "B", message_id="<sent@x.com>")
     _FakeIMAP.messages = [_raw(**{
         "Message-ID": "<reply@acme.com>",
@@ -195,7 +206,7 @@ def test_a_bounce_does_not_call_the_sheet_marker(imap, temp_db, monkeypatch):
     import emailer.reply_checker as checker
 
     marked = []
-    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email: marked.append(email))
+    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email, sentiment="": marked.append(email))
     temp_db.log_email("Acme", "acme.com", "lead@acme.com", "me@x.com", "S", "B", message_id="<sent@x.com>")
     _FakeIMAP.messages = [_raw(**{
         "Message-ID": "<bounce@mailer-daemon>",
@@ -214,7 +225,7 @@ def test_an_auto_reply_does_not_call_the_sheet_marker(imap, temp_db, monkeypatch
     import emailer.reply_checker as checker
 
     marked = []
-    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email: marked.append(email))
+    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email, sentiment="": marked.append(email))
     temp_db.log_email("Acme", "acme.com", "lead@acme.com", "me@x.com", "S", "B", message_id="<sent@x.com>")
     _FakeIMAP.messages = [_raw(**{
         "Message-ID": "<ooo@acme.com>",
@@ -268,3 +279,187 @@ def test_a_failed_reply_check_cannot_crash_the_scheduler():
 
     source = inspect.getsource(scheduler._safe_check_replies)
     assert "except Exception" in source
+
+
+# ---------------------------------------------------------------------------
+# Reply sentiment (VADER) — added 2026-08-10, so a follow-up sequence can
+# tell "replied, sounds interested" apart from "replied, said no" without a
+# human re-reading every inbox thread. Needs the reply BODY, which
+# reply_checker.py deliberately did not fetch before this — expanded on
+# explicit confirmation, still BODY.PEEK (read-only), the text used only to
+# score sentiment locally/offline and then discarded.
+# ---------------------------------------------------------------------------
+
+def test_clearly_positive_replies_score_positive():
+    import emailer.reply_checker as checker
+
+    for text in ("Yes please, send it over!", "Sure, worth a quick call.", "Sounds great, let's talk."):
+        assert checker.classify_sentiment(text) == "positive"
+
+
+def test_clearly_negative_replies_score_negative():
+    import emailer.reply_checker as checker
+
+    for text in ("No thanks, not interested.", "This isn't for us, please don't follow up."):
+        assert checker.classify_sentiment(text) == "negative"
+
+
+def test_a_neutral_keyword_free_decline_honestly_falls_back_to_neutral():
+    """
+    A real, documented limitation, not a bug: lexicon-based sentiment can't
+    infer "this is a decline" from a purely factual, keyword-free sentence
+    with no positive OR negative words in VADER's lexicon. Verified: VADER's
+    own compound score on this exact sentence is 0.0. The safe direction —
+    it falls back to "neutral", never a false "positive" that would make a
+    decline look like interest.
+    """
+    import emailer.reply_checker as checker
+
+    assert checker.classify_sentiment("We already work with someone else.") == "neutral"
+
+
+def test_empty_or_unparseable_body_scores_neutral_not_a_guess():
+    import emailer.reply_checker as checker
+
+    assert checker.classify_sentiment("") == "neutral"
+    assert checker.classify_sentiment("   ") == "neutral"
+
+
+def test_quoted_original_email_is_stripped_before_scoring():
+    """
+    A short "no thanks" above a quoted copy of our own upbeat pitch must be
+    scored on the "no thanks", not diluted or inverted by the quoted pitch.
+    """
+    import emailer.reply_checker as checker
+
+    quoted = (
+        "No thanks, we already work with someone.\n\n"
+        "On Mon, Aug 10, 2026 at 9:00 AM Kshitij <me@x.com> wrote:\n"
+        "> I have been impressed by what you are building.\n"
+        "> Worth a quick 10 minute call this week?\n"
+    )
+    assert checker.classify_sentiment(quoted) == "negative"
+
+
+def test_polite_decline_phrasing_that_vader_alone_gets_wrong_is_corrected():
+    """
+    Empirically verified before this override existed: VADER's lexicon reads
+    "please" as politeness and scores these positive/neutral on their own —
+    exactly backwards for what they mean.
+    """
+    import emailer.reply_checker as checker
+
+    for text in ("Please take me off your list.", "No longer interested, thanks.", "unsubscribe please"):
+        assert checker.classify_sentiment(text) == "negative"
+
+
+# ---------------------------------------------------------------------------
+# Explicit opt-out vs. mere decline — different actions, must not conflate
+# ---------------------------------------------------------------------------
+
+def test_an_explicit_stop_contact_request_is_detected():
+    import emailer.reply_checker as checker
+
+    for text in ("Please unsubscribe me.", "Take me off your list.", "Stop emailing me please."):
+        assert checker.is_unsubscribe_request(text) is True
+
+
+def test_a_mere_decline_is_not_an_unsubscribe_request():
+    """
+    "Not interested" is a clear no, but not a request to never be contacted
+    about anything again — it must not trigger a permanent suppression-list
+    entry, only the (separate) negative sentiment label.
+    """
+    import emailer.reply_checker as checker
+
+    assert checker.is_unsubscribe_request("No thanks, not interested.") is False
+    assert checker.classify_sentiment("No thanks, not interested.") == "negative"
+
+
+def test_an_explicit_unsubscribe_adds_a_suppression_entry_not_just_a_reply_mark(monkeypatch):
+    import emailer.reply_checker as checker
+
+    suppressed = []
+    monkeypatch.setattr(checker.db, "add_suppression", lambda email, reason: suppressed.append((email, reason)))
+
+    class _FakeSheets:
+        marked_unsubscribed = []
+
+        def find_row_by_email(self, email):
+            return 7
+
+        def mark_unsubscribed(self, row):
+            _FakeSheets.marked_unsubscribed.append(row)
+
+    monkeypatch.setattr("storage.sheets.SheetsStorage", _FakeSheets)
+    checker._handle_reply_unsubscribe("lead@acme.com")
+
+    assert suppressed == [("lead@acme.com", "reply-opt-out")]
+    assert _FakeSheets.marked_unsubscribed == [7]
+
+
+def test_a_suppression_failure_does_not_block_the_sheet_update(monkeypatch, capsys):
+    """Each half of the opt-out handling must succeed independently."""
+    import emailer.reply_checker as checker
+
+    def _explode(email, reason):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(checker.db, "add_suppression", _explode)
+
+    class _FakeSheets:
+        marked = []
+
+        def find_row_by_email(self, email):
+            return 3
+
+        def mark_unsubscribed(self, row):
+            _FakeSheets.marked.append(row)
+
+    monkeypatch.setattr("storage.sheets.SheetsStorage", _FakeSheets)
+    checker._handle_reply_unsubscribe("lead@acme.com")  # must not raise
+    assert _FakeSheets.marked == [3]
+
+
+# ---------------------------------------------------------------------------
+# End to end through check_replies() — an explicit opt-out reply must route
+# to suppression, not just a "replied-negative" sheet status
+# ---------------------------------------------------------------------------
+
+def test_an_unsubscribe_reply_suppresses_rather_than_just_marking_replied(imap, temp_db, monkeypatch):
+    import emailer.reply_checker as checker
+
+    replied_calls = []
+    unsubscribe_calls = []
+    monkeypatch.setattr(checker, "_mark_replied_in_sheet", lambda email, sentiment="": replied_calls.append(email))
+    monkeypatch.setattr(checker, "_handle_reply_unsubscribe", lambda email: unsubscribe_calls.append(email))
+
+    temp_db.log_email("Acme", "acme.com", "lead@acme.com", "me@x.com", "S", "B", message_id="<sent@x.com>")
+    _FakeIMAP.messages = [_raw(**{
+        "Message-ID": "<reply@acme.com>",
+        "In-Reply-To": "<sent@x.com>",
+        "From": "lead@acme.com",
+        "Subject": "Re: Quick question",
+    })]
+    _FakeIMAP.bodies = {1: b"Please unsubscribe me from this list."}
+
+    checker.check_replies()
+    assert unsubscribe_calls == ["lead@acme.com"]
+    assert replied_calls == []
+
+
+def test_sentiment_is_persisted_on_the_reply_row(imap, temp_db):
+    import emailer.reply_checker as checker
+
+    temp_db.log_email("Acme", "acme.com", "lead@acme.com", "me@x.com", "S", "B", message_id="<sent@x.com>")
+    _FakeIMAP.messages = [_raw(**{
+        "Message-ID": "<reply@acme.com>",
+        "In-Reply-To": "<sent@x.com>",
+        "From": "lead@acme.com",
+        "Subject": "Re: Quick question",
+    })]
+    _FakeIMAP.bodies = {1: b"Yes, this looks great, send it over!"}
+
+    checker.check_replies()
+    reply_rows = temp_db.get_replies()
+    assert reply_rows[0]["sentiment"] == "positive"

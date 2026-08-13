@@ -27,3 +27,4 @@ crawl4ai==0.9.1
 extruct==0.18.0
 textstat==0.7.13
 cryptography==49.0.0
+vaderSentiment==3.3.2

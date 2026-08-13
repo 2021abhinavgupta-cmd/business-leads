@@ -147,6 +147,33 @@ def init_db():
         cursor.execute("ALTER TABLE email_history ADD COLUMN body_word_count INTEGER")
         cursor.execute("PRAGMA user_version = 6")
 
+    # Cache for analyzer/mca_lookup.py's data.gov.in Company Master Data
+    # queries, keyed on the SAME normalised name used for matching (see
+    # mca_lookup._normalise_company_name) so a cache hit and a real lookup
+    # agree on what counts as "the same company". company_data is NULL for a
+    # cached miss (checked, confidently found nothing) — distinct from no row
+    # at all (never checked) — so a genuine absence doesn't get re-queried
+    # against the free tier's daily rate limit on every re-audit.
+    if schema_version < 7:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mca_lookup_cache (
+                normalised_name TEXT PRIMARY KEY,
+                company_data TEXT,
+                looked_up_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("PRAGMA user_version = 7")
+
+    # VADER sentiment of a genuine reply's body ("positive"/"negative"/
+    # "neutral", or "" when body parsing/scoring failed) — see
+    # emailer/reply_checker.py. A reply used to only mean "stop following
+    # up"; this is what lets "replied — sounds interested" be told apart
+    # from "replied — declined" without a human re-reading every inbox
+    # thread by hand.
+    if schema_version < 8:
+        cursor.execute("ALTER TABLE email_replies ADD COLUMN sentiment TEXT DEFAULT ''")
+        cursor.execute("PRAGMA user_version = 8")
+
     conn.commit()
     conn.close()
 
@@ -277,7 +304,7 @@ def get_open_summary() -> dict:
 
 
 def log_reply(reply_message_id: str, in_reply_to: str, from_email: str, target_email: str,
-              subject: str = "", is_auto: bool = False, is_bounce: bool = False):
+              subject: str = "", is_auto: bool = False, is_bounce: bool = False, sentiment: str = ""):
     """
     Record one inbound message matched to something we sent.
 
@@ -298,10 +325,10 @@ def log_reply(reply_message_id: str, in_reply_to: str, from_email: str, target_e
     cursor = conn.cursor()
     cursor.execute(
         """INSERT OR REPLACE INTO email_replies
-           (reply_message_id, in_reply_to, from_email, target_email, subject, is_auto, is_bounce)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (reply_message_id, in_reply_to, from_email, target_email, subject, is_auto, is_bounce, sentiment)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (key, in_reply_to, (from_email or "").strip().lower(), (target_email or "").strip().lower(),
-         subject[:300], 1 if is_auto else 0, 1 if is_bounce else 0)
+         subject[:300], 1 if is_auto else 0, 1 if is_bounce else 0, sentiment or "")
     )
     conn.commit()
     conn.close()
@@ -522,6 +549,42 @@ def delete_draft_by_website(website: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM email_drafts WHERE website = ?", (website,))
+    conn.commit()
+    conn.close()
+
+def get_mca_cache(normalised_name: str) -> tuple[bool, dict | None]:
+    """
+    (found_a_row, data) for a previous MCA lookup of *normalised_name*.
+
+    found_a_row=False means "never looked up" (the caller should query the
+    API); True with data=None means "looked up and confidently found
+    nothing" (the caller should NOT re-query — a confirmed miss is not the
+    same as an unattempted lookup, and re-querying it burns the free tier's
+    daily rate limit on a business that was never going to be there).
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT company_data FROM mca_lookup_cache WHERE normalised_name = ?", (normalised_name,))
+    row = cursor.fetchone()
+    conn.close()
+    if row is None:
+        return False, None
+    raw = row[0]
+    try:
+        return True, json.loads(raw) if raw else None
+    except (TypeError, json.JSONDecodeError):
+        return True, None
+
+def set_mca_cache(normalised_name: str, company_data: dict | None) -> None:
+    """Record an MCA lookup result — company_data=None records a confident miss."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO mca_lookup_cache (normalised_name, company_data) VALUES (?, ?)",
+        (normalised_name, json.dumps(company_data) if company_data else None),
+    )
     conn.commit()
     conn.close()
 

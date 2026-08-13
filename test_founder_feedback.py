@@ -202,7 +202,7 @@ def test_the_jargon_terms_the_prompt_itself_warns_against_are_covered():
 # 3b. Email readability
 # ---------------------------------------------------------------------------
 
-def test_dense_writing_is_flagged(capsys):
+def test_obscure_vocabulary_is_flagged_via_dale_chall(capsys):
     from analyzer.ai_audit import AIAuditor
 
     dense = _parsed(
@@ -215,7 +215,45 @@ def test_dense_writing_is_flagged(capsys):
     warning = AIAuditor._check_email_readability(dense, "Acme")
     capsys.readouterr()
     assert warning is not None
+    assert "Dale-Chall" in warning
+
+
+def test_a_single_jargon_sentence_buried_in_an_otherwise_plain_paragraph_is_still_caught():
+    """
+    The precision fix: a whole-paragraph average dilutes one bad sentence
+    into invisibility. Scored per sentence, "Your canonical URL is missing
+    hreflang tags." is caught even surrounded by ordinary prose that alone
+    would pass cleanly.
+    """
+    from analyzer.ai_audit import AIAuditor
+
+    mixed = _parsed(
+        "I noticed your website takes about five seconds to load on mobile. "
+        "Your canonical URL is missing hreflang tags. This confuses search "
+        "crawlers and hurts how many people find you."
+    )
+    warning = AIAuditor._check_email_readability(mixed, "Acme")
+    assert warning is not None
+    assert "hreflang" in warning
+
+
+def test_a_long_but_ordinary_vocabulary_sentence_is_flagged_via_flesch_not_dale_chall():
+    """Sentence LENGTH/complexity is a separate axis from vocabulary familiarity."""
+    from analyzer.ai_audit import AIAuditor
+
+    long_but_plain = _parsed(
+        "When someone who is looking for a place near their home visits your "
+        "website on their phone after finding you through a search and then "
+        "has to wait a long time before anything shows up on the screen and "
+        "they are not sure if the page is even working at all they will often "
+        "just give up and go back and click on one of the other results "
+        "instead of waiting around for your site to finally finish loading "
+        "everything it needs to show them."
+    )
+    warning = AIAuditor._check_email_readability(long_but_plain, "Acme")
+    assert warning is not None
     assert "Flesch" in warning
+    assert "Dale-Chall" not in warning
 
 
 def test_plain_conversational_writing_is_not_flagged():
