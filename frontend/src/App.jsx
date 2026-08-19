@@ -32,8 +32,9 @@ const HELP_CONTENT = {
     tips: [
       'Set a city first — Maps and directory searches both need one (the government dealer list is the one exception; leave city blank there to pull from all of Maharashtra).',
       'Click a niche card\'s "Maps" button for Google-Maps-sourced leads (needs the business to have a website to be audit-able).',
-      'The colored "Directory" button searches whichever B2B directory is selected in the dropdown above (IndiaMART / TradeIndia / ExportersIndia) — good for suppliers with no website of their own.',
+      'The colored "Directory" button searches whichever B2B directory is selected in the dropdown above (IndiaMART / TradeIndia / ExportersIndia, or "All Directories" to search all three) — good for suppliers with no website of their own.',
       '"Search licensed dealers" pulls from Maharashtra\'s own government-published dealer list — real phone/email already filled in, no guessing, but no website either, so use the WhatsApp button on those leads rather than the audit flow.',
+      '"Search All Niches" runs Maps + your selected directory across every preset niche automatically, one request at a time — takes several minutes on purpose (keeps it under the API\'s rate limits), leads land in your list as it goes, and you can Stop it early any time.',
       'You can click several niches/sources in a row — results just add to your lead list, they don\'t replace it. Switch to Dashboard yourself when ready to review.',
       'Emails to irrigation/tractor/farm-equipment leads automatically mention the relevant real government subsidy scheme (PM-KUSUM / SMAM) instead of generic copy.',
     ],
@@ -93,6 +94,8 @@ function App() {
   const [agriSearchKey, setAgriSearchKey] = useState(''); // "<niche>|<source>" currently loading, disables just that button
   const [b2bDirectory, setB2bDirectory] = useState('indiamart'); // which directory the "Directory" button dorks
   const [agriLastResult, setAgriLastResult] = useState(''); // feedback after a search, without leaving the tab
+  const [agriBulkRunning, setAgriBulkRunning] = useState(false);
+  const [agriBulkProgress, setAgriBulkProgress] = useState(null); // { current, total, label }
   const [showHelp, setShowHelp] = useState(false);
   
   const [leadsPage, setLeadsPage] = useState(1);
@@ -181,6 +184,20 @@ function App() {
     }
   };
 
+  const B2B_DIRECTORIES = ['indiamart', 'tradeindia', 'exportersindia'];
+
+  // One real request against one source. Returns how many leads it added.
+  // Pulled out of handleAgriSearch so both the per-card button and the bulk
+  // "Search All Niches" runner share the exact same fetch/tag/merge logic.
+  const runOneAgriSearch = async (nicheChoice, source, directoryOverride) => {
+    const res = source === 'directory'
+      ? await axios.post(`${API_BASE}/api/search-b2b-directory`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10, directory: directoryOverride })
+      : await axios.post(`${API_BASE}/api/search`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10 });
+    const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: nicheChoice }));
+    setLeads(prev => [...tagged, ...prev]);
+    return tagged.length;
+  };
+
   // Shared by every Agriculture-tab niche button. Tags results with
   // sector: 'agriculture' (client-side only) so handleAudit forwards it to
   // /api/audit, which flows into BaseSender.generate_email's sector line.
@@ -197,18 +214,81 @@ function App() {
     const key = `${nicheChoice}|${source}`;
     setAgriSearchKey(key);
     try {
-      const res = source === 'directory'
-        ? await axios.post(`${API_BASE}/api/search-b2b-directory`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10, directory: b2bDirectory })
-        : await axios.post(`${API_BASE}/api/search`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10 });
-      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: nicheChoice }));
-      setLeads(prev => [...tagged, ...prev]);
+      let added = 0;
+      let label;
+      if (source === 'directory' && b2bDirectory === 'all') {
+        // "All" isn't a real backend value (B2BDirectorySearchRequest.directory
+        // is a Literal of the three actual sites) — fire one request per site
+        // instead. Sequential, not Promise.all: keeps requests spaced out
+        // rather than bursting 3 at once against the same rate-limit bucket.
+        for (const dir of B2B_DIRECTORIES) {
+          added += await runOneAgriSearch(nicheChoice, 'directory', dir);
+        }
+        label = 'all directories';
+      } else {
+        added = await runOneAgriSearch(nicheChoice, source, b2bDirectory);
+        label = source === 'directory' ? b2bDirectory : 'Maps';
+      }
       setLeadsPage(1);
-      setAgriLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} for "${nicheChoice}" (${source === 'directory' ? b2bDirectory : 'Maps'}). Switch to Dashboard to review.`);
+      setAgriLastResult(`Added ${added} lead${added === 1 ? '' : 's'} for "${nicheChoice}" (${label}). Switch to Dashboard to review.`);
     } catch (err) {
       console.error('Agriculture search failed:', err);
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
     } finally {
       setAgriSearchKey('');
+    }
+  };
+
+  // Runs Maps + the selected directory/directories across every preset niche,
+  // one request at a time. Paced ~13s apart regardless of which endpoint —
+  // simplest safe margin under /api/search's and /api/search-b2b-directory's
+  // separate 5-requests-per-60s limits (app.py's rate_limit), since a real
+  // batch like this is exactly what would otherwise trip them. Stoppable
+  // mid-run via agriBulkStopRef, same ref-based pattern as Autopilot uses to
+  // avoid a stale closure reading an old "still running" flag.
+  const agriBulkStopRef = useRef(false);
+  const handleSearchAllNiches = async () => {
+    if (!agriCity.trim()) {
+      alert('Enter a city first.');
+      return;
+    }
+    agriBulkStopRef.current = false;
+    setAgriBulkRunning(true);
+
+    const directories = b2bDirectory === 'all' ? B2B_DIRECTORIES : [b2bDirectory];
+    const jobs = [];
+    for (const niche of AGRI_NICHES) {
+      jobs.push({ niche, source: 'maps' });
+      for (const dir of directories) jobs.push({ niche, source: 'directory', dir });
+    }
+
+    let totalAdded = 0;
+    try {
+      for (let i = 0; i < jobs.length; i++) {
+        if (agriBulkStopRef.current) break;
+        const { niche, source, dir } = jobs[i];
+        setAgriBulkProgress({ current: i + 1, total: jobs.length, label: `${niche} (${source === 'directory' ? dir : 'Maps'})` });
+        try {
+          totalAdded += await runOneAgriSearch(niche, source, dir);
+        } catch (err) {
+          console.error(`Bulk search failed for ${niche} (${source}):`, err);
+          // One failed niche/source shouldn't stop the whole run — errors are
+          // rare (a transient DDG rate limit, one bad Maps query) and losing
+          // 71 other results to one of them would be worse than skipping it.
+        }
+        setLeadsPage(1);
+        if (i < jobs.length - 1 && !agriBulkStopRef.current) {
+          await new Promise(r => setTimeout(r, 13000));
+        }
+      }
+    } finally {
+      setAgriBulkRunning(false);
+      setAgriBulkProgress(null);
+      setAgriLastResult(
+        agriBulkStopRef.current
+          ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping. Switch to Dashboard to review.`
+          : `Searched all ${AGRI_NICHES.length} niches — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} total. Switch to Dashboard to review.`
+      );
     }
   };
 
@@ -882,6 +962,7 @@ function App() {
             <option value="indiamart">IndiaMART</option>
             <option value="tradeindia">TradeIndia</option>
             <option value="exportersindia">ExportersIndia</option>
+            <option value="all">All Directories</option>
           </select>
         </div>
       </div>
@@ -902,30 +983,71 @@ function App() {
         </p>
         <button
           type="button" className="primary-btn" style={{ width: 'fit-content', fontSize: 13, padding: '8px 16px', background: '#0f766e' }}
-          disabled={!!agriSearchKey} onClick={handleKrishiMaharashtraSearch}
+          disabled={!!agriSearchKey || agriBulkRunning} onClick={handleKrishiMaharashtraSearch}
         >
           {agriSearchKey === 'krishi-maharashtra' ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Search licensed dealers
         </button>
+      </div>
+
+      <div className="search-box glass" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px', padding: '16px', marginBottom: 20, borderColor: 'rgba(59, 130, 246, 0.3)' }}>
+        <strong style={{ color: '#e2e8f0', fontSize: 14 }}>Search every niche at once</strong>
+        <p style={{ color: '#94a3b8', fontSize: 13, margin: 0 }}>
+          Runs Maps + the directory selected above (or all three, if "All Directories" is
+          picked) across all {AGRI_NICHES.length} niches, one request at a time so it stays
+          well under the API's rate limits. Slow on purpose — expect several minutes; leads
+          land in your list as each one finishes, so you don't have to wait for the end.
+        </p>
+        {agriBulkRunning ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Loader2 className="spin" size={16} />
+              <span style={{ color: '#e2e8f0', fontSize: 13 }}>
+                {agriBulkProgress ? `${agriBulkProgress.current}/${agriBulkProgress.total} — ${agriBulkProgress.label}` : 'Starting...'}
+              </span>
+            </div>
+            <div style={{ width: '100%', maxWidth: 320, height: 6, background: '#e2e8f0', borderRadius: 999, overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: agriBulkProgress ? `${(agriBulkProgress.current / agriBulkProgress.total) * 100}%` : '0%',
+                background: '#3b82f6', borderRadius: 999, transition: 'width 0.4s ease',
+              }} />
+            </div>
+            <button
+              type="button" onClick={() => { agriBulkStopRef.current = true; }}
+              style={{ width: 'fit-content', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', padding: '6px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 'bold' }}
+            >
+              Stop
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button" className="primary-btn" style={{ width: 'fit-content', fontSize: 13, padding: '8px 16px', background: '#3b82f6' }}
+            disabled={!!agriSearchKey} onClick={handleSearchAllNiches}
+          >
+            <Search size={14} /> Search All Niches
+          </button>
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '12px' }}>
         {AGRI_NICHES.map(n => {
           const mapsKey = `${n}|maps`;
           const directoryKey = `${n}|directory`;
-          const directoryLabel = { indiamart: 'IndiaMART', tradeindia: 'TradeIndia', exportersindia: 'ExportersIndia' }[b2bDirectory];
+          const directoryLabel = { indiamart: 'IndiaMART', tradeindia: 'TradeIndia', exportersindia: 'ExportersIndia', all: 'All Directories' }[b2bDirectory];
+          const anyBusy = !!agriSearchKey || agriBulkRunning;
           return (
             <div key={n} className="search-box glass" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px', padding: '16px' }}>
               <strong style={{ color: '#e2e8f0', fontSize: 14 }}>{n}</strong>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button
                   type="button" className="primary-btn" style={{ flex: 1, fontSize: 13, padding: '8px 12px' }}
-                  disabled={!!agriSearchKey} onClick={() => handleAgriSearch(n, 'maps')}
+                  disabled={anyBusy} onClick={() => handleAgriSearch(n, 'maps')}
                 >
                   {agriSearchKey === mapsKey ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Maps
                 </button>
                 <button
                   type="button" className="primary-btn" style={{ flex: 1, fontSize: 13, padding: '8px 12px', background: '#0f766e' }}
-                  disabled={!!agriSearchKey} onClick={() => handleAgriSearch(n, 'directory')}
+                  disabled={anyBusy} onClick={() => handleAgriSearch(n, 'directory')}
                 >
                   {agriSearchKey === directoryKey ? <Loader2 className="spin" size={14} /> : <Search size={14} />} {directoryLabel}
                 </button>
