@@ -5,7 +5,7 @@ Startup Dork Scraper — Uses DuckDuckGo to find Y-Combinator startups for $0.
 import time
 import random
 import urllib.parse
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 class StartupDorkScraper:
     def __init__(self):

@@ -4,7 +4,7 @@ Shopify Dork Scraper — Uses DuckDuckGo to find e-commerce stores for $0.
 
 import time
 import random
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 class ShopifyDorkScraper:
     def __init__(self):

@@ -19,7 +19,7 @@ real agri-equipment listings) are one-line subclasses naming their domain.
 
 import time
 import random
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 
 class B2BDirectoryDorkScraper:
