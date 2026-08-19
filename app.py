@@ -4,6 +4,7 @@ import random
 import time
 from collections import defaultdict, deque
 from datetime import datetime
+from typing import Literal
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 
 import config
 from scrapers.google_maps import GoogleMapsScraper
+from scrapers.indiamart_dork import IndiaMartDorkScraper, TradeIndiaDorkScraper, ExportersIndiaDorkScraper
+from scrapers.krishi_maharashtra import KrishiMaharashtraScraper
 from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
@@ -209,6 +212,23 @@ class SearchRequest(BaseModel):
     city: str
     limit: int = 10
 
+class B2BDirectorySearchRequest(BaseModel):
+    niche: str
+    city: str = ""
+    limit: int = Field(default=20, ge=1, le=50)
+    # Unlike /api/search-nearby (a genuinely different request/response
+    # shape), these three sources share one shape and differ only in which
+    # domain gets dorked — a mode flag on one endpoint rather than three
+    # near-identical routes. Invalid values 422 via the Literal, so a typo
+    # fails loud instead of silently falling back to indiamart.
+    directory: Literal["indiamart", "tradeindia", "exportersindia"] = "indiamart"
+
+class KrishiMaharashtraSearchRequest(BaseModel):
+    # No niche — this source is one fixed government dataset (licensed seed
+    # dealers), not a search. City narrows by district/taluka.
+    city: str = ""
+    limit: int = Field(default=50, ge=1, le=200)
+
 class NearbySearchRequest(BaseModel):
     # Bounded by Pydantic rather than checked by hand: these come straight
     # from the browser's geolocation API, and an out-of-range coordinate
@@ -236,6 +256,15 @@ class AuditRequest(BaseModel):
     # re-audit (the retry button, or checking whether a site was fixed) wants
     # fresh data and would otherwise silently get a stale verdict back.
     force: bool = False
+    # Set by the frontend when the lead came from a sector-specific section
+    # (e.g. the Agriculture tab). Empty for every normal search, so this only
+    # changes copy for leads explicitly tagged — see BaseSender.generate_email.
+    sector: str = ""
+    # The niche/category clicked (e.g. "Irrigation Equipment Supplier") or,
+    # for Krishi Maharashtra leads, the license category (e.g. "Fertilizer
+    # Dealer"). Lets the sector line name a specific real scheme (PM-KUSUM,
+    # SMAM) instead of one generic sentence for every agriculture niche.
+    sector_detail: str = ""
 
 class SendRequest(BaseModel):
     email: str
@@ -257,6 +286,12 @@ class SendRequest(BaseModel):
     attach_screenshot: bool = True
 
 maps_scraper = GoogleMapsScraper()
+b2b_directory_scrapers = {
+    "indiamart": IndiaMartDorkScraper(),
+    "tradeindia": TradeIndiaDorkScraper(),
+    "exportersindia": ExportersIndiaDorkScraper(),
+}
+krishi_maharashtra_scraper = KrishiMaharashtraScraper()
 web_scraper = WebsiteScraper()
 ig_scraper = InstagramScraper()
 auditor = AIAuditor()
@@ -296,6 +331,59 @@ async def search_leads(
                 description=f"Search: {req.niche} in {req.city} ({len(leads)} leads)"
             )
 
+        return {"leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search-b2b-directory")
+async def search_leads_b2b_directory(
+    req: B2BDirectorySearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    # DuckDuckGo dorking, not a paid API — rate-limited to stay polite to DDG
+    # rather than to control cost. Same limit as /api/search for consistency.
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    """
+    Find suppliers/dealers listed on IndiaMART/TradeIndia/ExportersIndia for
+    a niche, free (see scrapers/indiamart_dork.py's B2BDirectoryDorkScraper).
+
+    Separate endpoint from /api/search rather than folded into it: this is a
+    DuckDuckGo site: dork against a directory (see StartupDorkScraper for the
+    same pattern), not the Google Maps Places API, and returns leads that
+    often have no Website (blank, not the directory listing URL — auditing
+    that would measure the directory, not the lead) alongside ones that do.
+    All three directories share this one route via `directory`, unlike
+    /api/search-nearby which has a genuinely different request/response shape.
+    """
+    try:
+        scraper = b2b_directory_scrapers[req.directory]
+        leads = await asyncio.to_thread(scraper.scrape, req.niche, req.city, req.limit)
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
+        return {"leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search-krishi-maharashtra")
+async def search_leads_krishi_maharashtra(
+    req: KrishiMaharashtraSearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    # Parsed from a cached local PDF, not a live external call per request —
+    # generous limit, matching /api/costs' polling-tier rather than the
+    # scraper-tier 5/min.
+    _rl: None = Depends(rate_limit(20, 60)),
+):
+    """
+    Return licensed seed-dealer firms from Maharashtra's own government
+    publication (see scrapers/krishi_maharashtra.py). Real government data,
+    not a scrape of a third party — separate endpoint since it takes no
+    niche at all (one fixed dataset) and needs no rate-limit protection for
+    an external service the way the dork/Maps endpoints do.
+    """
+    try:
+        leads = await asyncio.to_thread(krishi_maharashtra_scraper.scrape, req.city, req.limit)
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -477,7 +565,7 @@ async def audit_lead(
 
         # Generate Draft
         YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")
-        subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME)
+        subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME, sector=req.sector, sector_detail=req.sector_detail)
 
         # Update Sheets in background
         def save_audit_to_sheets():

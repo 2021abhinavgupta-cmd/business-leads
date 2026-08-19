@@ -11,6 +11,8 @@ from scrapers.google_maps import GoogleMapsScraper
 from scrapers.shopify_dork import ShopifyDorkScraper
 from scrapers.startup_dork import StartupDorkScraper
 from scrapers.apollo_free import ApolloFreeScraper
+from scrapers.indiamart_dork import IndiaMartDorkScraper
+from scrapers.krishi_maharashtra import KrishiMaharashtraScraper
 from storage.sheets import SheetsStorage
 from warmup_send import run_warmup
 from emailer.reply_checker import check_replies
@@ -52,6 +54,18 @@ async def ingest_leads():
         elif source == "b2b":
             scraper = ApolloFreeScraper()
             niches = ["software", "marketing agency", "recruiting", "consulting"]
+        elif source == "agriculture":
+            scraper = IndiaMartDorkScraper()
+            niches = [
+                "agricultural equipment dealer", "fertilizer supplier",
+                "seed company", "cold storage", "tractor spare parts",
+            ]
+        elif source == "agriculture_gov":
+            # A fixed government dataset (licensed seed dealers), not a niche
+            # search — scrape() takes no niche, so this uses a dedicated
+            # branch below instead of the per-niche loop.
+            scraper = KrishiMaharashtraScraper()
+            niches = None
         else: # Default to maps
             scraper = GoogleMapsScraper()
             niches = [
@@ -63,6 +77,13 @@ async def ingest_leads():
 
     except Exception as e:
         print(f"Failed to initialize ingestion components: {e}")
+        return
+
+    if source == "agriculture_gov":
+        print("Scraping Krishi Maharashtra (licensed seed dealers)...")
+        for lead in scraper.scrape(limit=200):
+            sheets.add_lead(lead)
+        print("--- Lead Ingestion Complete ---")
         return
 
     # Ingest from selected source

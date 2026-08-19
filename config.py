@@ -113,7 +113,7 @@ WARMUP_HOUR = int(os.getenv("WARMUP_HOUR", "13"))  # 24h, Asia/Kolkata — match
 # env var — if DAILY_EMAIL_LIMIT is already set in Railway, this code
 # default won't change production behavior until that's updated too.
 DAILY_EMAIL_LIMIT = int(os.getenv("DAILY_EMAIL_LIMIT", "50"))
-LEAD_SOURCE = os.getenv("LEAD_SOURCE", "maps").lower() # options: maps, ecommerce, startups, b2b
+LEAD_SOURCE = os.getenv("LEAD_SOURCE", "maps").lower() # options: maps, ecommerce, startups, b2b, agriculture, agriculture_gov
 
 # Self-consistency: generate the audit copy twice and keep only the claims
 # whose cited source line appears in BOTH runs. A claim the model invents

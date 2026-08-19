@@ -101,8 +101,41 @@ class BaseSender:
 
     # --- copy generation ------------------------------------------------
 
+    # Deliberately generic — no claim about THIS business qualifying for a
+    # scheme, since that's unverifiable from an audit and a false claim there
+    # would be worse than no line at all. Just the true, general point that
+    # ag buyers now search online first. Used when sector_detail doesn't
+    # match a more specific scheme below.
+    _GENERIC_AGRI_LINE = (
+        "Worth noting for your sector specifically: buyers and "
+        "co-ops increasingly search online first, including for "
+        "scheme- and subsidy-linked suppliers — so a weak web "
+        "presence costs you discoverability, not just polish.\n"
+    )
+
+    # (keyword substrings matched against sector_detail.lower(), the line to
+    # use). Both PM-KUSUM and SMAM are real, active 2026 central schemes
+    # (live-verified) — naming them is a true general fact about buyer
+    # search behavior in that category, never a claim that this specific
+    # lead is empanelled/approved under either one.
+    _AGRI_SCHEME_LINES = [
+        (("irrigation",), (
+            "Worth noting for your category specifically: PM-KUSUM's solar "
+            "irrigation subsidy has buyers actively searching for pump and "
+            "irrigation suppliers online right now — a weak web presence "
+            "costs you exactly that traffic, not just polish.\n"
+        )),
+        (("tractor", "farm equipment", "equipment rental", "equipment dealer"), (
+            "Worth noting for your category specifically: SMAM's farm-"
+            "machinery subsidy has buyers actively searching for equipment "
+            "dealers online right now — a weak web presence costs you "
+            "exactly that traffic, not just polish.\n"
+        )),
+    ]
+
     def generate_email(
-        self, company: str, contact_name: str, analysis: dict, your_name: str
+        self, company: str, contact_name: str, analysis: dict, your_name: str,
+        sector: str = "", sector_detail: str = "",
     ) -> tuple[str, str]:
         """
         Generate the subject and body for the cold email.
@@ -112,6 +145,15 @@ class BaseSender:
             contact_name: The first name of the decision maker.
             analysis: The AI audit dict containing flaws and email copy.
             your_name: The sender's name to sign off with.
+            sector: Optional lead category tag ("agriculture" today) used to
+                add one sector-flavored sentence to the pitch. Empty for every
+                other lead, so this is additive and never changes existing
+                copy.
+            sector_detail: Optional niche/category within the sector (e.g.
+                "Irrigation Equipment Supplier"), used to name a real,
+                specific government scheme instead of a generic sentence —
+                see _AGRI_SCHEME_LINES. Falls back to the generic line when
+                empty or unmatched.
 
         Returns:
             (subject, body) as plain text strings.
@@ -131,6 +173,19 @@ class BaseSender:
         greeting = f"Hi {contact_name}," if self._is_a_real_person_name(contact_name, company) else "Hi there,"
 
         body_lines = [f"{greeting}\n", f"{opening_line}\n"]
+
+        # Deliberately generic — no claim about THIS business qualifying for
+        # any specific scheme, since that's unverifiable from an audit and a
+        # false claim there would be worse than no line at all. Just the
+        # true, general point that ag buyers now search online first.
+        if sector == "agriculture":
+            line = self._GENERIC_AGRI_LINE
+            detail_lower = (sector_detail or "").lower()
+            for keywords, scheme_line in self._AGRI_SCHEME_LINES:
+                if any(k in detail_lower for k in keywords):
+                    line = scheme_line
+                    break
+            body_lines.append(line)
 
         # The "short" variant sends ONE flaw instead of all 3-4. The AI is
         # asked for the most severe first, so [0] is the strongest card.

@@ -167,6 +167,68 @@ def test_a_configured_social_proof_line_replaces_the_generic_claim(monkeypatch):
     assert "I've been helping brands fix exactly these things." not in body
 
 
+# ---------------------------------------------------------------------------
+# Sector line (Agriculture tab, added 2026-08-17)
+# ---------------------------------------------------------------------------
+
+def test_agriculture_sector_adds_the_scheme_visibility_line():
+    _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
+    assert "scheme- and subsidy-linked suppliers" in body
+
+
+def test_no_sector_leaves_the_email_unchanged():
+    """Every non-agriculture lead sends sector='' and must see no new copy."""
+    _, body = _sender().generate_email("Acme Dental", "Priya", _ANALYSIS, "Kshitij")
+    assert "scheme" not in body.lower()
+
+
+def test_the_sector_line_never_claims_this_specific_business_qualifies():
+    """
+    The line must stay a general observation about buyer behavior, not an
+    unverifiable claim that THIS lead qualifies for a specific scheme —
+    an audit has no way to know that, so asserting it would be a false claim.
+    """
+    _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
+    assert "you qualify" not in body.lower()
+    assert "eligible for" not in body.lower()
+
+
+def test_irrigation_sector_detail_names_pm_kusum():
+    _, body = _sender().generate_email(
+        "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
+        sector="agriculture", sector_detail="Irrigation Equipment Supplier",
+    )
+    assert "PM-KUSUM" in body
+
+
+def test_tractor_sector_detail_names_smam():
+    _, body = _sender().generate_email(
+        "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
+        sector="agriculture", sector_detail="Tractor Dealership",
+    )
+    assert "SMAM" in body
+
+
+def test_unmatched_sector_detail_falls_back_to_the_generic_line():
+    _, body = _sender().generate_email(
+        "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
+        sector="agriculture", sector_detail="Dairy Farm",
+    )
+    assert "scheme- and subsidy-linked suppliers" in body
+    assert "PM-KUSUM" not in body
+    assert "SMAM" not in body
+
+
+def test_scheme_lines_also_never_claim_this_lead_qualifies():
+    for detail in ("Irrigation Equipment Supplier", "Tractor Dealership"):
+        _, body = _sender().generate_email(
+            "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
+            sector="agriculture", sector_detail=detail,
+        )
+        assert "you qualify" not in body.lower()
+        assert "eligible for" not in body.lower()
+
+
 def test_the_default_variant_is_short():
     """
     Switched 2026-08-10: the founder independently reported the exact

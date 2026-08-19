@@ -1,9 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
+import { AGRI_NICHES } from './agriNiches';
 import './App.css';
+
+// Strips everything but digits, since wa.me only accepts a bare
+// countrycode+number — the "+91 98765 43210" GBP format doesn't work as-is.
+function phoneToWhatsAppDigits(phone) {
+  return (phone || '').replace(/\D/g, '');
+}
 
 const API_BASE = ""; // Use relative paths so it works on same domain
 
@@ -30,6 +37,9 @@ function App() {
   const [manualWebsite, setManualWebsite] = useState('');
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [isAutopilot, setIsAutopilot] = useState(false);
+  const [agriCity, setAgriCity] = useState('');
+  const [agriSearchKey, setAgriSearchKey] = useState(''); // "<niche>|<source>" currently loading, disables just that button
+  const [b2bDirectory, setB2bDirectory] = useState('indiamart'); // which directory the "Directory" button dorks
   
   const [leadsPage, setLeadsPage] = useState(1);
   const LEADS_PAGE_SIZE = 12;
@@ -113,6 +123,53 @@ function App() {
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
     } finally {
       setLoadingSearch(false);
+    }
+  };
+
+  // Shared by every Agriculture-tab niche button. Tags results with
+  // sector: 'agriculture' (client-side only) so handleAudit forwards it to
+  // /api/audit, which flows into BaseSender.generate_email's sector line —
+  // and switches back to the home view so results land in the normal
+  // audit/email grid instead of a separate one.
+  const handleAgriSearch = async (nicheChoice, source) => {
+    if (!agriCity.trim()) {
+      alert('Enter a city first.');
+      return;
+    }
+    const key = `${nicheChoice}|${source}`;
+    setAgriSearchKey(key);
+    try {
+      const res = source === 'directory'
+        ? await axios.post(`${API_BASE}/api/search-b2b-directory`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10, directory: b2bDirectory })
+        : await axios.post(`${API_BASE}/api/search`, { niche: nicheChoice, city: agriCity, limit: parseInt(limit) || 10 });
+      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: nicheChoice }));
+      setLeads(prev => [...tagged, ...prev]);
+      setLeadsPage(1);
+      setCurrentView('home');
+    } catch (err) {
+      console.error('Agriculture search failed:', err);
+      alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setAgriSearchKey('');
+    }
+  };
+
+  // Separate from handleAgriSearch: this source takes no niche (one fixed
+  // government dataset — licensed seed dealers) and city is optional
+  // (narrows by district/taluka rather than being required).
+  const handleKrishiMaharashtraSearch = async () => {
+    setAgriSearchKey('krishi-maharashtra');
+    try {
+      const res = await axios.post(`${API_BASE}/api/search-krishi-maharashtra`, { city: agriCity, limit: parseInt(limit) || 50 });
+      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: lead.Category || '' }));
+      setLeads(prev => [...tagged, ...prev]);
+      setLeadsPage(1);
+      setCurrentView('home');
+    } catch (err) {
+      console.error('Krishi Maharashtra search failed:', err);
+      alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setAgriSearchKey('');
     }
   };
 
@@ -227,7 +284,9 @@ function App() {
         // in Address and have no Google listing at all — sending it would
         // feed a non-address into the NAP comparison.
         gbp_address: lead.Address === 'Added Manually' ? '' : (lead.Address || ''),
-        force
+        force,
+        sector: lead.sector || '',
+        sector_detail: lead.sectorDetail || ''
       });
 
       setLeads(prev => {
@@ -546,7 +605,20 @@ function App() {
                 <button className="audit-btn" onClick={() => handleAudit(i)}><Activity size={18} /> Generate AI Audit & Draft</button>
               )}
 
-              {!lead.Website && <p className="error-text">Cannot audit — no website found.</p>}
+              {!lead.Website && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <p className="error-text">Cannot audit — no website found.</p>
+                  {lead.Phone && (
+                    <a
+                      href={`https://wa.me/${phoneToWhatsAppDigits(lead.Phone)}?text=${encodeURIComponent(`Hi, I help businesses like ${lead.Company} get found online — mind if I share a couple of quick ideas?`)}`}
+                      target="_blank" rel="noreferrer"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: '#25D366', color: '#fff', borderRadius: '8px', textDecoration: 'none', fontWeight: 'bold', fontSize: '14px', width: 'fit-content' }}
+                    >
+                      <MessageCircle size={16} /> Message on WhatsApp
+                    </a>
+                  )}
+                </div>
+              )}
               {lead.auditState === 'auditing' && (
                 <div className="auditing-state" style={{ flexDirection: 'column', gap: '10px' }}>
                   <Loader2 className="spin" size={24} />
@@ -677,6 +749,15 @@ function App() {
                       newLeads[i].auditState = 'rejected';
                       setLeads(newLeads);
                     }}><X size={18} /> Reject</button>
+                    {lead.Phone && (
+                      <a
+                        href={`https://wa.me/${phoneToWhatsAppDigits(lead.Phone)}?text=${encodeURIComponent(`${lead.auditData.subject}\n\n${lead.auditData.body}`)}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '0 20px', height: '48px', background: '#25D366', color: '#fff', borderRadius: '8px', textDecoration: 'none', fontWeight: 'bold', fontSize: '15px' }}
+                      >
+                        <MessageCircle size={18} /> Send via WhatsApp
+                      </a>
+                    )}
                     <button className="send-btn" onClick={() => handleSend(i)}><Send size={18} /> Approve & Send</button>
                   </div>
                 </motion.div>
@@ -707,6 +788,85 @@ function App() {
           </button>
         </div>
       )}
+    </>
+  );
+
+  const renderAgriculture = () => (
+    <>
+      <header className="header">
+        <p className="subtitle">Agriculture sector — preset niches, click to search</p>
+      </header>
+
+      <div className="search-box glass" style={{ marginBottom: 16 }}>
+        <div className="input-group">
+          <label>City</label>
+          <input type="text" list="city-options" value={agriCity} onChange={e => setAgriCity(e.target.value)} placeholder="e.g. Nashik" />
+          <datalist id="city-options">
+            {CITIES.map(c => <option key={c} value={c} />)}
+          </datalist>
+        </div>
+        <div className="input-group" style={{ maxWidth: '100px' }}>
+          <label>Leads</label>
+          <input type="number" value={limit} onChange={e => setLimit(e.target.value)} min="1" max="100" />
+        </div>
+        <div className="input-group" style={{ maxWidth: '180px' }}>
+          <label>Directory</label>
+          <select value={b2bDirectory} onChange={e => setB2bDirectory(e.target.value)}>
+            <option value="indiamart">IndiaMART</option>
+            <option value="tradeindia">TradeIndia</option>
+            <option value="exportersindia">ExportersIndia</option>
+          </select>
+        </div>
+      </div>
+
+      <p style={{ color: '#94a3b8', fontSize: 13, margin: '0 0 16px' }}>
+        Google Maps skips listings with no website, and a lot of agri dealers/farms
+        don't have one — so also try a B2B directory (pick one above), which surfaces
+        suppliers whether or not they have a site (those come through with no
+        Website, but still a phone for WhatsApp outreach).
+      </p>
+
+      <div className="search-box glass" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px', padding: '16px', marginBottom: 20 }}>
+        <strong style={{ color: '#e2e8f0', fontSize: 14 }}>Maharashtra's official licensed seed-dealer list</strong>
+        <p style={{ color: '#94a3b8', fontSize: 13, margin: 0 }}>
+          Real government data (krishi.maharashtra.gov.in) — comes with name, phone
+          and email already filled in, no guessing. City above optionally narrows by
+          district/taluka; leave it blank to pull from the whole list.
+        </p>
+        <button
+          type="button" className="primary-btn" style={{ width: 'fit-content', fontSize: 13, padding: '8px 16px', background: '#0f766e' }}
+          disabled={!!agriSearchKey} onClick={handleKrishiMaharashtraSearch}
+        >
+          {agriSearchKey === 'krishi-maharashtra' ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Search licensed dealers
+        </button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '12px' }}>
+        {AGRI_NICHES.map(n => {
+          const mapsKey = `${n}|maps`;
+          const directoryKey = `${n}|directory`;
+          const directoryLabel = { indiamart: 'IndiaMART', tradeindia: 'TradeIndia', exportersindia: 'ExportersIndia' }[b2bDirectory];
+          return (
+            <div key={n} className="search-box glass" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px', padding: '16px' }}>
+              <strong style={{ color: '#e2e8f0', fontSize: 14 }}>{n}</strong>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button" className="primary-btn" style={{ flex: 1, fontSize: 13, padding: '8px 12px' }}
+                  disabled={!!agriSearchKey} onClick={() => handleAgriSearch(n, 'maps')}
+                >
+                  {agriSearchKey === mapsKey ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Maps
+                </button>
+                <button
+                  type="button" className="primary-btn" style={{ flex: 1, fontSize: 13, padding: '8px 12px', background: '#0f766e' }}
+                  disabled={!!agriSearchKey} onClick={() => handleAgriSearch(n, 'directory')}
+                >
+                  {agriSearchKey === directoryKey ? <Loader2 className="spin" size={14} /> : <Search size={14} />} {directoryLabel}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </>
   );
 
@@ -1044,7 +1204,13 @@ function App() {
           >
             <Home size={18} /> Dashboard
           </button>
-          <button 
+          <button
+            onClick={() => setCurrentView('agriculture')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'agriculture' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'agriculture' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'agriculture' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <Sprout size={18} /> Agriculture
+          </button>
+          <button
             onClick={() => setCurrentView('drafts')}
             style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
           >
@@ -1077,6 +1243,7 @@ function App() {
       {/* Main Content */}
       <main className="main-content" style={{ flex: 1, padding: '40px', overflowY: 'auto' }}>
         {currentView === 'home' && renderHome()}
+        {currentView === 'agriculture' && renderAgriculture()}
         {currentView === 'drafts' && renderDrafts()}
         {currentView === 'history' && renderHistory()}
         {currentView === 'cost' && renderCost()}
