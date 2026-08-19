@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, HelpCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
@@ -11,6 +11,58 @@ import './App.css';
 function phoneToWhatsAppDigits(phone) {
   return (phone || '').replace(/\D/g, '');
 }
+
+// Per-tab help content for the "?" button in the nav. Keyed by currentView,
+// so the button always explains the page you're actually looking at rather
+// than one generic help screen nobody reads past the first line.
+const HELP_CONTENT = {
+  home: {
+    title: 'Dashboard — finding & auditing leads',
+    tips: [
+      'Type a niche (e.g. "Dental Clinic") and a city, then Find Leads — this hits Google Maps and only returns businesses that have a website, since that\'s what gets audited.',
+      'No niche in mind? Use "Find Leads Near Me" — it searches every business type around your current location, no typing needed.',
+      'Click "Generate AI Audit & Draft" on a lead to run the full analysis and produce a ready-to-edit email. This takes 1-2 minutes per lead — the progress bar shows which stage it\'s on.',
+      'Always read the subject and body before sending — edit either one inline. A red "Review before sending" banner means an accuracy check flagged something specific; read it, don\'t just dismiss it.',
+      'Leads with no website show a WhatsApp button instead, since there\'s nothing to audit.',
+      '"Start Autopilot" runs the audit step on every un-audited lead in the list automatically, one at a time.',
+    ],
+  },
+  agriculture: {
+    title: 'Agriculture — targeting the agriculture sector specifically',
+    tips: [
+      'Set a city first — Maps and directory searches both need one (the government dealer list is the one exception; leave city blank there to pull from all of Maharashtra).',
+      'Click a niche card\'s "Maps" button for Google-Maps-sourced leads (needs the business to have a website to be audit-able).',
+      'The colored "Directory" button searches whichever B2B directory is selected in the dropdown above (IndiaMART / TradeIndia / ExportersIndia) — good for suppliers with no website of their own.',
+      '"Search licensed dealers" pulls from Maharashtra\'s own government-published dealer list — real phone/email already filled in, no guessing, but no website either, so use the WhatsApp button on those leads rather than the audit flow.',
+      'You can click several niches/sources in a row — results just add to your lead list, they don\'t replace it. Switch to Dashboard yourself when ready to review.',
+      'Emails to irrigation/tractor/farm-equipment leads automatically mention the relevant real government subsidy scheme (PM-KUSUM / SMAM) instead of generic copy.',
+    ],
+  },
+  drafts: {
+    title: 'Drafts — reviewing saved audits before sending',
+    tips: [
+      'This is everything that\'s been audited but not yet sent or rejected — safe to leave leads here while you decide.',
+      'A draft can go stale: if too many days pass since the audit ran, sending it will ask you to confirm first, since the site may have changed since the findings were written.',
+      'You can remove the attached screenshot from a draft without discarding the whole email, if the capture looks bad (mid-animation, wrong crop, etc).',
+    ],
+  },
+  cost: {
+    title: 'Costs — what this tool has actually spent',
+    tips: [
+      'Every row here is a real logged cost — Google Maps API calls, AI audit calls, AWS SES sends — not an estimate.',
+      'The running total in the top-right pill updates every few seconds and reflects the same numbers as this page.',
+      'If a number here looks off, check for a lead that got audited more than once (a "Retry Audit" click after a failure does cost again).',
+    ],
+  },
+  history: {
+    title: 'History — sent emails and reply performance',
+    tips: [
+      'Every email actually sent (not just drafted) shows up here, with open/reply status if tracking is enabled for this deployment.',
+      '"Check for replies" scans the connected inbox for genuine replies — auto-replies and bounces are detected and excluded, not counted as engagement.',
+      'The variant performance table compares reply rates between different email copy styles — treat any row under ~20 sends as too little data to draw a conclusion from yet.',
+    ],
+  },
+};
 
 const API_BASE = ""; // Use relative paths so it works on same domain
 
@@ -41,6 +93,7 @@ function App() {
   const [agriSearchKey, setAgriSearchKey] = useState(''); // "<niche>|<source>" currently loading, disables just that button
   const [b2bDirectory, setB2bDirectory] = useState('indiamart'); // which directory the "Directory" button dorks
   const [agriLastResult, setAgriLastResult] = useState(''); // feedback after a search, without leaving the tab
+  const [showHelp, setShowHelp] = useState(false);
   
   const [leadsPage, setLeadsPage] = useState(1);
   const LEADS_PAGE_SIZE = 12;
@@ -81,6 +134,7 @@ function App() {
 
   // Fetch DB data when view changes
   useEffect(() => {
+    setShowHelp(false);
     const t = Date.now();
     if (currentView === 'history') {
       axios.get(`${API_BASE}/api/history?t=${t}`).then(res => {
@@ -1250,8 +1304,40 @@ function App() {
             <span style={{ fontSize: '11px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '1px' }}>Cost</span>
             <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#10b981' }}>${totalAllTime.toFixed(5)}</span>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setShowHelp(v => !v)}
+            title="How to use this page"
+            style={{ marginLeft: '12px', width: 34, height: 34, borderRadius: '50%', background: showHelp ? 'rgba(255,255,255,0.15)' : 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <HelpCircle size={18} />
+          </button>
         </div>
       </nav>
+
+      {showHelp && HELP_CONTENT[currentView] && (
+        <>
+          <div onClick={() => setShowHelp(false)} style={{ position: 'fixed', inset: 0, zIndex: 19 }} />
+          <div style={{
+            position: 'fixed', top: 92, right: '4%', maxWidth: 420, width: '92%',
+            background: 'rgba(15, 23, 42, 0.97)', border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 16, padding: '20px 22px', boxShadow: '0 12px 40px rgba(0,0,0,0.4)', zIndex: 20,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+              <h3 style={{ margin: 0, color: '#fff', fontSize: 16 }}>{HELP_CONTENT[currentView].title}</h3>
+              <button type="button" onClick={() => setShowHelp(false)} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}>
+                <X size={18} />
+              </button>
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {HELP_CONTENT[currentView].tips.map((tip, i) => (
+                <li key={i} style={{ color: '#cbd5e1', fontSize: 13.5, lineHeight: 1.5 }}>{tip}</li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
 
       {/* Main Content */}
       <main className="main-content" style={{ flex: 1, padding: '40px', overflowY: 'auto' }}>
