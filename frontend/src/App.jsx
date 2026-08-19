@@ -40,6 +40,7 @@ function App() {
   const [agriCity, setAgriCity] = useState('');
   const [agriSearchKey, setAgriSearchKey] = useState(''); // "<niche>|<source>" currently loading, disables just that button
   const [b2bDirectory, setB2bDirectory] = useState('indiamart'); // which directory the "Directory" button dorks
+  const [agriLastResult, setAgriLastResult] = useState(''); // feedback after a search, without leaving the tab
   
   const [leadsPage, setLeadsPage] = useState(1);
   const LEADS_PAGE_SIZE = 12;
@@ -128,9 +129,12 @@ function App() {
 
   // Shared by every Agriculture-tab niche button. Tags results with
   // sector: 'agriculture' (client-side only) so handleAudit forwards it to
-  // /api/audit, which flows into BaseSender.generate_email's sector line —
-  // and switches back to the home view so results land in the normal
-  // audit/email grid instead of a separate one.
+  // /api/audit, which flows into BaseSender.generate_email's sector line.
+  // Deliberately stays on this tab rather than jumping to Dashboard — the
+  // earlier version did that after every click, which meant clicking a
+  // second niche meant navigating back to Agriculture again first. Leads
+  // still land in the same shared `leads` array; switch to Dashboard
+  // yourself when you're done queuing up searches.
   const handleAgriSearch = async (nicheChoice, source) => {
     if (!agriCity.trim()) {
       alert('Enter a city first.');
@@ -145,7 +149,7 @@ function App() {
       const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: nicheChoice }));
       setLeads(prev => [...tagged, ...prev]);
       setLeadsPage(1);
-      setCurrentView('home');
+      setAgriLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} for "${nicheChoice}" (${source === 'directory' ? b2bDirectory : 'Maps'}). Switch to Dashboard to review.`);
     } catch (err) {
       console.error('Agriculture search failed:', err);
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
@@ -164,7 +168,7 @@ function App() {
       const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sector: 'agriculture', sectorDetail: lead.Category || '' }));
       setLeads(prev => [...tagged, ...prev]);
       setLeadsPage(1);
-      setCurrentView('home');
+      setAgriLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from the licensed dealer list. Switch to Dashboard to review.`);
     } catch (err) {
       console.error('Krishi Maharashtra search failed:', err);
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
@@ -796,6 +800,15 @@ function App() {
       <header className="header">
         <p className="subtitle">Agriculture sector — preset niches, click to search</p>
       </header>
+
+      {agriLastResult && (
+        <div style={{ background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: 8, padding: '10px 16px', marginBottom: 16, color: '#10b981', fontSize: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <span>{agriLastResult}</span>
+          <button type="button" onClick={() => setCurrentView('home')} style={{ background: 'transparent', border: '1px solid #10b981', color: '#10b981', borderRadius: 6, padding: '4px 12px', cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }}>
+            Go to Dashboard
+          </button>
+        </div>
+      )}
 
       <div className="search-box glass" style={{ marginBottom: 16 }}>
         <div className="input-group">
