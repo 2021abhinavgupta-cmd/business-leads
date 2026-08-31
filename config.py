@@ -205,6 +205,26 @@ MCA_COMPANY_MASTER_RESOURCE_ID = os.getenv("MCA_COMPANY_MASTER_RESOURCE_ID", "")
 # loading in under 2s." Left unset, the original generic line is used.
 SOCIAL_PROOF_LINE = os.getenv("SOCIAL_PROOF_LINE", "")
 
+# Probe a guessed contact address against its mail server before trusting it
+# (enrichment/decision_maker.py). When a name comes from LinkedIn but no
+# published address does, the tool builds "first.last@domain" and flags it
+# is_guess=True — a human has to check it before sending. With this on, the
+# tool instead opens an SMTP conversation with the domain's mail server
+# (MAIL FROM:<>, RCPT TO:<guess>, read the response) and, only if the server
+# confirms the mailbox exists AND the domain is not catch-all, returns it as
+# a verified address needing no manual check.
+#
+# OFF by default, and the reason is the same sender-reputation concern the
+# rest of this project is built around: RCPT probes from a datacenter IP can
+# get that IP greylisted or, at volume, listed as a dictionary-attack source,
+# which would hurt the real outreach. The implementation is deliberately
+# gentle (empty MAIL FROM, one probe per pattern, a circuit breaker that
+# stops for the rest of the run after a few blocks) but the safe default is
+# still not to do it. Turn it on only from an IP you are willing to spend.
+# An inconclusive or blocked probe never downgrades an address — it just
+# leaves the guess flagged exactly as before.
+VERIFY_EMAIL_SMTP = os.getenv("VERIFY_EMAIL_SMTP", "false").strip().lower() in ("true", "1", "yes")
+
 # === API Auth ===
 # Required header (X-API-Key) for all /api/* routes. If unset, the API is
 # wide open — set this before deploying anywhere reachable from the internet.

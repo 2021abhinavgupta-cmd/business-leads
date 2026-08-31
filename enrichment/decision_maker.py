@@ -9,7 +9,10 @@ Uses free external services:
 """
 
 import json
+import random
 import re
+import smtplib
+import socket
 import time
 from urllib.parse import urlparse, urljoin
 
@@ -39,6 +42,217 @@ _JUNK_LOCAL_PARTS = {
 def _is_junk_email(email: str) -> bool:
     local_part = email.split("@", 1)[0].lower()
     return local_part in _JUNK_LOCAL_PARTS
+
+
+# ---------------------------------------------------------------------------
+# Free email extraction — no API, no paid enrichment service
+# ---------------------------------------------------------------------------
+# A plain regex over visible page text misses two very common cases on the
+# small-business sites this tool targets, and picks up noise a mailto: link
+# never would. These helpers close that gap without any external call.
+
+# Cloudflare's email obfuscation ("Email Address Protection") replaces the
+# real address with <a class="__cf_email__" data-cfemail="HEX"> and also
+# leaves /cdn-cgi/l/email-protection#HEX in href attributes. The HEX is the
+# address XOR-encoded against its own first byte — trivially reversible, and
+# a large share of these leads sit behind Cloudflare, so their contact
+# address is sitting in the HTML in a form the regex simply cannot see.
+_CF_EMAIL_ATTR = re.compile(r'data-cfemail="([0-9a-fA-F]+)"')
+_CF_EMAIL_HREF = re.compile(r'/cdn-cgi/l/email-protection#([0-9a-fA-F]+)')
+
+# mailto: links are a far stronger signal than a string that merely matches
+# the email shape — a human put that address there on purpose as the contact.
+_MAILTO_HREF = re.compile(r'mailto:([^"\'?>\s]+)', re.IGNORECASE)
+
+# "name [at] company [dot] com" style obfuscation, meant to defeat exactly
+# the kind of regex scrape this file does. Normalised back before matching.
+#
+# ONLY the bracketed forms — [at] (at) [dot] (dot) — are handled. The bare
+# word forms ("bob at acme dot com") are deliberately NOT: " at " and " dot "
+# occur constantly in ordinary prose ("great at design", "the dot com era"),
+# and turning those into an @ or a . manufactures addresses that were never
+# on the page. A fabricated recipient is the single worst error this module
+# can make (CLAUDE.md §8), so the ambiguous case is left alone.
+_OBFUSCATION_SUBS = [
+    (re.compile(r'\s*[\[(]\s*at\s*[\])]\s*', re.IGNORECASE), '@'),
+    (re.compile(r'\s*[\[(]\s*dot\s*[\])]\s*', re.IGNORECASE), '.'),
+]
+
+
+def _decode_cf_email(encoded_hex: str) -> str:
+    """Reverse Cloudflare's data-cfemail encoding. Returns '' on any malformed input."""
+    try:
+        key = int(encoded_hex[:2], 16)
+        return "".join(
+            chr(int(encoded_hex[i:i + 2], 16) ^ key)
+            for i in range(2, len(encoded_hex), 2)
+        )
+    except (ValueError, IndexError):
+        return ""
+
+
+def _deobfuscate(text: str) -> str:
+    for pattern, replacement in _OBFUSCATION_SUBS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _extract_emails_from_html(html: str) -> set[str]:
+    """
+    Every address discoverable in *html* without a network call: decoded
+    Cloudflare-protected ones, mailto: targets, de-obfuscated "x at y dot z"
+    ones, and finally the plain regex. Lower-cased; not yet filtered for junk
+    or validity — the caller does that.
+    """
+    if not html:
+        return set()
+
+    found: set[str] = set()
+
+    for hex_blob in _CF_EMAIL_ATTR.findall(html) + _CF_EMAIL_HREF.findall(html):
+        decoded = _decode_cf_email(hex_blob)
+        if "@" in decoded:
+            found.add(decoded.strip().lower())
+
+    for target in _MAILTO_HREF.findall(html):
+        # A mailto: can carry ?subject=... etc — already stripped by the
+        # pattern, but it can also be a comma-separated list.
+        for addr in target.split(","):
+            addr = addr.strip().lower()
+            if "@" in addr:
+                found.add(addr)
+
+    for match in re.findall(_EMAIL_REGEX, _deobfuscate(html)):
+        found.add(match.strip().lower())
+
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Free mailbox verification — an SMTP conversation, no paid service
+# ---------------------------------------------------------------------------
+# Off unless config.VERIFY_EMAIL_SMTP is set. See that setting's comment for
+# why the default is off (RCPT probes from a datacenter IP are a
+# sender-reputation risk). Everything here is designed to only ever *raise*
+# confidence in an address: an inconclusive or blocked probe leaves a guess
+# flagged exactly as it was.
+
+_SMTP_PROBE_TIMEOUT = 8
+# After this many probes in a row come back blocked/greylisted/refused, stop
+# probing for the rest of the process. One mail host refusing us is a strong
+# hint the source IP is being throttled, and hammering past that is exactly
+# what gets an IP listed. Same circuit-breaker shape as scrapers/instagram.py.
+_SMTP_MAX_CONSECUTIVE_FAILURES = 3
+_smtp_consecutive_failures = 0
+_smtp_breaker_tripped = False
+
+# Local-part patterns for a person, most-likely first. Only used when SMTP
+# verification is on — without it there is nothing to choose between them and
+# the caller just takes the first.
+def _person_email_patterns(name: str, domain: str) -> list[str]:
+    parts = [re.sub(r'[^a-z]', '', p) for p in name.lower().split()]
+    parts = [p for p in parts if p]
+    if not parts:
+        return []
+    first = parts[0]
+    last = parts[-1] if len(parts) > 1 else ""
+    if not last:
+        return [f"{first}@{domain}"]
+    locals_ = [
+        f"{first}.{last}", f"{first}{last}", f"{first}",
+        f"{first[0]}{last}", f"{first}_{last}", f"{first[0]}.{last}",
+    ]
+    seen, ordered = set(), []
+    for lp in locals_:
+        if lp not in seen:
+            seen.add(lp)
+            ordered.append(f"{lp}@{domain}")
+    return ordered
+
+# Generic role addresses to try for a business when no person is known, most
+# likely to be read first.
+_ROLE_LOCAL_PARTS = ("hello", "info", "contact", "enquiries", "hi", "team", "sales")
+
+
+def _mx_hosts(domain: str) -> list[str]:
+    """MX hostnames for *domain*, via email-validator's resolver (already a dep)."""
+    try:
+        result = validate_email(f"probe@{domain}", check_deliverability=True)
+        mx = getattr(result, "mx", None) or []
+        # email-validator returns [(preference, host), ...] sorted by preference.
+        return [host for _pref, host in mx if host]
+    except Exception:
+        return []
+
+
+def _smtp_probe(mx_host: str, recipient: str) -> int | None:
+    """
+    One RCPT TO probe. Returns the SMTP status code, or None if the
+    conversation could not be completed (connection refused, timeout, the
+    server dropped us). Uses an empty MAIL FROM, the standard "just checking"
+    envelope that does not imply an actual send.
+    """
+    try:
+        with smtplib.SMTP(mx_host, 25, timeout=_SMTP_PROBE_TIMEOUT) as smtp:
+            smtp.ehlo_or_helo_if_needed()
+            smtp.mail("")
+            code, _msg = smtp.rcpt(recipient)
+            return code
+    except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError,
+            socket.timeout, socket.gaierror, ConnectionError, OSError):
+        return None
+    except smtplib.SMTPException:
+        return None
+
+
+def _verify_mailbox(email: str) -> str:
+    """
+    'valid' | 'invalid' | 'catch_all' | 'inconclusive'
+
+    Only 'valid' is safe to treat as a confirmed address. 'catch_all' means
+    the server accepts everything so the probe proved nothing; 'inconclusive'
+    means we were greylisted, blocked or could not connect. Both of the
+    latter must leave the address exactly as trusted as it was before.
+    """
+    global _smtp_consecutive_failures, _smtp_breaker_tripped
+
+    if _smtp_breaker_tripped:
+        return "inconclusive"
+
+    domain = email.split("@", 1)[1]
+    hosts = _mx_hosts(domain)
+    if not hosts:
+        return "inconclusive"
+
+    mx = hosts[0]
+    real_code = _smtp_probe(mx, email)
+
+    if real_code is None:
+        _smtp_consecutive_failures += 1
+        if _smtp_consecutive_failures >= _SMTP_MAX_CONSECUTIVE_FAILURES:
+            _smtp_breaker_tripped = True
+            print("[DecisionMaker] SMTP verification circuit breaker tripped "
+                  "(mail hosts keep refusing us) — skipping further probes this run.")
+        return "inconclusive"
+
+    _smtp_consecutive_failures = 0
+
+    # Greylisting / temporary refusal — a retry might clear it, but we do not
+    # block a batch waiting, and a 4xx is never a confirmed rejection.
+    if 400 <= real_code < 500:
+        return "inconclusive"
+
+    if real_code >= 500:
+        return "invalid"
+
+    # 2xx: the server accepted the recipient. Now check it is not just
+    # accepting everything — probe an address that cannot exist.
+    sentinel = f"nx-{random.randint(10_000_000, 99_999_999)}-verify@{domain}"
+    sentinel_code = _smtp_probe(mx, sentinel)
+    if sentinel_code is not None and 200 <= sentinel_code < 300:
+        return "catch_all"
+
+    return "valid"
 
 
 class DecisionMaker:
@@ -107,12 +321,18 @@ class DecisionMaker:
         Find the best marketing contact for a company.
 
         Strategy order:
-            1. Custom website scraper looking for public emails.
-            2. LinkedIn OSINT (CEO/founder name + guessed email).
+            1. Custom website scraper looking for public emails (now also
+               decodes Cloudflare-protected addresses and mailto: links).
+            2. LinkedIn OSINT (CEO/founder name). LinkedIn has no email, so
+               the address is constructed from the name — a guess, unless
+               config.VERIFY_EMAIL_SMTP is on and the mail server confirms
+               one of the likely patterns exists.
             3. General OSINT email dork.
             4. Claude web_fetch (last resort, real API cost — only tried
                once every free strategy above has failed).
-            5. Fallback to generic email patterns.
+            5. Fallback to generic role patterns — an unverified marketing@
+               guess, or an SMTP-confirmed role address when VERIFY_EMAIL_SMTP
+               is on.
 
         Args:
             company_name: Business name.
@@ -149,12 +369,25 @@ class DecisionMaker:
             return self._finalise(generic_name, scraped_email, "", is_guess=False)
 
         # Strategy 2 — LinkedIn OSINT (CEO Discovery)
+        #
+        # LinkedIn does not publish email addresses, so this can only get a
+        # NAME. From the name we construct "first.last@domain" — a guess,
+        # flagged is_guess=True, that a human has to check before sending.
+        #
+        # When config.VERIFY_EMAIL_SMTP is on, we first try each likely
+        # pattern against the domain's own mail server; if one is confirmed to
+        # exist (and the domain is not catch-all), that comes back as a real
+        # verified address. If verification is off, inconclusive, or blocked,
+        # we fall through to the same single guess as before — it never makes
+        # the result worse.
         ceo_name = self._find_ceo_name(company_name)
         if ceo_name:
+            if config.VERIFY_EMAIL_SMTP:
+                verified = self._verified_email_from_name(ceo_name, domain)
+                if verified:
+                    return self._finalise(ceo_name, verified, "Founder / CEO", is_guess=False)
             guessed = self._guess_email_from_name(ceo_name, domain)
             if guessed:
-                # Constructed from a name pattern — nothing here can confirm
-                # the mailbox exists, so it is always a guess.
                 return self._finalise(ceo_name, guessed, "Founder / CEO", is_guess=True)
 
         # Strategy 3 — OSINT Email Dork
@@ -179,13 +412,50 @@ class DecisionMaker:
             result["cost"] = claude_cost
             return result
 
-        # Strategy 5 — generic email patterns. Still surface claude_cost here
-        # if the web_fetch call above was actually made but came up empty —
-        # a "miss" still spent real tokens and needs to show up in costs.
+        # Strategy 5 — generic email patterns. When SMTP verification is on,
+        # try the common role addresses (hello@, info@, contact@, ...) against
+        # the mail server and return the first one that actually exists as a
+        # verified address instead of an unverified marketing@ guess.
+        if config.VERIFY_EMAIL_SMTP:
+            verified_role = self._verified_role_email(domain)
+            if verified_role:
+                result = self._finalise(generic_name, verified_role, "", is_guess=False)
+                if claude_cost:
+                    result["cost"] = claude_cost
+                return result
+
         result = self._fallback_patterns(domain, generic_name)
         if claude_cost:
             result["cost"] = claude_cost
         return result
+
+    # ------------------------------------------------------------------
+    # SMTP-verified address construction (only when VERIFY_EMAIL_SMTP)
+    # ------------------------------------------------------------------
+
+    def _verified_email_from_name(self, name: str, domain: str) -> str:
+        """
+        First "first.last@domain"-style pattern for *name* that the mail
+        server confirms exists on a non-catch-all domain, or "" if none is
+        confirmed. A catch-all or blocked probe returns "" so the caller
+        falls back to its normal unverified guess.
+        """
+        for candidate in _person_email_patterns(name, domain):
+            if _verify_mailbox(candidate) == "valid":
+                return candidate
+            if _smtp_breaker_tripped:
+                break
+        return ""
+
+    def _verified_role_email(self, domain: str) -> str:
+        """As above, for generic role addresses when no person is known."""
+        for local_part in _ROLE_LOCAL_PARTS:
+            candidate = f"{local_part}@{domain}"
+            if _verify_mailbox(candidate) == "valid":
+                return candidate
+            if _smtp_breaker_tripped:
+                break
+        return ""
 
     # ------------------------------------------------------------------
     # Custom Website Scraper for Emails
@@ -197,22 +467,30 @@ class DecisionMaker:
         If html_content is provided, it scans that first without making a network request.
         """
         found_emails = set()
-        
-        # Check provided Playwright HTML first (bypasses Cloudflare)
+
+        # Check provided Playwright HTML first (bypasses Cloudflare). Uses the
+        # full extractor: decoded Cloudflare-protected addresses, mailto:
+        # targets and de-obfuscated "x at y dot z" forms, not just the raw
+        # regex — all three are common on these sites and invisible to a plain
+        # regex over text.
         if html_content:
-            emails = set(re.findall(_EMAIL_REGEX, html_content))
-            found_emails.update(emails)
-            
-        # If we didn't find anything, try standard HTTP ping on contact pages
+            found_emails.update(_extract_emails_from_html(html_content))
+
+        # If we didn't find anything, try standard HTTP ping on contact pages.
+        # More paths than before ("/contact" alone missed a lot): small
+        # business sites put the address on an About or Team page as often as
+        # a Contact one, and the slug varies.
         if not found_emails:
-            paths_to_check = ["", "/contact"]
+            paths_to_check = [
+                "", "/contact", "/contact-us", "/contact-us/", "/about",
+                "/about-us", "/team", "/get-in-touch", "/support",
+            ]
             for path in paths_to_check:
                 url = urljoin(base_url, path)
                 try:
                     response = self.client.get(url, headers=self.headers, follow_redirects=True)
                     if response.status_code == 200:
-                        emails = set(re.findall(_EMAIL_REGEX, response.text))
-                        found_emails.update(emails)
+                        found_emails.update(_extract_emails_from_html(response.text))
                         if found_emails:
                             break
                 except Exception:
