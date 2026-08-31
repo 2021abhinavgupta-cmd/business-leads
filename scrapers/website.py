@@ -321,6 +321,32 @@ class WebsiteScraper:
         final_url = (extra_audit_data or {}).get("final_url") or url
         has_ssl = str(final_url).startswith("https://")
 
+        # has_ssl=False only means the page WE loaded was plain HTTP. It does
+        # NOT prove the site has no HTTPS: a very common shared-hosting /
+        # WordPress setup serves both http:// and https:// and just never
+        # 301s one to the other, so a lead stored as "http://..." gets
+        # audited over HTTP even though its padlock works perfectly. Emitting
+        # "your site isn't secure, visitors see a Not Secure warning" against
+        # a site whose https:// loads fine is a false claim the recipient
+        # disproves by clicking their own address bar — live-reported on
+        # cityfitnessclub.in (2026-08-31), whose entire drafted pitch was
+        # this flaw. Before trusting has_ssl=False, probe https:// for the
+        # same host. Same shape as the httpx re-check in the `not html`
+        # branch below: verify a negative before asserting it.
+        https_available = has_ssl
+        if not has_ssl:
+            host = urlparse(final_url if "://" in str(final_url) else f"http://{final_url}").hostname
+            if host:
+                try:
+                    # httpx verifies the certificate by default, so status < 400
+                    # here means a valid cert AND a served page on https://.
+                    probe = await self.client.get(
+                        f"https://{host}/", timeout=10, follow_redirects=True
+                    )
+                    https_available = probe.status_code < 400
+                except Exception:
+                    https_available = False
+
         if not html:
             # Playwright failed twice (see analyzer/visuals.py's retry wrapper) —
             # but that means OUR headless browser choked, not necessarily that
@@ -633,6 +659,7 @@ class WebsiteScraper:
             tbt_ms=tbt_ms,
             inp_ms=inp_ms,
             has_ssl=has_ssl,
+            https_available=https_available,
             parsed=parsed,
             has_structured_data=has_structured_data,
             has_business_schema=has_business_schema,
@@ -1367,6 +1394,7 @@ class WebsiteScraper:
         cls: float | None = None,
         tbt_ms: int | None = None,
         has_ssl: bool,
+        https_available: bool = False,
         parsed: dict,
         has_structured_data: bool,
         readability_score: float | None,
@@ -1440,7 +1468,25 @@ class WebsiteScraper:
             flaws.append(Flaw("performance", sev, f"Total Blocking Time is {tbt_ms}ms (Google's 'good' threshold is 200ms) — the page is unresponsive to clicks/taps for a noticeable stretch while it loads."))
 
         if not has_ssl:
-            flaws.append(Flaw("security", "critical", "Website does not use HTTPS. Visitors see a \"Not Secure\" warning in the browser."))
+            if https_available:
+                # HTTPS works, the site just doesn't force it. A real but
+                # minor issue — and the wording has to rule out the two
+                # overstatements the model reached for when this was one flat
+                # "critical" line: that the site has no certificate, and that
+                # every visitor sees a warning (only someone who lands on the
+                # http:// URL specifically does, and most arrive on https via
+                # search results and typed domains).
+                flaws.append(Flaw(
+                    "security", "low",
+                    "The site loads over plain HTTP and does not redirect to its HTTPS version. "
+                    "HTTPS is available and the certificate is valid, so this is a one-line "
+                    "server redirect rule, not a missing certificate. Until it is in place, anyone "
+                    "who reaches the http:// address (an old link, a directory listing) gets a "
+                    "browser 'Not Secure' label. Do NOT say the site has no security certificate, "
+                    "is unsafe, or that every visitor sees a warning — none of that is true here."
+                ))
+            else:
+                flaws.append(Flaw("security", "critical", "Website does not use HTTPS. Visitors see a \"Not Secure\" warning in the browser."))
 
         if not parsed["meta_title"]:
             flaws.append(Flaw("seo", "high", "Missing page title (<title> tag). This hurts search engine rankings."))

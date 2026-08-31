@@ -156,6 +156,79 @@ def test_no_nap_data_produces_no_nap_flaws():
     assert "doesn't clearly appear on the website" not in descriptions
 
 
+# ---------------------------------------------------------------------------
+# "Website does not use HTTPS" false positive
+#
+# has_ssl is computed from the URL the browser actually loaded. A lead stored
+# as "http://..." whose site serves both http:// and https:// but never
+# 301s one to the other (an extremely common shared-hosting / WordPress
+# setup) gets audited over HTTP, so has_ssl=False — and the old single flat
+# flaw said "your site isn't secure, visitors see a Not Secure warning"
+# against a site whose padlock works perfectly. Live-reported on
+# cityfitnessclub.in (2026-08-31), whose entire drafted pitch was this flaw;
+# the owner opened https:// and it loaded fine.
+# ---------------------------------------------------------------------------
+
+def test_no_https_on_the_loaded_page_but_https_works_is_a_minor_redirect_flaw():
+    flaws = _flaws(has_ssl=False, https_available=True)
+    matched = [f for f in flaws if "does not redirect to its HTTPS version" in f.description]
+    assert len(matched) == 1
+    # Minor: a one-line server rule, not a missing certificate.
+    assert matched[0].severity == "low"
+
+
+def test_the_redirect_flaw_forbids_the_overstatements_the_model_reached_for():
+    """
+    "no security certificate" and "every visitor sees a warning" are both
+    false when https:// works — the flaw text has to rule them out, since it
+    is the line the model is told to quote.
+    """
+    flaw = next(f for f in _flaws(has_ssl=False, https_available=True)
+                if "does not redirect to its HTTPS version" in f.description)
+    text = flaw.description.lower()
+    assert "one-line" in text or "one line" in text
+    assert "not a missing certificate" in text
+    assert "do not say" in text
+
+
+def test_genuinely_no_https_anywhere_is_still_critical():
+    flaws = _flaws(has_ssl=False, https_available=False)
+    matched = [f for f in flaws if "does not use HTTPS" in f.description]
+    assert len(matched) == 1
+    assert matched[0].severity == "critical"
+
+
+def test_https_available_defaults_false_so_old_callers_still_get_the_critical_flaw():
+    """
+    The parameter is new; a caller that doesn't pass it must behave exactly
+    as before rather than silently downgrading every no-HTTPS lead.
+    """
+    flaws = _flaws(has_ssl=False)  # https_available not passed
+    assert any(f.severity == "critical" and "does not use HTTPS" in f.description for f in flaws)
+
+
+def test_a_normal_https_site_gets_neither_flaw():
+    descriptions = " ".join(f.description for f in _flaws(has_ssl=True))
+    assert "does not use HTTPS" not in descriptions
+    assert "does not redirect to its HTTPS version" not in descriptions
+
+
+def test_audit_website_probes_https_before_trusting_no_ssl():
+    """
+    The wiring: has_ssl=False must trigger an httpx GET to https:// for the
+    same host before the flaw is chosen, the same verify-a-negative pattern
+    the `not html` branch already uses.
+    """
+    import inspect
+    from scrapers.website import WebsiteScraper
+
+    source = inspect.getsource(WebsiteScraper.audit_website)
+    assert "https_available" in source
+    assert 'f"https://{host}/"' in source
+    assert "probe.status_code < 400" in source
+    assert "https_available=https_available" in source  # actually passed to _build_flaws
+
+
 def test_an_expired_certificate_is_critical():
     flaws = _flaws(cert_expiry_days=-3)
     matched = [f for f in flaws if "expired 3 days ago" in f.description]
