@@ -152,6 +152,11 @@ def _audit_client(monkeypatch, dm_result):
         return _real_web_data()
 
     monkeypatch.setattr(app_module.config, "API_KEY", None)
+    # These tests audit a signal-less synthetic lead to check the
+    # recipient-trust warnings; the established-business gate (default
+    # MIN_BUDGET_TIER=growing) would skip it before those run. Disable it —
+    # its own behaviour is covered in test_lead_filtering.py.
+    monkeypatch.setattr(app_module.config, "MIN_BUDGET_TIER", "")
     monkeypatch.setattr(app_module.ses, "check_quota", lambda: {"Max24HourSend": 100, "SentLast24Hours": 0})
     monkeypatch.setattr(app_module, "generate_audit_screenshot", _fake_screenshot)
     monkeypatch.setattr(app_module.web_scraper, "audit_website", _fake_audit_website)

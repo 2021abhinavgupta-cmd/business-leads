@@ -47,6 +47,29 @@ _NEARBY_TYPE_ROTATION = [
     "photographer", "consultant", "advertising_agency",
 ]
 
+def _passes_review_floor(lead: dict) -> bool:
+    """
+    True unless *lead* has a REAL Google review count below
+    config.MIN_GOOGLE_REVIEWS.
+
+    A missing, zero, blank or non-numeric ("N/A") count PASSES — a listing
+    with no review data is "unknown", not "small". This is what keeps the
+    filter from silently gutting the free Playwright/OSINT fallback (which
+    always reports 0) and any lead whose Places listing simply had no rating
+    data. Only a listing that positively reports "few reviews" is dropped.
+    """
+    floor = config.MIN_GOOGLE_REVIEWS
+    if floor <= 0:
+        return True
+    try:
+        count = int(lead.get("Reviews Count", 0))
+    except (TypeError, ValueError):
+        return True
+    if count <= 0:
+        return True
+    return count >= floor
+
+
 class GoogleMapsScraper:
     def __init__(self):
         self.api_key = config.GOOGLE_MAPS_API_KEY
@@ -142,6 +165,12 @@ class GoogleMapsScraper:
             if not next_token:
                 break
             payload["pageToken"] = next_token
+
+        before_review_filter = len(leads)
+        leads = [lead for lead in leads if _passes_review_floor(lead)]
+        dropped_thin = before_review_filter - len(leads)
+        if dropped_thin:
+            print(f"[Maps API] Dropped {dropped_thin} lead(s) with a Google review count below MIN_GOOGLE_REVIEWS={config.MIN_GOOGLE_REVIEWS}. Listings with no review data at all are kept.")
 
         deduped = self._deduplicate(leads)[:limit]
         # Two filters legitimately shrink the result set below `limit`:
@@ -280,10 +309,15 @@ class GoogleMapsScraper:
                 "Source": "Google Maps (Nearby)",
             })
 
+        before_review_filter = len(leads)
+        leads = [lead for lead in leads if _passes_review_floor(lead)]
+        dropped_thin = before_review_filter - len(leads)
+
         deduped = self._deduplicate(leads)
         print(
             f"[Maps Nearby] {len(places)} place(s) within {radius_m}m -> {len(deduped)} lead(s) "
-            f"({skipped_non_business} skipped as non-business, rest had no website or a duplicate domain)."
+            f"({skipped_non_business} skipped as non-business, {dropped_thin} below "
+            f"MIN_GOOGLE_REVIEWS={config.MIN_GOOGLE_REVIEWS}, rest had no website or a duplicate domain)."
         )
         return deduped
 

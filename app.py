@@ -26,7 +26,7 @@ from analyzer.visuals import (
     make_screenshot_filename,
     make_mobile_screenshot_filename,
 )
-from analyzer.budget_signal import estimate_budget_fit
+from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
 from storage.sheets import SheetsStorage
 from storage import db
@@ -516,6 +516,35 @@ async def audit_lead(
         if ig_handle:
             ig_data = await asyncio.to_thread(ig_scraper.get_instagram_data, ig_handle)
 
+        # 3b. Established-business gate. budget_signal is computed here (rather
+        # than only at the end for the dashboard badge) so a lead that shows
+        # no sign of being an established enough business is skipped BEFORE
+        # the AI draft and the send — every free scale signal is in hand by
+        # now (reviews, detected tooling, booking widget, IG reach, MCA), and
+        # the audit has already run so "unclear" means "checked, found
+        # nothing", not "haven't looked". No-op when MIN_BUDGET_TIER is empty.
+        budget_signal = estimate_budget_fit(
+            rating=req.rating,
+            reviews_count=req.reviews_count,
+            technologies=getattr(web_data, "technologies", None),
+            has_booking_widget=getattr(web_data, "has_booking_widget", False),
+            ig_followers=getattr(ig_data, "followers", None) if ig_data else None,
+            # A no-op (returns None immediately) until DATA_GOV_IN_API_KEY and
+            # MCA_COMPANY_MASTER_RESOURCE_ID are both set.
+            mca_match=await asyncio.to_thread(lookup_mca_company, req.company),
+        )
+        if not clears_min_tier(budget_signal, config.MIN_BUDGET_TIER):
+            return {
+                "error": (
+                    f"Skipped: {req.company} doesn't show enough signal of being an "
+                    f"established business to be worth an audit (budget tier "
+                    f"'{budget_signal['tier']}', minimum is '{config.MIN_BUDGET_TIER}'). "
+                    f"Lower or clear MIN_BUDGET_TIER to change this."
+                ),
+                "skipped_reason": "below_min_budget_tier",
+                "budget_signal": budget_signal,
+            }
+
         # 4. AI Audit (with visual critique)
         #
         # mobile_image_path and rating/reviews_count were missing here until
@@ -622,17 +651,8 @@ async def audit_lead(
             # Prioritisation only, for the operator's own dashboard — never
             # read by ai_audit.py or base_sender.py, so it structurally
             # cannot leak into the drafted copy. See analyzer/budget_signal.py.
-            "budget_signal": estimate_budget_fit(
-                rating=req.rating,
-                reviews_count=req.reviews_count,
-                technologies=getattr(web_data, "technologies", None),
-                has_booking_widget=getattr(web_data, "has_booking_widget", False),
-                ig_followers=getattr(ig_data, "followers", None) if ig_data else None,
-                # A no-op (returns None immediately) until DATA_GOV_IN_API_KEY
-                # and MCA_COMPANY_MASTER_RESOURCE_ID are both set — see
-                # analyzer/mca_lookup.py and config.py.
-                mca_match=await asyncio.to_thread(lookup_mca_company, req.company),
-            ),
+            # Computed once above (it also gates the audit), reused here.
+            "budget_signal": budget_signal,
         }
         if req.website:
             _audit_cache_set(req.website, result)

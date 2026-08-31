@@ -9,6 +9,7 @@ import sys
 
 import config
 from analyzer.ai_audit import AIAuditor
+from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from emailer import get_sender
 from enrichment.decision_maker import DecisionMaker
 from scrapers.instagram import InstagramScraper
@@ -41,7 +42,7 @@ emails_sent = 0
 async def process_single_lead(lead: dict) -> str:
     """
     Process a single lead.
-    Returns: "emailed" | "skipped" | "failed_no_email" | "failed_no_website" | "failed_unreachable" | "failed_ai_error" | "failed_error"
+    Returns: "emailed" | "skipped" | "skipped_low_budget" | "failed_no_email" | "failed_no_website" | "failed_unreachable" | "failed_ai_error" | "failed_error"
     """
     company = lead.get("Company", "")
     email = lead.get("Email", "")
@@ -121,6 +122,21 @@ async def process_single_lead(lead: dict) -> str:
         reviews_count = int(lead.get("Reviews Count") or 0)
     except (TypeError, ValueError):
         reviews_count = 0
+
+    # Established-business gate — skip the AI draft entirely for a lead that
+    # shows no sign of being an established enough business to be worth the
+    # send. No-op when MIN_BUDGET_TIER is empty. main.py does not do the MCA
+    # lookup (that's app.py only), so it's not passed here.
+    budget_signal = estimate_budget_fit(
+        rating=rating,
+        reviews_count=reviews_count,
+        technologies=getattr(web_data, "technologies", None),
+        has_booking_widget=getattr(web_data, "has_booking_widget", False),
+        ig_followers=getattr(ig_data, "followers", None) if ig_data else None,
+    )
+    if not clears_min_tier(budget_signal, config.MIN_BUDGET_TIER):
+        print(f"  Budget tier '{budget_signal['tier']}' below minimum '{config.MIN_BUDGET_TIER}' — skipping {company}.")
+        return "skipped_low_budget"
 
     analysis = auditor.analyze_lead(
         company, ig_data, web_data,

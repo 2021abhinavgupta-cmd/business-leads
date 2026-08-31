@@ -132,6 +132,33 @@ AI_SELF_CONSISTENCY = os.getenv("AI_SELF_CONSISTENCY", "true").strip().lower() n
 # than going out unnoticed. Set to 0 to disable the staleness gate entirely.
 DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 
+# Only audit and contact businesses that clear a minimum "established" bar.
+# Two independent filters — the tool was drafting cold emails to businesses
+# too new or too small to be worth the send.
+#
+# MIN_GOOGLE_REVIEWS — a Google Maps lead whose listing has a REAL review
+# count below this is dropped at scrape time (scrapers/google_maps.py),
+# before it costs anything downstream. A listing with NO review data at all
+# (0, blank, or "N/A" — a brand-new listing, the free Playwright/OSINT
+# fallback, or a non-Maps source with no review field) is NOT dropped:
+# absence of review data is "unknown", not "small", same principle the rest
+# of this codebase follows. Default 2000 is deliberately high — only large,
+# well-established businesses clear it, so a typical local-niche search will
+# return very few leads. Lower it (or set 0 to disable) if the pipeline
+# should target ordinary neighbourhood businesses again.
+MIN_GOOGLE_REVIEWS = int(os.getenv("MIN_GOOGLE_REVIEWS", "2000"))
+#
+# MIN_BUDGET_TIER — after the site audit, analyzer/budget_signal.py rates the
+# lead "unclear" / "growing" / "established" from every free signal already
+# in hand (Google reviews, detected paid ad/marketing/payment tooling, a paid
+# booking widget, Instagram reach, MCA company registration). A lead below
+# this tier is skipped BEFORE the AI draft and the send — the audit still
+# ran, but no email is written and nothing is queued. "growing" skips only
+# "unclear" leads (a lead that showed zero signal of scale on every axis
+# checked); "established" also skips "growing". Empty string disables it.
+# Same shape as CONTACT_THRESHOLD below — a pre-send gate on lead quality.
+MIN_BUDGET_TIER = os.getenv("MIN_BUDGET_TIER", "growing").strip().lower()
+
 # Only leads scoring BELOW this are contacted — above it the site is
 # considered healthy enough not to be worth a cold email. Lives here rather
 # than as a bare module constant in analyzer/ai_audit.py so it can be tuned

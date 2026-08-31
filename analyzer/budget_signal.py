@@ -185,3 +185,31 @@ def estimate_budget_fit(
         tier = "unclear"
 
     return {"tier": tier, "points": points, "signals": signals, "label": _TIER_LABELS[tier]}
+
+
+# Ordering for the MIN_BUDGET_TIER gate. "unclear" is the floor, so a
+# minimum of "unclear" (or anything unrecognised) is the same as no gate.
+_TIER_RANK = {"unclear": 0, "growing": 1, "established": 2}
+
+
+def clears_min_tier(budget_signal: dict | None, min_tier: str) -> bool:
+    """
+    True if *budget_signal*'s tier is at least *min_tier*.
+
+    Used by /api/audit and main.py to skip drafting/sending for a lead that
+    shows no sign of being an established enough business to be worth the
+    outreach — see config.MIN_BUDGET_TIER.
+
+    An empty, missing, or unrecognised *min_tier* disables the check (always
+    True), and so does "unclear", since nothing ranks below it. A lead whose
+    budget_signal is missing or has no recognised tier is treated as
+    "unclear" — but note this only runs AFTER a completed audit, so by the
+    time it's reached the reviews / tooling / booking / follower signals have
+    all genuinely been checked; an "unclear" here means "we looked and found
+    nothing", not "we haven't looked".
+    """
+    floor = (min_tier or "").strip().lower()
+    if floor not in _TIER_RANK or floor == "unclear":
+        return True
+    have = _TIER_RANK.get(((budget_signal or {}).get("tier") or "").lower(), 0)
+    return have >= _TIER_RANK[floor]
