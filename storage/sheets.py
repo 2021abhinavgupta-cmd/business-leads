@@ -4,6 +4,7 @@ Storage module — manages the CRM data in Google Sheets.
 
 import os
 import json
+import threading
 from datetime import datetime, timezone
 
 import gspread
@@ -44,6 +45,70 @@ class SheetsStorage:
     """Manage lead CRM data in Google Sheets."""
 
     def __init__(self):
+        """
+        Prepare the CRM handle WITHOUT touching the network.
+
+        This used to authenticate against Google and open the spreadsheet
+        right here. Because `app.py` constructs `SheetsStorage()` at module
+        scope, that made `import app` perform a live, credentialed Google API
+        call — so merely importing the application required working Sheets
+        credentials, a correct system clock, and network access.
+
+        The consequences were real and already documented in CLAUDE.md §8:
+        an unrelated environment problem surfaced as scattered failures across
+        several test files rather than one clearly-labelled Sheets error (a
+        dev machine whose clock had drifted 11 days took a while to diagnose
+        for exactly this reason). Worse, and previously unnoticed: **GitHub
+        Actions configures no secrets at all**, so `GOOGLE_SHEETS_ID` is unset
+        there and every `import app` test has been erroring on every push,
+        while §6 claimed they "run for real" in CI.
+
+        Connecting lazily fixes all of that at once and changes nothing about
+        how the CRM behaves — the first method that actually needs the
+        spreadsheet still connects, still raises the same errors, and still
+        self-heals the header row. What moves is only WHEN, from import time
+        to first real use.
+        """
+        self._gc = None
+        self._sheet = None
+        # Guard against two threads connecting at once: app.py dispatches
+        # every sheets call through asyncio.to_thread, so concurrent requests
+        # can reach the property simultaneously on a cold process.
+        self._connect_lock = threading.Lock()
+
+        # A misconfigured deployment must still be obvious. It just gets a
+        # startup warning here instead of a crash, matching how app.py already
+        # announces a missing API_KEY / ALLOWED_ORIGINS rather than refusing
+        # to boot. The audit and drafting paths do not need Sheets at all
+        # (every write to it is a background task wrapped in try/except), so
+        # taking the whole web service down over the legacy CRM was a heavier
+        # failure than the problem warranted.
+        if not config.GOOGLE_SHEETS_ID:
+            print(
+                "[Sheets] WARNING: GOOGLE_SHEETS_ID is not set — the CRM is unavailable. "
+                "Audits and drafts still work; anything that reads or writes the lead sheet "
+                "will fail when it is first used."
+            )
+
+    @property
+    def sheet(self):
+        """The worksheet, connecting on first access."""
+        if self._sheet is None:
+            with self._connect_lock:
+                # Re-check inside the lock: another thread may have connected
+                # while this one waited.
+                if self._sheet is None:
+                    self._connect()
+        return self._sheet
+
+    def _connect(self) -> None:
+        """
+        Authenticate and open the spreadsheet.
+
+        Raises exactly what __init__ used to raise, so a genuinely
+        misconfigured environment still gets the same clear message — only
+        later, and only if something actually needed the CRM.
+        """
         if not config.GOOGLE_SHEETS_ID:
             raise ValueError("GOOGLE_SHEETS_ID is not set in config / environment.")
 
@@ -52,16 +117,18 @@ class SheetsStorage:
         if creds_json_str:
             try:
                 creds_dict = json.loads(creds_json_str)
-                self.gc = gspread.service_account_from_dict(creds_dict)
+                self._gc = gspread.service_account_from_dict(creds_dict)
             except Exception as e:
                 raise ValueError(f"Failed to parse GOOGLE_CREDENTIALS_JSON: {e}")
         # Fallback to local credentials.json file
         else:
             if not os.path.exists(_CREDENTIALS_FILE):
                 raise FileNotFoundError(f"Missing Google Sheets credentials at {_CREDENTIALS_FILE} and GOOGLE_CREDENTIALS_JSON is empty.")
-            self.gc = gspread.service_account(filename=_CREDENTIALS_FILE)
+            self._gc = gspread.service_account(filename=_CREDENTIALS_FILE)
 
-        self.sheet = self.gc.open_by_key(config.GOOGLE_SHEETS_ID).sheet1
+        # Assigned BEFORE init_sheet() so the header backfill can read
+        # self.sheet through the property without re-entering _connect().
+        self._sheet = self._gc.open_by_key(config.GOOGLE_SHEETS_ID).sheet1
         self.init_sheet()
 
     # ------------------------------------------------------------------

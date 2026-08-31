@@ -222,6 +222,11 @@ class WebsiteData:
     perf_timing: dict = field(default_factory=dict)
     lighthouse_scores: dict = field(default_factory=dict)
     visual_flaw_context: str = ""
+    # Set only when a red box was genuinely drawn into the MOBILE capture as
+    # well. Kept separate from the desktop one because both screenshots are
+    # attached to the outgoing email now, so "the red box" on its own is
+    # ambiguous — the prompt has to be able to say which image it means.
+    mobile_visual_flaw_context: str = ""
     # Phone numbers found on the page, verbatim. Carried through so the NAP
     # claim in a draft can be checked against what the site actually shows
     # rather than against a derived boolean — a mismatch flaw asserts a
@@ -680,6 +685,7 @@ class WebsiteScraper:
             perf_timing=perf_timing,
             lighthouse_scores=lighthouse_scores,
             visual_flaw_context=extra.get("visual_flaw_context", ""),
+            mobile_visual_flaw_context=extra.get("mobile_visual_flaw_context", ""),
             flaws=flaws,
             signal_status=signal_status,
         )

@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from PIL import Image, ImageDraw
+from PIL import Image
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
@@ -29,6 +29,81 @@ _EXTRA_PAGE_KEYWORDS = ['about', 'service', 'pricing', 'contact', 'product', 'wo
 _MAX_EXTRA_PAGES = 2
 _SEVERITY_RANK = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
 
+# Real mobile emulation for the phone-viewport pass.
+#
+# This used to be `set_viewport_size({390, 844})` called on the DESKTOP context
+# AFTER navigating, which is not a phone — it is a narrow desktop window. The
+# context kept its desktop Chrome user agent, is_mobile/has_touch stayed False
+# and device_scale_factor stayed 1, so any site that branches on the user agent
+# served its desktop build and Chromium's mobile viewport-meta behaviour never
+# engaged at all. The screenshot was then attached to an email describing it as
+# the site "on mobile", and the model was asked to make mobile-specific claims
+# from it. A device descriptor has to set all five properties together for the
+# render to be genuinely mobile.
+#
+# The user agent is Android Chrome, NOT iOS Safari, deliberately: we drive
+# Chromium, and Playwright's own iPhone descriptors declare
+# defaultBrowserType "webkit". Serving a site an iOS Safari UA while rendering
+# in Chromium invites it to send WebKit-specific CSS/JS to an engine that
+# handles it differently, which would be a new way for the screenshot to
+# disagree with what a real visitor sees. Engine and UA agree here.
+#
+# 390x844 keeps the CSS viewport this pipeline has always used (and that
+# CLAUDE.md documents). device_scale_factor 2 renders text at retina sharpness
+# without the ~1080px-wide image a real Pixel's 2.75 would produce, since this
+# capture is emailed as an attachment.
+_MOBILE_VIEWPORT = {"width": 390, "height": 844}
+_MOBILE_DEVICE = {
+    "viewport": _MOBILE_VIEWPORT,
+    "user_agent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    ),
+    "device_scale_factor": 2,
+    "is_mobile": True,
+    "has_touch": True,
+}
+
+# Consent banners, chat bubbles and newsletter popups are not the prospect's
+# design work, but they sit on top of it — and a capture taken with one up
+# hands the vision model a picture whose most prominent element belongs to a
+# third party. Hidden before axe-core runs rather than only before the
+# screenshot, so the violations we report and the image we attach describe the
+# same page; a violation inside a widget we then hid would be a finding the
+# recipient cannot see and did not author.
+#
+# Matched on id/class substrings and common vendor attributes rather than
+# heuristics about position, because a "fixed element near the bottom of the
+# viewport" is just as often the site's own sticky call-to-action, which IS
+# their design and must stay.
+_OVERLAY_SUPPRESSION_SELECTORS = (
+    "#onetrust-consent-sdk", "#onetrust-banner-sdk", ".onetrust-pc-dark-filter",
+    "#CybotCookiebotDialog", "#cookiescript_injected", "#cookie-law-info-bar",
+    "#cmplz-cookiebanner-container", ".cc-window", ".cookie-notice-container",
+    "#moove_gdpr_cookie_info_bar", "#gdpr-cookie-message", "#hs-eu-cookie-confirmation",
+    "[id*='cookie-banner']", "[class*='cookie-banner']", "[class*='cookie-consent']",
+    "[aria-label*='cookie' i]", "[aria-label*='consent' i]",
+    "#tidio-chat", "#intercom-container", "#hubspot-messages-iframe-container",
+    "#drift-widget", "#crisp-chatbox", ".zsiq_floatmain", "#launcher",
+    "[id*='livechat']", "[class*='whatsapp-float']",
+)
+
+# A highlight that fills the screenshot reads as "the whole page is wrong"
+# rather than pointing at anything, and one that barely covers a few pixels is
+# invisible once the image is scaled down inside a mail client.
+#
+# Measured as a fraction of viewport AREA, not as width-and-height each being
+# near-full. The old check was an AND on both dimensions, which let a hero
+# wrapper that was tall but a little narrower than the viewport through — a
+# real, live-reproduced miss (CLAUDE.md §8, lp.zooty.in). Area catches that
+# case and the tall-narrow one the dimension check never could, in one number.
+_MAX_HIGHLIGHT_AREA_FRACTION = 0.5
+_MIN_HIGHLIGHT_PX = 12
+
+# Marker id for the injected highlight, so it can be removed again and so a
+# stray one from a previous page can never be screenshotted twice.
+_HIGHLIGHT_OVERLAY_ID = "__lead_audit_highlight__"
+
 
 def normalise_url(url: str) -> str:
     """Ensure *url* has a scheme prefix (mirrors scrapers.website._normalise_url)."""
@@ -46,6 +121,19 @@ def make_screenshot_filename(company_name: str, url: str) -> str:
     safe_name = "".join(c if c.isalnum() else "_" for c in company_name.lower())
     url_hash = hashlib.md5(normalise_url(url).encode()).hexdigest()[:8]
     return f"{safe_name}_{url_hash}_audit.jpg"
+
+
+def make_mobile_screenshot_filename(company_name: str, url: str) -> str:
+    """
+    Filename of the MOBILE capture for the same lead.
+
+    Both this and the desktop name are now needed outside this module (the
+    send path attaches both images), so the "_audit.jpg" -> "_mobile.jpg"
+    convention lives here once rather than being re-derived with a string
+    replace at each call site — two copies of a filename rule is how one of
+    them ends up looking for a file the other never wrote.
+    """
+    return make_screenshot_filename(company_name, url).replace("_audit.jpg", "_mobile.jpg")
 
 
 async def _discover_extra_urls_via_sitemap(base_url: str) -> list[str]:
@@ -124,15 +212,201 @@ def _page_label(url: str) -> str:
     return path if path else "/"
 
 
-async def _audit_current_page(page, context, label: str, screenshot_bytes: bytes) -> dict:
+async def _suppress_overlays(page) -> None:
+    """
+    Hide consent banners, chat bubbles and newsletter popups.
+
+    Run BEFORE axe-core, not just before the screenshot, so the violations we
+    report and the image we attach describe the same page. A violation raised
+    inside a widget we then hid would be a finding the recipient cannot see in
+    the attachment and did not author in the first place.
+
+    Best-effort and never fatal: a site with none of these selectors is the
+    normal case, and failing to hide a banner is much less bad than failing
+    the audit.
+    """
+    try:
+        await page.add_style_tag(
+            content=", ".join(_OVERLAY_SUPPRESSION_SELECTORS)
+            + " { display: none !important; }"
+        )
+    except Exception as e:
+        print(f"[Visuals] Overlay suppression skipped (non-critical): {e}")
+
+
+async def _highlight_element(page, candidates: list[dict]) -> dict | None:
+    """
+    Draw the red highlight IN THE BROWSER, on the first candidate that is
+    genuinely visible and well-sized, and return what was highlighted.
+
+    This replaces measuring a bounding box in Python and then drawing a
+    rectangle onto the image bytes with Pillow. That older approach captured
+    the screenshot at one moment and measured the element several seconds
+    later — after page.content(), the performance-timing reads and axe-core's
+    own multi-second scan — and Playwright's own documentation is explicit
+    that bounding-box coordinates are viewport-relative and only safe to reuse
+    "assuming the page is static". These pages are not static: a rotating
+    carousel, a banner that finishes animating in, or lazy content reflowing
+    above the element all move it without moving the already-captured image,
+    and the box then lands on whatever happens to occupy those coordinates.
+    Nothing downstream could detect that, because a misplaced box looks
+    exactly like a correctly placed one.
+
+    Injecting an absolutely-positioned outline into the DOM removes the
+    failure mode rather than guarding against it: the measurement and the draw
+    happen in the same synchronous JavaScript execution, so no layout change
+    can occur between them, and the browser then renders the outline into the
+    screenshot itself. The box cannot be misaligned with the image because the
+    same engine produced both, at the same instant.
+
+    Returns a dict describing what was actually boxed, or None if no candidate
+    qualified — in which case no box is drawn and no red-box claim is made.
+    """
+    if not candidates:
+        return None
+
+    try:
+        return await page.evaluate(
+            """(payload) => {
+                const { candidates, maxArea, minPx, overlayId } = payload;
+                const vw = window.innerWidth;
+                const vh = window.innerHeight;
+
+                // Never stack two highlights, e.g. if a previous page's
+                // overlay somehow survived a navigation.
+                const stale = document.getElementById(overlayId);
+                if (stale) stale.remove();
+
+                for (const candidate of candidates) {
+                    let el = null;
+                    try {
+                        el = document.querySelector(candidate.selector);
+                    } catch (e) {
+                        continue;  // axe can emit selectors querySelector rejects
+                    }
+                    if (!el) continue;
+
+                    const rect = el.getBoundingClientRect();
+                    if (!rect) continue;
+
+                    // Too small to see once a mail client scales the image down.
+                    if (rect.width < minPx || rect.height < minPx) continue;
+
+                    // Must sit entirely inside the captured viewport. An
+                    // element below the fold returns a perfectly valid box
+                    // whose coordinates are simply not in the picture.
+                    if (rect.left < 0 || rect.top < 0) continue;
+                    if (rect.right > vw || rect.bottom > vh) continue;
+
+                    // Covering most of the frame highlights nothing in particular.
+                    if ((rect.width * rect.height) > (vw * vh * maxArea)) continue;
+
+                    // Present in the layout but not actually drawn.
+                    const style = getComputedStyle(el);
+                    if (style.visibility === 'hidden') continue;
+                    if (style.display === 'none') continue;
+                    if (parseFloat(style.opacity) === 0) continue;
+
+                    const box = document.createElement('div');
+                    box.id = overlayId;
+                    // position:fixed with viewport coordinates matches a
+                    // full_page=False screenshot exactly. Appended to
+                    // documentElement so no ancestor transform/filter can
+                    // reparent the fixed positioning context.
+                    box.style.cssText = [
+                        'position:fixed',
+                        'left:' + (rect.left - 4) + 'px',
+                        'top:' + (rect.top - 4) + 'px',
+                        'width:' + (rect.width + 8) + 'px',
+                        'height:' + (rect.height + 8) + 'px',
+                        'border:4px solid #ff0000',
+                        'border-radius:3px',
+                        'box-sizing:border-box',
+                        'background:transparent',
+                        'pointer-events:none',
+                        'z-index:2147483647'
+                    ].join(';');
+                    document.documentElement.appendChild(box);
+
+                    return {
+                        selector: candidate.selector,
+                        description: candidate.description,
+                        impact: candidate.impact,
+                        x: rect.left,
+                        y: rect.top,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                }
+                return null;
+            }""",
+            {
+                "candidates": candidates,
+                "maxArea": _MAX_HIGHLIGHT_AREA_FRACTION,
+                "minPx": _MIN_HIGHLIGHT_PX,
+                "overlayId": _HIGHLIGHT_OVERLAY_ID,
+            },
+        )
+    except Exception as e:
+        print(f"[Visuals] Could not draw the highlight (non-critical): {e}")
+        return None
+
+
+async def _remove_highlight(page) -> None:
+    """Take the highlight back off, so later checks measure the real page."""
+    try:
+        await page.evaluate(
+            "(id) => { const el = document.getElementById(id); if (el) el.remove(); }",
+            _HIGHLIGHT_OVERLAY_ID,
+        )
+    except Exception:
+        pass
+
+
+async def _capture(page) -> bytes:
+    """
+    Screenshot the viewport with the two options that make a capture
+    reproducible.
+
+    animations="disabled" is Playwright's own guarantee here: finite CSS
+    animations, CSS transitions and Web Animations are fast-forwarded to
+    completion (so an entrance fade lands at its final state instead of
+    whatever opacity it happened to be at), and infinite ones are cancelled to
+    their initial state and resumed afterwards. That is exactly the problem
+    the manual scroll pass in the main flow was approximating by hand, and it
+    covers the cases scrolling cannot: a hero that cross-fades on a timer, a
+    counter mid-count, a slider between slides.
+
+    caret="hide" removes a blinking text cursor, which otherwise lands in the
+    capture on any site that autofocuses a search or newsletter field.
+    """
+    return await page.screenshot(full_page=False, animations="disabled", caret="hide")
+
+
+async def _audit_current_page(page, context, label: str) -> dict:
     """
     Run every per-page check (accessibility, broken links, fonts, stretched
     images, title/meta-description) against whatever page is currently
-    loaded in *page*. Violations and broken links get tagged with *label*
-    when it's not the homepage, so the AI prompt (and the human reading the
-    email) knows which page a flaw came from.
+    loaded in *page*, and capture this page's screenshot. Violations and
+    broken links get tagged with *label* when it's not the homepage, so the
+    AI prompt (and the human reading the email) knows which page a flaw came
+    from.
+
+    The screenshot is taken HERE, immediately after the highlight is injected,
+    rather than being captured by the caller and passed in. The old signature
+    took `screenshot_bytes` from a capture made before axe-core ran, which is
+    what allowed the image and the red box to describe different moments in
+    the page's life — see _highlight_element.
     """
-    violations, visual_flaw = await _run_axe_audit(page)
+    violations, candidates = await _run_axe_audit(page)
+
+    # Highlight, capture, un-highlight — in that order and with nothing in
+    # between, so the outline in the image is the element axe-core actually
+    # objected to, and the checks below still measure the unmodified page.
+    visual_flaw = await _highlight_element(page, candidates)
+    screenshot_bytes = await _capture(page)
+    await _remove_highlight(page)
+
     broken_links, links_checked = await _check_broken_assets(page, context)
     font_families = await _check_font_consistency(page)
     stretched_images = await _check_stretched_images(page)
@@ -342,8 +616,11 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
 
                 # Listeners persist for the page's whole lifetime, so attaching
                 # them once here captures console errors and mixed-content
-                # requests across the homepage, every extra page crawled below,
-                # AND the mobile-viewport revisit — no need to re-attach.
+                # requests across the homepage and every extra page crawled
+                # below. The mobile pass now runs in its own context (real
+                # device emulation can only be set at context creation), so it
+                # re-attaches these two listeners itself rather than inheriting
+                # them — see the mobile block further down.
                 console_errors: list[str] = []
                 page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" and len(console_errors) < 10 else None)
 
@@ -449,18 +726,26 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
                 # written on it. See the fonts-* block in the Dockerfile.
                 text_renderable = await _can_render_text(page)
 
-                # --- 1. Take screenshot ---
-                screenshot_bytes = await page.screenshot(full_page=False)
-
-                # --- 2. Grab fully rendered HTML ---
+                # --- 1. Grab fully rendered HTML ---
                 html_content = await page.content()
 
-                # --- 3. Capture real performance timing from the browser ---
+                # --- 2. Capture real performance timing from the browser ---
                 perf_timing = await _get_performance_timing(page)
                 real_web_vitals = await _get_real_web_vitals(page)
 
-                # --- 4. Run every per-page check on the homepage ---
-                pages_checked = [await _audit_current_page(page, context, "/", screenshot_bytes)]
+                # --- 3. Hide third-party consent/chat overlays ---
+                # Before axe-core runs, so the violations reported and the
+                # image attached describe the same page. A cookie wall is also
+                # the single most common reason the attached screenshot showed
+                # a grey scrim instead of the prospect's homepage.
+                await _suppress_overlays(page)
+
+                # --- 4. Run every per-page check on the homepage, INCLUDING
+                # its screenshot. The capture happens inside this call, right
+                # after the highlight is injected — it is no longer taken up
+                # here and passed down, because that gap is what let the box
+                # and the image describe different moments.
+                pages_checked = [await _audit_current_page(page, context, "/")]
 
                 # --- 5. Crawl a few internal pages and run the same checks on them ---
                 # Sitemap.xml first (catches real pages the nav doesn't link to);
@@ -477,8 +762,8 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
                         except Exception:
                             pass
                         await page.wait_for_timeout(1500)
-                        extra_screenshot = await page.screenshot(full_page=False)
-                        pages_checked.append(await _audit_current_page(page, context, label, extra_screenshot))
+                        await _suppress_overlays(page)
+                        pages_checked.append(await _audit_current_page(page, context, label))
                     except Exception as e:
                         # A slow/broken subpage shouldn't sink the whole audit —
                         # just skip it and keep whatever pages did succeed.
@@ -497,34 +782,110 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
                 mobile_screenshot_bytes = None
                 mobile_horizontal_overflow = False
                 mobile_violations: list[dict] = []
+                mobile_visual_flaw = None
+                mobile_context = None
                 try:
-                    await page.goto(final_url, timeout=60000, wait_until="domcontentloaded")
-                    await page.set_viewport_size({"width": 390, "height": 844})
+                    # A SEPARATE context carrying a real device descriptor.
+                    # Resizing the desktop context's viewport (what this used
+                    # to do) keeps the desktop user agent, is_mobile=False,
+                    # has_touch=False and device_scale_factor=1 — a narrow
+                    # desktop window, not a phone. Sites that branch on the
+                    # user agent kept serving their desktop build into an
+                    # image the email then described as "on mobile". The
+                    # descriptor has to be applied at context creation, so
+                    # this cannot be fixed by resizing after navigation.
+                    mobile_context = await browser.new_context(**_MOBILE_DEVICE)
+                    mobile_page = await mobile_context.new_page()
+
+                    # Same listeners as the desktop page — the previous
+                    # implementation reused one page, so console errors and
+                    # mixed-content requests seen only at mobile width were
+                    # captured for free. Re-attached here so moving to a
+                    # separate context doesn't quietly lose that coverage.
+                    mobile_page.on(
+                        "console",
+                        lambda msg: console_errors.append(msg.text)
+                        if msg.type == "error" and len(console_errors) < 10 else None,
+                    )
+
+                    def _track_mobile_mixed_content(request):
+                        try:
+                            if request.url.startswith("http://") and mobile_page.url.startswith("https://"):
+                                mixed_content_urls.add(request.url)
+                        except Exception:
+                            pass
+                    mobile_page.on("request", _track_mobile_mixed_content)
+
+                    await mobile_page.goto(final_url, timeout=60000, wait_until="domcontentloaded")
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=10000)
+                        await mobile_page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
-                    await page.wait_for_timeout(1500)
-                    mobile_screenshot_bytes = await page.screenshot(full_page=False)
+                    await mobile_page.wait_for_timeout(3000)
 
+                    # The desktop capture waits on fonts and scrolls the page
+                    # to trigger entrance animations and lazy images; the
+                    # mobile one used to do neither, so it was systematically
+                    # the more under-rendered of the two — and it is the one
+                    # the model is asked to find mobile-only problems in.
                     try:
-                        mobile_horizontal_overflow = await page.evaluate(
+                        await mobile_page.evaluate("() => document.fonts.ready")
+                    except Exception:
+                        pass
+                    try:
+                        await mobile_page.evaluate(
+                            """async () => {
+                                const step = window.innerHeight;
+                                const height = document.body.scrollHeight;
+                                for (let y = 0; y < height; y += step) {
+                                    window.scrollTo(0, y);
+                                    await new Promise(r => setTimeout(r, 150));
+                                }
+                                window.scrollTo(0, 0);
+                            }"""
+                        )
+                        await mobile_page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+
+                    # Measured BEFORE the overlays are hidden: a consent
+                    # banner wider than the screen is a real horizontal
+                    # overflow for a real visitor, and hiding it first would
+                    # report the site as fine when it is not.
+                    try:
+                        mobile_horizontal_overflow = await mobile_page.evaluate(
                             "() => document.documentElement.scrollWidth > window.innerWidth + 5"
                         )
                     except Exception:
                         pass
 
-                    mobile_violations, _ = await _run_axe_audit(page)
+                    await _suppress_overlays(mobile_page)
+
+                    mobile_violations, mobile_candidates = await _run_axe_audit(mobile_page)
                     for v in mobile_violations:
                         v["page"] = "mobile view"
+
+                    # The mobile capture gets the same treatment as the
+                    # desktop one: highlight in-browser, capture, un-highlight.
+                    mobile_visual_flaw = await _highlight_element(mobile_page, mobile_candidates)
+                    mobile_screenshot_bytes = await _capture(mobile_page)
+                    await _remove_highlight(mobile_page)
+                    if mobile_visual_flaw:
+                        print(f"[Visuals] Mobile highlight drawn on {mobile_visual_flaw['selector']}")
                 except Exception as e:
                     print(f"[Visuals] Mobile screenshot/checks failed (non-critical): {e}")
+                finally:
+                    if mobile_context is not None:
+                        try:
+                            await mobile_context.close()
+                        except Exception:
+                            pass
 
                 await browser.close()
 
         # Pick whichever audited page has the most severe visual flaw (red-box
         # evidence) to attach to the email — falls back to the homepage if no
-        # page had a violation with a usable bounding box.
+        # page had a violation the browser could actually outline.
         best = pages_checked[0]
         for candidate in pages_checked[1:]:
             if candidate["visual_flaw"] and (
@@ -534,19 +895,20 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             ):
                 best = candidate
 
-        # Draw analysis box on the chosen image
+        # The red box is ALREADY in these bytes — the browser rendered it as
+        # part of the page (see _highlight_element), so Pillow's only job here
+        # is the JPEG conversion. Nothing is drawn onto the image after the
+        # fact any more, which is what removes the possibility of the outline
+        # and the pixels underneath it describing different moments.
         img = Image.open(BytesIO(best["screenshot_bytes"])).convert("RGB")
 
         visual_flaw_context = ""
         if best["visual_flaw"]:
-            draw = ImageDraw.Draw(img)
-            box = best["visual_flaw"]["box"]
-            # Pad the box slightly for better visibility
-            pad = 5
-            padded_box = [max(0, box[0]-pad), max(0, box[1]-pad), box[2]+pad, box[3]+pad]
-            draw.rectangle(padded_box, outline="red", width=4)
             page_note = f" on the {best['label']} page" if best["label"] != "/" else ""
-            visual_flaw_context = f"The red box in the screenshot highlights an accessibility flaw{page_note}: {best['visual_flaw']['description']}."
+            visual_flaw_context = (
+                f"The red box in the desktop screenshot highlights an accessibility "
+                f"flaw{page_note}: {best['visual_flaw']['description']}."
+            )
 
         filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
@@ -555,8 +917,7 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
         if mobile_screenshot_bytes:
             mobile_img = Image.open(BytesIO(mobile_screenshot_bytes)).convert("RGB")
             mobile_filepath = os.path.join(
-                SCREENSHOTS_DIR,
-                make_screenshot_filename(company_name, url).replace("_audit.jpg", "_mobile.jpg"),
+                SCREENSHOTS_DIR, make_mobile_screenshot_filename(company_name, url)
             )
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
@@ -591,6 +952,15 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             "perf_timing": perf_timing,
             "response_headers": response_headers,
             "visual_flaw_context": visual_flaw_context,
+            # Set only when a box was genuinely drawn into the mobile capture
+            # too. Kept separate from the desktop one so the prompt can say
+            # which image a box is in — both are attached to the email now,
+            # and "the red box" is ambiguous across two pictures.
+            "mobile_visual_flaw_context": (
+                f"The red box in the mobile screenshot highlights an accessibility flaw: "
+                f"{mobile_visual_flaw['description']}."
+                if mobile_visual_flaw else ""
+            ),
             "font_families": all_font_families,
             "stretched_images": total_stretched_images,
             "console_errors": console_errors,
@@ -663,8 +1033,15 @@ async def _get_real_web_vitals(page) -> dict:
         return {}
 
 
-async def _run_axe_audit(page) -> tuple[list, dict | None]:
-    """Run axe-core accessibility engine on the current page."""
+async def _run_axe_audit(page) -> tuple[list, list[dict]]:
+    """
+    Run the axe-core accessibility engine on the current page.
+
+    Returns (violations, highlight_candidates). The candidates are selectors
+    ranked most-severe-first; _highlight_element picks and draws one. This
+    function no longer resolves coordinates itself — see the comment on the
+    candidate list below.
+    """
     try:
         from axe_playwright_python.async_playwright import Axe
         axe = Axe()
@@ -685,81 +1062,55 @@ async def _run_axe_audit(page) -> tuple[list, dict | None]:
         severity_order = {"critical": 0, "serious": 1, "moderate": 2, "minor": 3}
         violations.sort(key=lambda x: severity_order.get(x["impact"], 4))
         
-        # Interconnect: Find a visible node to draw a real red box around.
-        # bounding_box() reports position in full-DOCUMENT coordinates, not
-        # clipped to the viewport — an element below the fold (a footer
-        # iframe, a booking widget halfway down the page) still returns a
-        # "valid" non-null box, but the screenshot this gets drawn onto is
-        # page.screenshot(full_page=False) — viewport-only. Live-verified
-        # 2026-08-07 against a real lead (lp.zooty.in/anjaneya-dental-care):
-        # a `frame-title` violation on an off-screen iframe produced a box
-        # at y=4858 on an 800px-tall image (invisible), and on a different
-        # run the same site's `region` violation resolved to a full hero
-        # wrapper `<div>` — in-bounds at the top, but tall enough to fill
-        # nearly the whole visible screenshot, which is indistinguishable
-        # from "no specific flaw was highlighted" even though a box WAS
-        # drawn. Viewport dimensions are read from the page itself (not
-        # hardcoded) since mobile passes use a different viewport.
-        viewport = page.viewport_size or {"width": 1280, "height": 800}
-        visual_flaw = None
+        # Build a severity-ordered list of elements that COULD be highlighted.
+        #
+        # This function deliberately no longer decides which one wins, and no
+        # longer measures anything. Every geometry check (in-viewport, big
+        # enough to see, not covering the whole frame, actually painted) now
+        # happens inside _highlight_element's single evaluate() call, at the
+        # same instant the outline is drawn and the screenshot is taken.
+        # Measuring here and drawing later is precisely what let the box drift
+        # away from the picture on any page with a carousel or a late-settling
+        # layout — see _highlight_element's docstring.
+        candidates = []
         for v in violations:
             for node in v.get("nodes", []):
                 target_selectors = node.get("target", [])
                 if not target_selectors:
                     continue
                 selector = target_selectors[0]
-                try:
-                    if isinstance(selector, list):
-                        selector = selector[0]
-
-                    # Skip root level elements as they don't make for good visual highlights
-                    if selector.lower() in ["html", "body", "head"]:
+                if isinstance(selector, list):
+                    if not selector:
                         continue
+                    selector = selector[0]
+                if not isinstance(selector, str):
+                    continue
+                # Root-level elements make no useful highlight — boxing <body>
+                # is the same as boxing nothing.
+                if selector.strip().lower() in ("html", "body", "head"):
+                    continue
+                candidates.append({
+                    "selector": selector,
+                    "description": v.get("help", ""),
+                    "impact": v.get("impact", "minor"),
+                })
 
-                    # Get exact coordinates of the flawed element. 3s, not
-                    # Playwright's default — this was the one 1s timeout left
-                    # over from before the rest of this function's waits were
-                    # generously bumped (see the homepage settle delay above);
-                    # a late-appearing/animating element now has more than a
-                    # blink to become measurable before this candidate is
-                    # given up on and the loop moves to the next node.
-                    box = await page.locator(selector).first.bounding_box(timeout=3000)
-                    if box and box["width"] > 0 and box["height"] > 0:
-                        # Reject anything not fully inside the captured viewport —
-                        # a partially/fully off-screen box either draws invisibly
-                        # or, worse, still shows up but highlights nothing specific.
-                        if (
-                            box["x"] < 0 or box["y"] < 0
-                            or box["x"] + box["width"] > viewport["width"]
-                            or box["y"] + box["height"] > viewport["height"]
-                        ):
-                            continue
-                        # Skip if the element covers most of the visible screenshot
-                        # (e.g. a hero wrapper div) — not a "specific" flaw to highlight.
-                        if box["width"] > viewport["width"] * 0.9 and box["height"] > viewport["height"] * 0.9:
-                            continue
+        # Violations are already sorted most-severe-first above, so this list
+        # inherits that order. Capped because it is serialised into a single
+        # evaluate() payload and the browser stops at the first one that
+        # qualifies anyway.
+        candidates = candidates[:40]
 
-                        visual_flaw = {
-                            "box": [box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]],
-                            "description": v["help"],
-                            "impact": v.get("impact", "minor"),
-                        }
-                        break
-                except Exception:
-                    pass
-            if visual_flaw:
-                break
-        
         # Clean up nodes array to save memory
         for v in violations:
             v.pop("nodes", None)
-            
+
         print(f"[Axe] Found {len(violations)} accessibility violations.")
-        return violations[:10], visual_flaw
-        
+        return violations[:10], candidates
+
     except Exception as e:
         print(f"[Axe] Accessibility audit failed (non-critical): {e}")
-        return [], None
+        return [], []
 
 
 async def _check_font_consistency(page) -> list:

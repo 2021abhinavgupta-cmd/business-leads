@@ -927,6 +927,10 @@ class AIAuditor:
     _VISUAL_FLAW_MARKERS = (
         "different fonts on one page",
         "displayed larger than their native resolution",
+        # A real measured mobile fact, and the only thing that licenses a
+        # mobile-specific visual claim now that the model is no longer allowed
+        # to go looking for one in the image itself.
+        "requires horizontal scrolling on a mobile phone screen",
     )
 
     @staticmethod
@@ -949,6 +953,11 @@ class AIAuditor:
             return False
 
         if getattr(web, "visual_flaw_context", None):
+            return True
+        # A box drawn only into the mobile capture is evidence too — the
+        # highlight is rendered by the browser into that image, so it is
+        # exactly as real as the desktop one.
+        if getattr(web, "mobile_visual_flaw_context", None):
             return True
         for flaw in getattr(web, "flaws", None) or []:
             description = (getattr(flaw, "description", "") or "").lower()
@@ -1065,12 +1074,18 @@ class AIAuditor:
             )
 
         # --- Visual Flaw Context ---
-        visual_flaw_section = ""
+        # Both red boxes are listed when both exist. The desktop and mobile
+        # captures are separate images with separate highlights, so a single
+        # "the red box" line would leave the model to guess which picture it
+        # is describing — and it would be right about half the time.
+        visual_flaw_lines = []
         if getattr(web, 'visual_flaw_context', None):
-            visual_flaw_section = (
-                f"SCREENSHOT VISUAL FLAW:\n"
-                f"{web.visual_flaw_context}\n"
-            )
+            visual_flaw_lines.append(web.visual_flaw_context)
+        if getattr(web, 'mobile_visual_flaw_context', None):
+            visual_flaw_lines.append(web.mobile_visual_flaw_context)
+        visual_flaw_section = ""
+        if visual_flaw_lines:
+            visual_flaw_section = "SCREENSHOT VISUAL FLAW:\n" + "\n".join(visual_flaw_lines) + "\n"
 
         # --- Signals that returned no data on this run. Without this the
         # AI can't tell "we checked and it was fine" from "we never
@@ -1136,7 +1151,8 @@ class AIAuditor:
             # see CLAUDE.md §8). A worked example is the strongest signal in
             # a prompt, so an example that breaks the rules teaches the model
             # to break them.
-            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box in the screenshot "
+            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box, and you MUST say "
+            "which image it is in (the desktop screenshot or the mobile one) exactly as the flaw line states "
             "(e.g., 'I attached a screenshot of your homepage. The red box is around a button that screen "
             "readers cannot announce at all, so customers using one have no way to find it'). "
             "Describe only what the flaw text actually says. Do NOT add a consequence it does not state, "
@@ -1155,16 +1171,72 @@ class AIAuditor:
             # demand now only appears when something visual was really
             # detected; otherwise a visual claim is permitted but explicitly
             # optional and must describe only what is plainly visible.
+            # The screenshot rules below are deliberately restrictive, and the
+            # restriction is the point.
+            #
+            # This block used to hand the model a screenshot and ask it to find
+            # a design problem in it ("anchor it to what you can actually see
+            # in the image", "look specifically for mobile only problems... if
+            # you spot a mobile specific issue"). That is asking a language
+            # model to make an unverifiable perceptual claim about a picture
+            # the RECIPIENT IS LOOKING AT while they read the email, which is
+            # the one claim type in this whole pipeline with no source of
+            # truth behind it: _verify_source_quotes has no FLAWS DETECTED
+            # line to match a design observation against, and _verify_grounding
+            # is handed prompt TEXT with the image nowhere in view.
+            # _verify_visual_claims was added to catch these afterwards, but a
+            # second cheap vision model judging the first one is two models
+            # guessing about a picture, not verification — the same objection
+            # analyzer/claim_verifier.py exists to answer for factual claims.
+            #
+            # So the model no longer observes; it phrases. Everything visual it
+            # is allowed to say was measured by the browser itself — a real
+            # axe-core violation whose element the browser outlined in the
+            # image it is looking at, or a computed-style finding already in
+            # FLAWS DETECTED with a quotable source line. Anything else about
+            # the images is forbidden outright rather than permitted-then-
+            # checked, which is what makes the result correct by construction.
             + (
                 (
-                    "CRITICAL INSTRUCTION FOR FLAWS: I am attaching a desktop screenshot of their website in the email, and the visual/design problems listed in FLAWS DETECTED above were really measured on this site. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE covering what was detected (LAYOUT, TYPOGRAPHY, or ALIGNMENT) — anchor it to the detected flaw and to what you can actually see in the image. You MUST mention the screenshot in that flaw text (e.g. 'I noticed in the screenshot we took that your menu overlaps...' or 'the fonts in your hero section and navigation don't match, which looks inconsistent and unprofessional to a first time visitor').\n"
+                    "CRITICAL INSTRUCTION FOR FLAWS: the visual/design problems listed in FLAWS DETECTED "
+                    "above (and in SCREENSHOT VISUAL FLAW, if present) were really measured on this site by "
+                    "a real browser. ONE OF YOUR FLAWS MUST BE A VISUAL CRITIQUE, and it MUST be one of "
+                    "those measured items, phrased in plain language. Quote its exact line in source_quote "
+                    "like any other flaw.\n"
                     if has_visual_evidence
-                    else "NOTE ON THE SCREENSHOT: I am attaching a desktop screenshot of their website in the email, but our automated design checks did NOT detect any typography, alignment, or image-quality problem on this site. Do NOT invent a visual criticism to fill a quota — a clean design is a perfectly normal result. Only make a visual claim if something is unmistakably and obviously wrong in the image itself, and if you do, describe only what is plainly visible rather than implying we measured it. Otherwise pick your flaws entirely from FLAWS DETECTED above and do not comment on the design at all.\n"
+                    else "NOTE ON THE SCREENSHOTS: our automated design checks did NOT detect any typography, "
+                    "alignment, or image-quality problem on this site. Do NOT invent a visual criticism to "
+                    "fill a quota, and do NOT comment on the design at all. A clean design is a perfectly "
+                    "normal result. Pick your flaws entirely from FLAWS DETECTED above.\n"
                 )
                 if has_image
                 else ""
             )
-            + ("A SECOND image is also attached showing the site on an actual MOBILE PHONE screen. Compare it against the desktop screenshot and look specifically for mobile only problems: text or buttons cut off or overlapping, horizontal scrolling, tiny unreadable font, a hamburger menu that looks broken, a hero image that doesn't adapt. If you spot a mobile specific issue, make ONE of your flaws about it and say explicitly that it is how the site looks on a phone (e.g. 'on your phone, the navigation menu overlaps your logo').\n" if has_mobile_image else "")
+            + (
+                "ATTACHED IMAGES: the recipient will receive a DESKTOP screenshot of their site. "
+                if has_image and not has_mobile_image
+                else "ATTACHED IMAGES: the recipient will receive TWO screenshots of their site, one taken on a "
+                "DESKTOP browser and one taken on a real MOBILE PHONE screen. If you refer to either, name "
+                "which one you mean. "
+                if has_image and has_mobile_image
+                else ""
+            )
+            + (
+                "ABSOLUTE RULE ABOUT THE IMAGES: you may ONLY make a visual claim that appears in FLAWS "
+                "DETECTED or SCREENSHOT VISUAL FLAW above. You must NOT describe anything else you think "
+                "you see in them. Specifically forbidden: colours, spacing, padding, imagery, photo choice, "
+                "how modern or dated it looks, whether it looks cluttered, trustworthy, cheap or "
+                "professional, and any mobile problem (cut-off text, overlapping buttons, horizontal "
+                "scrolling, tiny font, a broken hamburger menu) that is not listed above. Two reasons, both "
+                "of which matter more than the copy being vivid. First, the recipient is looking at their "
+                "own website while they read this, so a wrong visual claim is the fastest possible way to "
+                "lose them. Second, these images come from an automated browser and can differ from what a "
+                "real visitor sees, so something that looks wrong to you may be an artefact of how we "
+                "captured it rather than a real defect on their site. If you are not certain because it is "
+                "written above, do not write it.\n"
+                if has_image
+                else ""
+            )
             + ("If GOOGLE BUSINESS RATING is 4 stars or higher, use it as a personalization hook, e.g. contrast their strong reputation with a website flaw ('you've clearly got happy customers, X reviews at Y stars, but the website doesn't reflect that trust'). Do not mention the rating if it is below 4 stars or reviews_count is under 10, it is not a strong enough signal to reference.\n" if rating_value is not None else "")
             + "\n"
             "IMPORTANT: Return ONLY valid JSON. No markdown. No explanation.\n"

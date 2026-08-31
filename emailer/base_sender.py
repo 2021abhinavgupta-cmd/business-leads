@@ -45,9 +45,24 @@ class BaseSender:
 
     def __init__(self, from_email: str | None = None):
         self.from_email = from_email or config.FROM_EMAIL
-        # Falls back to the sending address, so an environment that has never
-        # heard of REPLY_TO_EMAIL behaves exactly as before.
-        self.reply_to = config.REPLY_TO_EMAIL or self.from_email
+
+    @property
+    def reply_to(self) -> str | None:
+        """
+        Where replies should land. Falls back to the sending address, so an
+        environment that has never heard of REPLY_TO_EMAIL behaves exactly as
+        before.
+
+        Derived on every read rather than frozen in __init__. As a stored
+        attribute it silently desynchronised the moment anything reassigned
+        `from_email` after construction: the sender would keep using the OLD
+        address for `Reply-To` and for the `mailto:` in `List-Unsubscribe`,
+        while the `From` header showed the new one. A Reply-To that disagrees
+        with From is a phishing pattern to a spam filter, which is the exact
+        class of deliverability damage this file exists to avoid — and it
+        would have been invisible, since nothing compares the two.
+        """
+        return config.REPLY_TO_EMAIL or self.from_email
 
     # --- transport hook -------------------------------------------------
 
@@ -90,13 +105,27 @@ class BaseSender:
         # The mailto goes to the reply address, not the sending one — an
         # unsubscribe request nobody reads is the same as no unsubscribe
         # mechanism, and honouring opt-outs is a compliance obligation.
-        targets = [f"<mailto:{self.reply_to}?subject=Unsubscribe>"]
+        #
+        # Skipped entirely when there is no address to point it at. With
+        # FROM_EMAIL and REPLY_TO_EMAIL both unset this used to interpolate
+        # the string "None", shipping every message a literal
+        # `<mailto:None?subject=Unsubscribe>` — a header that parses, looks
+        # present to a filter, and goes nowhere. A malformed opt-out
+        # mechanism is worse than an absent one: Gmail and Yahoo's bulk
+        # sender rules check that it works, and a broken one is the kind of
+        # thing that only shows up as unexplained spam placement.
+        targets = []
+        if self.reply_to:
+            targets.append(f"<mailto:{self.reply_to}?subject=Unsubscribe>")
+
         headers = {}
         if config.APP_BASE_URL:
             url = f"{config.APP_BASE_URL}/unsubscribe?email={quote(to_email, safe='')}"
             targets.append(f"<{url}>")
             headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
-        headers["List-Unsubscribe"] = ", ".join(targets)
+
+        if targets:
+            headers["List-Unsubscribe"] = ", ".join(targets)
         return headers
 
     # --- copy generation ------------------------------------------------
@@ -299,20 +328,49 @@ class BaseSender:
 
     # --- message construction -------------------------------------------
 
+    # Caption for each capture, keyed by the Content-ID it is embedded under.
+    #
+    # These say what the image ACTUALLY is. The single hardcoded caption this
+    # replaced read "Here is the screenshot my team took of your website on
+    # mobile:" while /api/send attached `<company>_<hash>_audit.jpg` — the
+    # DESKTOP capture (analyzer/visuals.py saves the desktop bytes under that
+    # name; the mobile one is `_mobile.jpg` and was never attached to
+    # anything). So every screenshot email opened its evidence section with a
+    # false statement about the evidence.
+    #
+    # This is the same bug CLAUDE.md §8 records as fixed in generate_followup
+    # on 2026-08-09 ("Did you get a chance to see the mobile website
+    # screenshot I attached?"). That fix corrected the follow-up copy and
+    # never reached this template, so the falsehood simply moved to the first
+    # touch and stayed there. Captions are derived from which file is actually
+    # attached now, rather than written once and assumed.
+    _IMAGE_CAPTIONS = {
+        "audit_img": "How your site renders on a desktop browser:",
+        "audit_img_mobile": "And how the same page renders on a phone:",
+    }
+
     def _build_initial_message(
-        self, to_email: str, subject: str, body: str, message_id: str, image_path: str = None
+        self, to_email: str, subject: str, body: str, message_id: str,
+        image_path: str = None, mobile_image_path: str = None,
     ) -> MIMEMultipart:
         """
         Build the first-touch message as multipart/mixed raw MIME carrying
         both a text/plain and a text/html part (spam filters weight a missing
-        text/plain alternative heavily) plus List-Unsubscribe headers. If
-        image_path is given, the screenshot is embedded inline as a related
-        part rather than attached as a file.
+        text/plain alternative heavily) plus List-Unsubscribe headers.
+
+        Any screenshot given is embedded inline as a related part rather than
+        attached as a file. Both captures are included when both exist, each
+        under its own caption — the desktop view is where the red-box evidence
+        is drawn, and the mobile view is what most of these prospects'
+        customers actually see.
         """
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = self.from_email
-        msg["Reply-To"] = self.reply_to
+        # Same reasoning as the unsubscribe mailto: omit the header rather
+        # than emit a literal "None" for it.
+        if self.reply_to:
+            msg["Reply-To"] = self.reply_to
         msg["To"] = to_email
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = message_id
@@ -328,16 +386,30 @@ class BaseSender:
         alt = MIMEMultipart("alternative")
         alt.attach(MIMEText(body, "plain", "utf-8"))
 
-        if image_path and os.path.exists(image_path):
+        # (Content-ID, file path) for each capture that really exists on disk.
+        # A path that was passed but never written (a failed mobile pass, a
+        # screenshot cleaned up early) is dropped here rather than producing a
+        # caption for an image the recipient will see as a broken placeholder.
+        attachments = [
+            (cid, path)
+            for cid, path in (("audit_img", image_path), ("audit_img_mobile", mobile_image_path))
+            if path and os.path.exists(path)
+        ]
+
+        if attachments:
+            figures = "".join(
+                f"""
+                            <p style="color: #475569; font-size: 14px; margin: 16px 0 8px;">{self._IMAGE_CAPTIONS[cid]}</p>
+                            <img src='cid:{cid}' alt='Website audit screenshot' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>"""
+                for cid, _ in attachments
+            )
             html_with_img = f"""
                     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
                         <div style="padding: 20px;">
                             {html_body}
                         </div>
                         <div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
-                            <h3 style="margin-top: 0; color: #0f172a; font-size: 16px;">Visual Audit Evidence</h3>
-                            <p style="color: #475569; font-size: 14px; margin-bottom: 16px;">Here is the screenshot my team took of your website on mobile:</p>
-                            <img src='cid:audit_img' alt='Website Audit' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>
+                            <h3 style="margin-top: 0; color: #0f172a; font-size: 16px;">Visual Audit Evidence</h3>{figures}
                         </div>
                         {pixel}
                     </div>
@@ -347,13 +419,14 @@ class BaseSender:
             related = MIMEMultipart("related")
             related.attach(alt)
 
-            with open(image_path, "rb") as f:
-                img_data = f.read()
+            for cid, path in attachments:
+                with open(path, "rb") as f:
+                    img_data = f.read()
 
-            img = MIMEImage(img_data)
-            img.add_header("Content-ID", "<audit_img>")
-            img.add_header("Content-Disposition", "inline")
-            related.attach(img)
+                img = MIMEImage(img_data)
+                img.add_header("Content-ID", f"<{cid}>")
+                img.add_header("Content-Disposition", "inline")
+                related.attach(img)
 
             msg.attach(related)
         else:
@@ -384,7 +457,10 @@ class BaseSender:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = self.from_email
-        msg["Reply-To"] = self.reply_to
+        # Same reasoning as the unsubscribe mailto: omit the header rather
+        # than emit a literal "None" for it.
+        if self.reply_to:
+            msg["Reply-To"] = self.reply_to
         msg["To"] = to_email
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = message_id
@@ -400,9 +476,16 @@ class BaseSender:
 
     # --- sending --------------------------------------------------------
 
-    def send_email(self, to_email: str, subject: str, body: str, image_path: str = None):
+    def send_email(self, to_email: str, subject: str, body: str, image_path: str = None,
+                   mobile_image_path: str = None):
         """
         Send the first-touch cold email.
+
+        Args:
+            image_path:        Desktop screenshot, the one carrying the red box.
+            mobile_image_path: Mobile screenshot. Optional and independent —
+                either, both or neither may be given, and the captions in the
+                message are built from whichever actually exist on disk.
 
         Returns:
             The RFC Message-ID (str, truthy) if the transport accepted the
@@ -419,7 +502,8 @@ class BaseSender:
         for attempt in range(self._RETRIES + 1):
             message_id = make_msgid(domain=self._msgid_domain())
             msg = self._build_initial_message(
-                to_email, subject, body, message_id, image_path=image_path
+                to_email, subject, body, message_id,
+                image_path=image_path, mobile_image_path=mobile_image_path,
             )
             try:
                 self._transport_send(msg, to_email)

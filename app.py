@@ -21,7 +21,11 @@ from analyzer.ai_audit import AIAuditor
 from emailer import get_sender
 from emailer.tracking import TRANSPARENT_GIF, hash_ip, looks_automated
 from enrichment.decision_maker import DecisionMaker
-from analyzer.visuals import generate_audit_screenshot, make_screenshot_filename
+from analyzer.visuals import (
+    generate_audit_screenshot,
+    make_screenshot_filename,
+    make_mobile_screenshot_filename,
+)
 from analyzer.budget_signal import estimate_budget_fit
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
 from storage.sheets import SheetsStorage
@@ -730,16 +734,33 @@ async def send_email(
                     },
                 )
 
-        # Use existing screenshot (same collision-safe name generate_audit_screenshot wrote)
+        # Use existing screenshots (same collision-safe names
+        # generate_audit_screenshot wrote). BOTH captures are attached now:
+        # the desktop one carries the red-box evidence, the mobile one is what
+        # most of these prospects' own customers actually see. Each is
+        # captioned for what it really is in base_sender — the single
+        # hardcoded "on mobile" caption used to sit above the DESKTOP image on
+        # every send.
         image_path = None
+        mobile_image_path = None
         if not req.attach_screenshot:
             print(f"[Send] Sending to {req.email} without the screenshot — attachment disabled for this draft.")
         elif req.company and req.website:
-            candidate_path = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(req.company, req.website))
-            if os.path.exists(candidate_path):
-                image_path = candidate_path
+            for filename, target in (
+                (make_screenshot_filename(req.company, req.website), "desktop"),
+                (make_mobile_screenshot_filename(req.company, req.website), "mobile"),
+            ):
+                candidate_path = os.path.join(SCREENSHOTS_DIR, filename)
+                if os.path.exists(candidate_path):
+                    if target == "desktop":
+                        image_path = candidate_path
+                    else:
+                        mobile_image_path = candidate_path
 
-        message_id = await asyncio.to_thread(ses.send_email, req.email, req.subject, req.body, image_path=image_path)
+        message_id = await asyncio.to_thread(
+            ses.send_email, req.email, req.subject, req.body,
+            image_path=image_path, mobile_image_path=mobile_image_path,
+        )
         success = bool(message_id)
 
         if success:
