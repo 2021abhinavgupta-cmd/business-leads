@@ -105,8 +105,23 @@ def test_importing_app_connects_to_nothing():
     The regression test for the CI breakage. If this fails, `import app` has
     regained a live dependency and roughly 40 tests stop running anywhere
     without production credentials.
+
+    Reloaded, not just imported: `app` is already in sys.modules by the time
+    this runs (most other test files import it too), so a plain
+    import_module would hand back that same cached module — including
+    whatever real Sheets connection a background task in an EARLIER test
+    already opened. Several test files call /api/audit via TestClient,
+    which runs its save-to-sheets background task synchronously; on a
+    machine with real GOOGLE_SHEETS_ID/credentials.json configured (unlike
+    CI, which has neither), that task genuinely connects and leaves the
+    shared `app.sheets` singleton's `_sheet` non-None for the rest of the
+    process — live-reproduced via `pytest test_accuracy_guards.py
+    test_startup_resilience.py::test_importing_app_connects_to_nothing`.
+    reload() re-executes app.py's module body, which reassigns `sheets` to a
+    brand-new, still-unconnected SheetsStorage() — so this test's result no
+    longer depends on which other tests happened to run first.
     """
-    app = importlib.import_module("app")
+    app = importlib.reload(importlib.import_module("app"))
     assert app.sheets._sheet is None, "importing app must not open the spreadsheet"
 
 
