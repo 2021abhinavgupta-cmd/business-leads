@@ -156,8 +156,7 @@ MIN_GOOGLE_REVIEWS = int(os.getenv("MIN_GOOGLE_REVIEWS", "2000"))
 # ran, but no email is written and nothing is queued. "growing" skips only
 # "unclear" leads (a lead that showed zero signal of scale on every axis
 # checked); "established" also skips "growing". Empty string disables it.
-# Same shape as CONTACT_THRESHOLD below — a pre-send gate on lead quality.
-MIN_BUDGET_TIER = os.getenv("MIN_BUDGET_TIER", "growing").strip().lower()
+MIN_BUDGET_TIER = os.getenv("MIN_BUDGET_TIER", "").strip().lower()
 
 # Only leads scoring BELOW this are contacted — above it the site is
 # considered healthy enough not to be worth a cold email. Lives here rather

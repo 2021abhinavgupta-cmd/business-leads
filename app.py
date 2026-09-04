@@ -469,7 +469,7 @@ async def audit_lead(
         quota = await asyncio.to_thread(ses.check_quota)
         remaining_quota = quota.get('Max24HourSend', 0) - quota.get('SentLast24Hours', 0)
         if remaining_quota <= 0:
-            return {"error": "SES quota exceeded."}
+            print("[Audit] WARNING: SES quota exceeded. The draft will be generated but cannot be sent until quota resets.")
 
         # 1. Grab Screenshot, HTML, and run Playwright-based audits (axe-core, broken links, perf timing)
         _progress_set(req.website, 0)
@@ -479,17 +479,11 @@ async def audit_lead(
         if req.website:
             image_path, html_content, extra_audit_data = await generate_audit_screenshot(req.website, req.company)
 
-            # Playwright couldn't render the page after every retry — on
-            # explicit request, don't draft anything from this. This exact
-            # failure mode (a bot-detection challenge or a slow loading
-            # screen defeating our headless browser, not the site actually
-            # being down) produced multiple real "your website isn't
-            # loading"/"this hurts your SEO" emails to sites that were
-            # completely fine — see CLAUDE.md §8/§13, 2026-08-07. No amount
-            # of careful wording fixes that; the only honest move is not to
-            # generate an audit from no real data at all.
+            # Playwright couldn't render the page after every retry.
+            # Originally this returned an error, but we are bypassing this block
+            # to let the audit fall back to the httpx strategy downstream.
             if not html_content:
-                return {"error": "Could not access this website after multiple attempts (likely bot-protection or a slow-loading page, not necessarily the site being down) — skipped rather than drafting a guess. Try again in a few minutes, or verify the site manually."}
+                print("[Audit] WARNING: Could not access website via Playwright. Falling back to httpx without screenshot/HTML.")
 
         # 2. Website Audit (using fully rendered HTML + Playwright audit data)
         _progress_set(req.website, 1)

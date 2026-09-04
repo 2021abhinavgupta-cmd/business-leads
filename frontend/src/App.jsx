@@ -431,6 +431,7 @@ function App() {
         const updatedLeads = [...prev];
         if (res.data.error) {
           updatedLeads[index].auditState = 'failed';
+          updatedLeads[index].auditError = res.data.error;
         } else {
           updatedLeads[index].auditState = 'done';
           updatedLeads[index].auditData = res.data;
@@ -477,6 +478,7 @@ function App() {
           };
         } else {
           updatedLeads[index].auditState = 'failed';
+          updatedLeads[index].auditError = err.response?.data?.detail || err.message;
         }
         updatedLeads[index].auditProgress = null;
         return updatedLeads;
@@ -785,7 +787,7 @@ function App() {
               )}
               {lead.auditState === 'failed' && (
                 <div className="auditing-state" style={{ flexDirection: 'column', gap: '8px' }}>
-                  <p className="error-text">Audit failed.</p>
+                  <p className="error-text">{lead.auditError || "Audit failed."}</p>
                   <button className="audit-btn" onClick={() => handleAudit(i, true)}><Activity size={18} /> Retry Audit</button>
                 </div>
               )}
