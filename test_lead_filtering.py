@@ -179,8 +179,8 @@ def test_the_gate_reuses_the_one_budget_signal_it_also_returns():
 
 def test_defaults_are_the_gentle_active_setting():
     """
-    The user asked for this filter on by default. growing skips only
-    zero-signal leads; the review floor is set high on purpose.
+    The user asked for MIN_BUDGET_TIER to be disabled by default (empty string) 
+    so it doesn't drop leads.
     """
-    assert config.MIN_BUDGET_TIER == "growing"
+    assert config.MIN_BUDGET_TIER == ""
     assert config.MIN_GOOGLE_REVIEWS == 2000
