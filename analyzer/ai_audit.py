@@ -197,6 +197,7 @@ class AIAuditor:
                     self._verify_grounding(parsed, prompt, company),
                     self._verify_visual_claims(parsed, company, image_path),
                     self._check_spam_trigger_words(parsed, company),
+                    self._check_ai_sounding_phrases(parsed, company),
                     self._check_forbidden_dashes(parsed, company),
                     self._check_body_length(parsed, company, has_image=bool(image_path)),
                     self._check_jargon_words(parsed, company),
@@ -348,6 +349,37 @@ class AIAuditor:
             if all_caps_words:
                 parts.append(f"ALL CAPS word(s) {all_caps_words}")
             message = f"Contains {' and '.join(parts)} — spam-filter risk, review before sending."
+            print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
+            return message
+        return None
+
+    # Generic AI-cold-email tells (MMGA copy guidelines, 2026-09-07) — the
+    # prompt already forbids these directly (see _build_prompt's "no
+    # pleasantries/AI-sounding phrases" instruction below), same
+    # belt-and-suspenders pattern as _check_spam_trigger_words: a prevention
+    # instruction can be ignored, so also detect it after the fact.
+    _AI_SOUNDING_PHRASES = [
+        "i noticed", "saw that", "usually,", "in today's competitive",
+        "i hope this email finds you well", "i hope this finds you well",
+        "would love to connect", "unlock your potential", "drive growth",
+    ]
+
+    @staticmethod
+    def _check_ai_sounding_phrases(parsed: dict, company: str) -> str | None:
+        """
+        Scan for generic cold-email/AI-generated-sounding openers the MMGA
+        copy guidelines explicitly ban — these read as a template, not as
+        someone who actually looked at the business. Same log-and-flag
+        contract as every other check here: never blocks a send.
+        """
+        subject = parsed.get("email_subject", "") or ""
+        opening = parsed.get("opening_line", "") or ""
+        paragraphs = " ".join(f.get("paragraph", "") for f in parsed.get("flaws", []))
+        lower_text = f"{subject} {opening} {paragraphs}".lower()
+
+        hits = [p for p in AIAuditor._AI_SOUNDING_PHRASES if p in lower_text]
+        if hits:
+            message = f"Contains generic AI-cold-email phrase(s) {hits} — reads templated, review before sending."
             print(f"[AIAuditor] WARNING: email for '{company}' {message[0].lower()}{message[1:]}")
             return message
         return None
@@ -1158,7 +1190,8 @@ class AIAuditor:
             "Describe only what the flaw text actually says. Do NOT add a consequence it does not state, "
             "and in particular do NOT claim an accessibility problem affects SEO or Google ranking.\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"
-            "CRITICAL INSTRUCTION FOR OPENING LINE: You must read the DEEP BRAND CONTEXT (or Homepage text). Find out exactly what the company sells or does. Your 'opening_line' MUST highly personalize the outreach based on what they actually do (e.g., 'Loved what you guys are doing with luxury real estate marketing in Miami...' or 'Been following your B2B SaaS growth tools...'). DO NOT just say 'Loved what you guys are doing with [Company name]'. Prove you know what they do!\n"
+            "CRITICAL INSTRUCTION FOR OPENING LINE: Do NOT open with a compliment, a pleasantry, or small talk about the business ('Loved what you're doing with...', 'I hope this finds you well', 'Came across your site'). Lead straight with the strongest problem from FLAWS DETECTED, stated as a business/revenue issue, not a technical one — the reader should understand the whole point of the email in the first sentence. Still personalize it: name what the company actually sells or does (read DEEP BRAND CONTEXT / Homepage text) so the flaw reads as specific to THEM, not a template, but the personalization is in HOW the problem is framed, never in a separate compliment sentence before it.\n"
+            "CRITICAL INSTRUCTION: NEVER use these generic cold-email openers or phrases anywhere in the email: 'I noticed', 'Saw that', 'Usually, businesses...', 'In today's competitive landscape', 'I hope this email finds you well', 'Would love to connect', 'Unlock your potential', 'Drive growth'. They read as a template, not as someone who looked at this specific business.\n"
             # The visual instruction is deliberately split in two. It used to
             # be one unconditional "ONE OF YOUR FLAWS MUST BE A VISUAL
             # CRITIQUE", which forced a design criticism on every single
@@ -1249,8 +1282,8 @@ class AIAuditor:
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
-            '  "email_subject": "short, engaging, and professional subject line using Title Case",\n'
-            '  "opening_line": "friendly personalized opening line without hyphens"\n'
+            '  "email_subject": "bold, curiosity driven subject line that hints at the problem or money being left on the table, using Title Case (e.g. Where Are Your Website Visitors Going, or The Gap In Your Website Is Costing You Leads) — not a generic \'Quick question about X\'",\n'
+            '  "opening_line": "leads straight with the strongest problem stated as a business cost, personalized to what the company does, no compliment or pleasantry first, no hyphens"\n'
             "}\n"
             )
 

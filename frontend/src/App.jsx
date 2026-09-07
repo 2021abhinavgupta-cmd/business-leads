@@ -1079,18 +1079,6 @@ function App() {
                 <p><strong>To:</strong> {draft.target_email || 'Missing email'}</p>
               </div>
 
-              {draftAgeDays(draft) !== null && draftAgeDays(draft) >= 7 && (
-                <div style={{
-                  marginTop: '12px', padding: '10px 12px', borderRadius: '8px',
-                  background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.4)',
-                  color: '#fcd34d', fontSize: '13px',
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                }}>
-                  <AlertTriangle size={14} />
-                  Drafted {draftAgeDays(draft)} days ago — the site may have changed since this was audited.
-                </div>
-              )}
-
               {draft.review_warnings && draft.review_warnings.length > 0 && (
                 <div style={{
                   marginTop: '12px', padding: '10px 12px', borderRadius: '8px',

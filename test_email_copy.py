@@ -229,6 +229,18 @@ def test_scheme_lines_also_never_claim_this_lead_qualifies():
         assert "eligible for" not in body.lower()
 
 
+def test_agriculture_sector_mentions_metazyne_credibility():
+    _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
+    assert "metazyne.in" in body
+    assert "instagram.com/agriusindia" in body
+
+
+def test_non_agriculture_lead_never_mentions_metazyne():
+    _, body = _sender().generate_email("Acme Dental", "Priya", _ANALYSIS, "Kshitij")
+    assert "metazyne" not in body.lower()
+    assert "agriusindia" not in body.lower()
+
+
 def test_the_default_variant_is_short():
     """
     Switched 2026-08-10: the founder independently reported the exact

@@ -331,6 +331,20 @@ def test_spam_trigger_words_returns_none_when_clean(capsys):
     assert warning is None
 
 
+def test_ai_sounding_phrases_returns_warning_text(capsys):
+    parsed = {"email_subject": "s", "opening_line": "I noticed your site could use some work.", "flaws": []}
+    warning = AIAuditor._check_ai_sounding_phrases(parsed, "Acme")
+    capsys.readouterr()
+    assert warning is not None and "i noticed" in warning
+
+
+def test_ai_sounding_phrases_returns_none_when_clean(capsys):
+    parsed = {"email_subject": "The gap in your funnel", "opening_line": "Your booking page loses visitors before they convert.", "flaws": []}
+    warning = AIAuditor._check_ai_sounding_phrases(parsed, "Acme")
+    capsys.readouterr()
+    assert warning is None
+
+
 def test_body_length_returns_none_without_an_image(capsys):
     parsed = {"opening_line": "hi", "flaws": [{"paragraph": "short"}]}
     warning = AIAuditor._check_body_length(parsed, "Acme", has_image=False)

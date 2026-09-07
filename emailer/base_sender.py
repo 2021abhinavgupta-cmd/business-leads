@@ -162,6 +162,18 @@ class BaseSender:
         )),
     ]
 
+    # Real credential, agriculture leads only (added 2026-09-07, on request).
+    # Metazyne (metazyne.in) is MMGA's own agriculture-focused site/brand,
+    # @agriusindia its Instagram — a true, checkable fact about MMGA's own
+    # work in this sector, not a claim about the lead. Only fires when
+    # sector == "agriculture" and only at draft-generation time, same
+    # sector-gating pattern as _GENERIC_AGRI_LINE/_AGRI_SCHEME_LINES above.
+    _AGRI_CREDIBILITY_LINE = (
+        "Worth mentioning: we've actually built out our own agriculture "
+        "brand, Metazyne (metazyne.in) — you can see the work on Instagram "
+        "at instagram.com/agriusindia.\n"
+    )
+
     def generate_email(
         self, company: str, contact_name: str, analysis: dict, your_name: str,
         sector: str = "", sector_detail: str = "",
@@ -234,6 +246,9 @@ class BaseSender:
                 body_lines.append(
                     f"{flaw.get('detail', '')} This means {flaw.get('impact', '')}.\n"
                 )
+
+        if sector == "agriculture":
+            body_lines.append(self._AGRI_CREDIBILITY_LINE)
 
         body_lines.extend(self._closing_lines(variant, your_name))
 
