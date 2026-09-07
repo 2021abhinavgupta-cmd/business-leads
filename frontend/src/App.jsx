@@ -372,12 +372,20 @@ function App() {
   // `force` bypasses the server's short-TTL result cache — set by the
   // Retry button, since a deliberate re-audit wants fresh data rather
   // than a replay of the verdict that just failed or looked wrong.
-  const handleAudit = async (index, force = false) => {
+  // includeAgriCredibility is null on a plain call (e.g. Retry Audit) — that
+  // means "keep whatever this lead was already set to", so retrying a
+  // failed agri-credibility audit doesn't silently drop the Metazyne line.
+  // Only the two Generate buttons below ever pass an explicit true/false.
+  const handleAudit = async (index, force = false, includeAgriCredibility = null) => {
     const lead = leadsRef.current[index];
+    const effectiveIncludeAgri = includeAgriCredibility !== null
+      ? includeAgriCredibility
+      : !!lead.includeAgriCredibility;
     setLeads(prev => {
       const newLeads = [...prev];
       newLeads[index].auditState = 'auditing';
       newLeads[index].auditProgress = null;
+      newLeads[index].includeAgriCredibility = effectiveIncludeAgri;
       return newLeads;
     });
 
@@ -469,6 +477,7 @@ function App() {
         force,
         sector: lead.sector || '',
         sector_detail: lead.sectorDetail || '',
+        include_agri_credibility: effectiveIncludeAgri,
         async_mode: !!lead.Website,
       });
 
@@ -773,7 +782,17 @@ function App() {
               </div>
 
               {lead.auditState === 'none' && lead.Website && (
-                <button className="audit-btn" onClick={() => handleAudit(i)}><Activity size={18} /> Generate AI Audit & Draft</button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
+                  <button className="audit-btn" onClick={() => handleAudit(i, false, false)}><Activity size={18} /> Generate AI Audit & Draft</button>
+                  {/* Agriculture-sourced leads only — adds a few lines about
+                      Metazyne/@agriusindia to the draft. Kept off the plain
+                      button above so it's opt-in per draft, not automatic. */}
+                  {lead.sector === 'agriculture' && (
+                    <button className="audit-btn" style={{ background: '#166534' }} onClick={() => handleAudit(i, false, true)}>
+                      <Sprout size={18} /> Generate for Agriculture
+                    </button>
+                  )}
+                </div>
               )}
 
               {!lead.Website && (

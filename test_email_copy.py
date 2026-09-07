@@ -229,14 +229,32 @@ def test_scheme_lines_also_never_claim_this_lead_qualifies():
         assert "eligible for" not in body.lower()
 
 
-def test_agriculture_sector_mentions_metazyne_credibility():
-    _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
+def test_metazyne_credibility_line_requires_the_explicit_flag():
+    """
+    Deliberately its own flag, not tied to sector=="agriculture" — the
+    frontend only sets it from a dedicated "Generate for Agriculture"
+    button, not the ordinary "Generate AI Audit & Draft" one.
+    """
+    _, body = _sender().generate_email(
+        "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
+        sector="agriculture", include_agri_credibility=True,
+    )
     assert "metazyne.in" in body
     assert "instagram.com/agriusindia" in body
 
 
-def test_non_agriculture_lead_never_mentions_metazyne():
-    _, body = _sender().generate_email("Acme Dental", "Priya", _ANALYSIS, "Kshitij")
+def test_agriculture_sector_alone_does_not_mention_metazyne():
+    """The ordinary button on an agriculture lead must not add this line."""
+    _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
+    assert "metazyne" not in body.lower()
+    assert "agriusindia" not in body.lower()
+
+
+def test_non_agriculture_lead_never_mentions_metazyne_even_if_flagged():
+    """The flag alone can't leak this onto a non-agriculture lead's copy."""
+    _, body = _sender().generate_email(
+        "Acme Dental", "Priya", _ANALYSIS, "Kshitij", include_agri_credibility=True,
+    )
     assert "metazyne" not in body.lower()
     assert "agriusindia" not in body.lower()
 

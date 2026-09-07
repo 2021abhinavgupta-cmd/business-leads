@@ -269,6 +269,13 @@ class AuditRequest(BaseModel):
     # Dealer"). Lets the sector line name a specific real scheme (PM-KUSUM,
     # SMAM) instead of one generic sentence for every agriculture niche.
     sector_detail: str = ""
+    # Set only by the dashboard's dedicated "Generate for Agriculture"
+    # button (agriculture-sourced leads only) — adds the Metazyne/
+    # @agriusindia credibility line to the drafted email. Deliberately not
+    # automatic for every sector=="agriculture" lead: the ordinary "Generate
+    # AI Audit & Draft" button never sets this. See
+    # BaseSender.generate_email's include_agri_credibility docstring.
+    include_agri_credibility: bool = False
     # When true, /api/audit returns almost immediately ({"started": True})
     # and does the actual work in a background task instead of blocking the
     # HTTP response for the couple of minutes a real audit takes. Exists
@@ -661,7 +668,11 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
 
         # Generate Draft
         YOUR_NAME = os.getenv("YOUR_NAME", "Kshitij Gupta")
-        subject, body = ses.generate_email(req.company, contact, analysis, YOUR_NAME, sector=req.sector, sector_detail=req.sector_detail)
+        subject, body = ses.generate_email(
+            req.company, contact, analysis, YOUR_NAME,
+            sector=req.sector, sector_detail=req.sector_detail,
+            include_agri_credibility=req.include_agri_credibility,
+        )
 
         # Update Sheets in background
         def save_audit_to_sheets():

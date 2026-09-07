@@ -162,12 +162,15 @@ class BaseSender:
         )),
     ]
 
-    # Real credential, agriculture leads only (added 2026-09-07, on request).
-    # Metazyne (metazyne.in) is MMGA's own agriculture-focused site/brand,
-    # @agriusindia its Instagram — a true, checkable fact about MMGA's own
-    # work in this sector, not a claim about the lead. Only fires when
-    # sector == "agriculture" and only at draft-generation time, same
-    # sector-gating pattern as _GENERIC_AGRI_LINE/_AGRI_SCHEME_LINES above.
+    # Real credential, agriculture leads only (added 2026-09-07, on request;
+    # narrowed same day to its own explicit flag rather than firing on
+    # every sector=="agriculture" lead automatically). Metazyne (metazyne.in)
+    # is MMGA's own agriculture-focused site/brand, @agriusindia its
+    # Instagram — a true, checkable fact about MMGA's own work in this
+    # sector, not a claim about the lead. Only appears when the frontend's
+    # dedicated "Generate for Agriculture" button set include_agri_credibility,
+    # not on the ordinary "Generate AI Audit & Draft" button even for an
+    # agriculture-tagged lead.
     _AGRI_CREDIBILITY_LINE = (
         "Worth mentioning: we've actually built out our own agriculture "
         "brand, Metazyne (metazyne.in) — you can see the work on Instagram "
@@ -176,7 +179,7 @@ class BaseSender:
 
     def generate_email(
         self, company: str, contact_name: str, analysis: dict, your_name: str,
-        sector: str = "", sector_detail: str = "",
+        sector: str = "", sector_detail: str = "", include_agri_credibility: bool = False,
     ) -> tuple[str, str]:
         """
         Generate the subject and body for the cold email.
@@ -195,6 +198,14 @@ class BaseSender:
                 specific government scheme instead of a generic sentence —
                 see _AGRI_SCHEME_LINES. Falls back to the generic line when
                 empty or unmatched.
+            include_agri_credibility: Adds _AGRI_CREDIBILITY_LINE (the
+                Metazyne/@agriusindia mention) when True AND sector ==
+                "agriculture" — both, not either. The frontend only sets
+                this flag from a dedicated "Generate for Agriculture" button
+                (opt-in per draft, not automatic for every agri lead), and
+                the sector check is a server-side backstop so the flag alone
+                can never put an agriculture-specific claim on a lead from
+                any other sector.
 
         Returns:
             (subject, body) as plain text strings.
@@ -247,7 +258,7 @@ class BaseSender:
                     f"{flaw.get('detail', '')} This means {flaw.get('impact', '')}.\n"
                 )
 
-        if sector == "agriculture":
+        if sector == "agriculture" and include_agri_credibility:
             body_lines.append(self._AGRI_CREDIBILITY_LINE)
 
         body_lines.extend(self._closing_lines(variant, your_name))
