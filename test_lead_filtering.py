@@ -149,7 +149,7 @@ def test_api_audit_gates_before_calling_the_ai():
     import inspect
     import app as app_module
 
-    source = inspect.getsource(app_module.audit_lead)
+    source = inspect.getsource(app_module._audit_lead_impl)
     gate_at = source.index("clears_min_tier(budget_signal, config.MIN_BUDGET_TIER)")
     ai_at = source.index("auditor.analyze_lead")
     assert gate_at < ai_at, "the budget gate must short-circuit before the paid AI call"
@@ -172,7 +172,7 @@ def test_the_gate_reuses_the_one_budget_signal_it_also_returns():
     import inspect
     import app as app_module
 
-    source = inspect.getsource(app_module.audit_lead)
+    source = inspect.getsource(app_module._audit_lead_impl)
     assert source.count("estimate_budget_fit(") == 1
     assert '"budget_signal": budget_signal,' in source
 

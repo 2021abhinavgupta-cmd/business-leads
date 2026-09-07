@@ -274,7 +274,7 @@ def test_a_replayed_audit_is_labelled_as_cached():
     import inspect
     import app
 
-    source = inspect.getsource(app.audit_lead)
+    source = inspect.getsource(app._audit_lead_impl)
     assert '"cached": True' in source, (
         "a replayed result with no marker is indistinguishable from a live measurement"
     )

@@ -294,7 +294,7 @@ def test_the_api_response_carries_the_budget_signal():
 
     import app as app_module
 
-    source = inspect.getsource(app_module.audit_lead)
+    source = inspect.getsource(app_module._audit_lead_impl)
     # estimate_budget_fit is now called once earlier (it also drives the
     # MIN_BUDGET_TIER gate) and the result is reused in the response.
     assert "estimate_budget_fit(" in source

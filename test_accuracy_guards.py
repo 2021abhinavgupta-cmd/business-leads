@@ -270,6 +270,139 @@ def test_audit_proceeds_when_playwright_cannot_access_the_site(monkeypatch):
     assert "flaws" in body  # It should draft something with httpx fallback
 
 
+# ---------------------------------------------------------------------------
+# async_mode (added 2026-09-07). Railway's edge times out the underlying
+# HTTP request well before a real ~2 minute audit finishes — live-confirmed
+# via the deploy log (the audit was still cleanly progressing at 65s+ in, no
+# backend error, no crash/restart; the connection was cut in front of the
+# app). With async_mode: true, /api/audit returns {"started": true} almost
+# immediately and does the real work in a detached task; the frontend polls
+# /api/audit/result for the outcome. Default False, so every existing
+# caller (main.py, every other test in this file) is unaffected.
+# ---------------------------------------------------------------------------
+
+def _mock_audit_pipeline(monkeypatch, app_module):
+    """Fast, deterministic stand-ins for every step _audit_lead_impl calls."""
+    async def _fake_generate_audit_screenshot(*a, **k):
+        return (None, None, None)
+
+    class _FakeWebData:
+        page_speed_score = 50
+        seo_score = 50
+        instagram_url = None
+        technologies = []
+        has_booking_widget = False
+        signal_status = {}
+
+    async def _fake_audit_website(*a, **k):
+        return _FakeWebData()
+
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    monkeypatch.setattr(app_module.config, "MIN_BUDGET_TIER", "")
+    monkeypatch.setattr(app_module, "validate_public_url", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.ses, "check_quota", lambda: {"Max24HourSend": 100, "SentLast24Hours": 0})
+    monkeypatch.setattr(app_module, "generate_audit_screenshot", _fake_generate_audit_screenshot)
+    monkeypatch.setattr(app_module.web_scraper, "audit_website", _fake_audit_website)
+    monkeypatch.setattr(app_module.auditor, "analyze_lead", lambda *a, **k: {
+        "flaws": [], "overall_score": 50, "email_subject": "s", "opening_line": "o",
+    })
+    monkeypatch.setattr(app_module.decision_maker, "find_decision_maker", lambda *a, **k: {
+        "name": "Team", "email": "owner@example.com", "is_guess": False, "domain_accepts_mail": True, "cost": 0.0,
+    })
+    monkeypatch.setattr(app_module.db, "log_cost", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.db, "log_draft", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.sheets, "find_row_by_website", lambda *a, **k: None)
+
+
+def test_async_mode_returns_started_immediately(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+
+    res = client.post("/api/audit", json={
+        "company": "Acme", "website": "https://async-mode-example.com", "async_mode": True,
+    })
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"started": True}
+
+
+def test_async_mode_result_becomes_ready_and_matches_the_sync_shape(monkeypatch):
+    import time
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    website = "https://async-mode-result-example.com"
+
+    # A persistent event loop (the `with` block's portal) is required for
+    # the detached asyncio.create_task background audit to actually get
+    # turns to run between polls — a fresh TestClient call per request would
+    # tear the loop down and abandon the task before it ever progressed.
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True})
+
+        result = None
+        for _ in range(50):
+            r = client.get("/api/audit/result", params={"website": website})
+            if r.json().get("ready"):
+                result = r.json()
+                break
+            time.sleep(0.05)
+
+    assert result is not None, "background audit never became ready"
+    assert "error" not in result
+    assert result["flaws"] == []
+    assert result["overall_score"] == 50
+
+
+def test_async_mode_result_is_popped_after_one_read(monkeypatch):
+    import time
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    website = "https://async-mode-pop-example.com"
+
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True})
+
+        for _ in range(50):
+            if client.get("/api/audit/result", params={"website": website}).json().get("ready"):
+                break
+            time.sleep(0.05)
+
+        second = client.get("/api/audit/result", params={"website": website})
+
+    assert second.json() == {"ready": False}, "a one-shot handoff must not replay the same result forever"
+
+
+def test_async_mode_with_no_website_falls_through_to_the_sync_path(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+
+    res = client.post("/api/audit", json={"company": "Acme", "website": "", "async_mode": True})
+
+    assert res.status_code == 200, res.text
+    assert "started" not in res.json(), "no website means nothing to key the background result on — must run synchronously"
+
+
+def test_audit_result_reports_not_ready_when_nothing_was_ever_started(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+    res = client.get("/api/audit/result", params={"website": "https://never-audited-example.com"})
+
+    assert res.json() == {"ready": False}
+
+
 def test_count_emails_sent_today_reads_the_send_log():
     import inspect
     from storage import db

@@ -269,6 +269,18 @@ class AuditRequest(BaseModel):
     # Dealer"). Lets the sector line name a specific real scheme (PM-KUSUM,
     # SMAM) instead of one generic sentence for every agriculture niche.
     sector_detail: str = ""
+    # When true, /api/audit returns almost immediately ({"started": True})
+    # and does the actual work in a background task instead of blocking the
+    # HTTP response for the couple of minutes a real audit takes. Exists
+    # because Railway's edge/proxy times out a request well before that,
+    # 502ing every single audit regardless of whether the backend itself is
+    # fine — live-confirmed via the deploy log (audit still cleanly
+    # progressing at 65s+ in, no crash, no restart, nothing in the backend
+    # log at all, so the response was cut off in front of the app, not by
+    # it). Default False so every existing programmatic/test caller of this
+    # endpoint (main.py, the whole test suite) is completely unaffected —
+    # only the dashboard frontend sets this. See /api/audit/result below.
+    async_mode: bool = False
 
 class SendRequest(BaseModel):
     email: str
@@ -443,6 +455,14 @@ async def audit_progress(
     return {"running": True, **data}
 
 
+# Holds the final result of an async_mode audit until the frontend picks it
+# up via /api/audit/result. Same in-memory/single-instance tradeoff as
+# _audit_cache/_audit_progress above. Popped on read (a one-shot handoff,
+# not a cache — _audit_cache already covers "replay the last result").
+_AUDIT_ASYNC_RESULT_TTL = 900
+_audit_async_results: dict[str, tuple[float, dict]] = {}
+
+
 @app.post("/api/audit")
 async def audit_lead(
     req: AuditRequest,
@@ -450,6 +470,55 @@ async def audit_lead(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(5, 60)),
 ):
+    if req.async_mode and req.website:
+        # Fire the real work as a detached task and return immediately —
+        # see AuditRequest.async_mode's docstring for why. A fresh,
+        # request-independent BackgroundTasks() is used (not the one FastAPI
+        # injected here) because that one's lifecycle is tied to THIS
+        # request/response, which is about to finish; anything added to it
+        # after the response is sent would never run.
+        key = _audit_cache_key(req.website)
+
+        async def _run_and_store():
+            local_background_tasks = BackgroundTasks()
+            try:
+                result = await _audit_lead_impl(req, local_background_tasks)
+            except HTTPException as e:
+                result = {"error": e.detail}
+            except Exception as e:
+                result = {"error": str(e)}
+            await local_background_tasks()
+            now = time.monotonic()
+            for k, (ts, _) in list(_audit_async_results.items()):
+                if now - ts > _AUDIT_ASYNC_RESULT_TTL:
+                    _audit_async_results.pop(k, None)
+            _audit_async_results[key] = (now, result)
+
+        asyncio.create_task(_run_and_store())
+        return {"started": True}
+
+    return await _audit_lead_impl(req, background_tasks)
+
+
+@app.get("/api/audit/result")
+async def audit_result(
+    website: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    """
+    Poll target for an async_mode /api/audit call. {"ready": false} until
+    the background task finishes, then the stored result (popped — one-shot
+    handoff per audit attempt, not a replay cache).
+    """
+    entry = _audit_async_results.pop(_audit_cache_key(website), None)
+    if not entry:
+        return {"ready": False}
+    _, result = entry
+    return {"ready": True, **result}
+
+
+async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks) -> dict:
     if req.website:
         try:
             await asyncio.to_thread(validate_public_url, req.website)

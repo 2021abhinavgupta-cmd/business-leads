@@ -381,27 +381,71 @@ function App() {
       return newLeads;
     });
 
-    // An audit is a single long blocking POST (a couple of minutes now that
-    // the tool timeouts were raised for accuracy), so poll the server for
-    // which stage it's actually on rather than showing a bare spinner the
-    // whole time.
+    // An audit takes a couple of minutes (the tool timeouts were raised for
+    // accuracy), and Railway's edge times out the underlying HTTP request
+    // well before that — live-confirmed via the deploy log (the audit was
+    // still cleanly progressing at 65s+ in, no backend error, no restart;
+    // the connection was cut in front of the app). So for any lead with a
+    // website, /api/audit is called with async_mode: true — it returns
+    // {"started": true} almost immediately instead of blocking, and the
+    // real result is picked up here via polling once /api/audit/progress
+    // reports the run has finished. A lead with no website skips this
+    // entirely (the backend gates async_mode on req.website too, and that
+    // path is fast anyway with no Playwright/Lighthouse involved).
     let pollTimer = null;
+    let resolved = false;
+    let sawRunning = false;
+
+    const finishAudit = (payload) => {
+      resolved = true;
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      setLeads(prev => {
+        const updatedLeads = [...prev];
+        if (payload.error) {
+          updatedLeads[index].auditState = 'failed';
+          updatedLeads[index].auditError = payload.error;
+        } else {
+          updatedLeads[index].auditState = 'done';
+          updatedLeads[index].auditData = payload;
+        }
+        updatedLeads[index].auditProgress = null;
+        return updatedLeads;
+      });
+    };
+
     if (lead.Website) {
       pollTimer = setInterval(async () => {
+        if (resolved) return;
         try {
           const p = await axios.get(`${API_BASE}/api/audit/progress`, {
             params: { website: lead.Website }
           });
-          if (!p.data?.running) return;
-          setLeads(prev => {
-            const updated = [...prev];
-            if (updated[index]?.auditState === 'auditing') {
-              updated[index].auditProgress = p.data;
-            }
-            return updated;
+          if (p.data?.running) {
+            sawRunning = true;
+            setLeads(prev => {
+              const updated = [...prev];
+              if (updated[index]?.auditState === 'auditing') {
+                updated[index].auditProgress = p.data;
+              }
+              return updated;
+            });
+            return;
+          }
+          // Not running: either the background task hasn't started yet
+          // (async_mode POST raced ahead of the first progress write) or it
+          // just finished. Only check for a result once we've actually seen
+          // it running, so an early poll doesn't mistake "not started" for
+          // "done with nothing".
+          if (!sawRunning) return;
+          const r = await axios.get(`${API_BASE}/api/audit/result`, {
+            params: { website: lead.Website }
           });
+          if (r.data?.ready) {
+            finishAudit(r.data);
+          }
         } catch {
-          // Progress is cosmetic — never let a failed poll disturb the audit.
+          // Progress/result polling is best-effort — never let a failed
+          // poll disturb the in-flight audit; the next tick tries again.
         }
       }, 1500);
     }
@@ -424,21 +468,17 @@ function App() {
         gbp_address: lead.Address === 'Added Manually' ? '' : (lead.Address || ''),
         force,
         sector: lead.sector || '',
-        sector_detail: lead.sectorDetail || ''
+        sector_detail: lead.sectorDetail || '',
+        async_mode: !!lead.Website,
       });
 
-      setLeads(prev => {
-        const updatedLeads = [...prev];
-        if (res.data.error) {
-          updatedLeads[index].auditState = 'failed';
-          updatedLeads[index].auditError = res.data.error;
-        } else {
-          updatedLeads[index].auditState = 'done';
-          updatedLeads[index].auditData = res.data;
-        }
-        updatedLeads[index].auditProgress = null;
-        return updatedLeads;
-      });
+      if (res.data?.started) {
+        // Real work continues server-side; the poll timer above picks up
+        // the result via /api/audit/result once it's ready. Nothing more
+        // to do on this call.
+        return;
+      }
+      finishAudit(res.data);
     } catch (err) {
       console.error(`Audit failed for ${lead.Company}:`, err.response?.data?.detail || err.message, err);
 
@@ -460,31 +500,22 @@ function App() {
         }
       }
 
-      setLeads(prev => {
-        const updatedLeads = [...prev];
-        if (recovered) {
-          updatedLeads[index].auditState = 'done';
-          updatedLeads[index].auditData = {
-            email: recovered.target_email,
-            subject: recovered.subject,
-            body: recovered.body,
-            image_url: recovered.image_url || null,
-            review_warnings: recovered.review_warnings || [],
-            // Not stored on the draft row, so left absent — the card
-            // already renders these as "n/a" rather than a wrong 0.
-            page_speed_score: null,
-            seo_score: null,
-            recoveredAfterDroppedConnection: true,
-          };
-        } else {
-          updatedLeads[index].auditState = 'failed';
-          updatedLeads[index].auditError = err.response?.data?.detail || err.message;
-        }
-        updatedLeads[index].auditProgress = null;
-        return updatedLeads;
-      });
-    } finally {
-      if (pollTimer) clearInterval(pollTimer);
+      if (recovered) {
+        finishAudit({
+          email: recovered.target_email,
+          subject: recovered.subject,
+          body: recovered.body,
+          image_url: recovered.image_url || null,
+          review_warnings: recovered.review_warnings || [],
+          // Not stored on the draft row, so left absent — the card
+          // already renders these as "n/a" rather than a wrong 0.
+          page_speed_score: null,
+          seo_score: null,
+          recoveredAfterDroppedConnection: true,
+        });
+      } else {
+        finishAudit({ error: err.response?.data?.detail || err.message });
+      }
     }
   };
 

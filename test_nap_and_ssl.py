@@ -325,7 +325,7 @@ def test_api_audit_passes_the_mobile_screenshot_to_the_ai():
     import inspect
     import app
 
-    source = inspect.getsource(app.audit_lead)
+    source = inspect.getsource(app._audit_lead_impl)
     assert "mobile_image_path" in source, (
         "/api/audit must pass the mobile screenshot through, or capturing it is wasted"
     )
@@ -335,7 +335,7 @@ def test_api_audit_passes_the_google_rating_to_the_ai():
     import inspect
     import app
 
-    source = inspect.getsource(app.audit_lead)
+    source = inspect.getsource(app._audit_lead_impl)
     assert "rating=req.rating" in source
 
 

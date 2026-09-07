@@ -157,7 +157,7 @@ def test_every_error_return_in_audit_lead_precedes_the_draft_save():
 
     import app as app_module
 
-    source = inspect.getsource(app_module.audit_lead)
+    source = inspect.getsource(app_module._audit_lead_impl)
     save_point = source.index("db.log_draft")
     error_positions = []
     start = 0
@@ -202,7 +202,7 @@ def test_the_recovery_check_failing_still_falls_back_to_failed():
     """
     jsx = _jsx()
     catch_block = jsx[jsx.index("} catch (err) {\n      console.error(`Audit failed"):]
-    inner_try = catch_block[:catch_block.index("setLeads(prev =>")]
+    inner_try = catch_block[:catch_block.index("finishAudit(")]
     assert "catch {" in inner_try or "catch (" in inner_try
 
 
