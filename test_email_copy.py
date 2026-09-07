@@ -173,7 +173,7 @@ def test_a_configured_social_proof_line_replaces_the_generic_claim(monkeypatch):
 
 def test_agriculture_sector_adds_the_scheme_visibility_line():
     _, body = _sender().generate_email("Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture")
-    assert "scheme- and subsidy-linked suppliers" in body
+    assert "linked to government schemes and subsidies" in body
 
 
 def test_no_sector_leaves_the_email_unchanged():
@@ -214,7 +214,7 @@ def test_unmatched_sector_detail_falls_back_to_the_generic_line():
         "Acme Agro", "Priya", _ANALYSIS, "Kshitij",
         sector="agriculture", sector_detail="Dairy Farm",
     )
-    assert "scheme- and subsidy-linked suppliers" in body
+    assert "linked to government schemes and subsidies" in body
     assert "PM-KUSUM" not in body
     assert "SMAM" not in body
 

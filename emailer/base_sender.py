@@ -137,9 +137,9 @@ class BaseSender:
     # match a more specific scheme below.
     _GENERIC_AGRI_LINE = (
         "Worth noting for your sector specifically: buyers and "
-        "co-ops increasingly search online first, including for "
-        "scheme- and subsidy-linked suppliers — so a weak web "
-        "presence costs you discoverability, not just polish.\n"
+        "cooperatives increasingly search online first, including for "
+        "suppliers linked to government schemes and subsidies. A weak "
+        "web presence costs you discoverability, not just polish.\n"
     )
 
     # (keyword substrings matched against sector_detail.lower(), the line to
@@ -151,30 +151,34 @@ class BaseSender:
         (("irrigation",), (
             "Worth noting for your category specifically: PM-KUSUM's solar "
             "irrigation subsidy has buyers actively searching for pump and "
-            "irrigation suppliers online right now — a weak web presence "
+            "irrigation suppliers online right now. A weak web presence "
             "costs you exactly that traffic, not just polish.\n"
         )),
         (("tractor", "farm equipment", "equipment rental", "equipment dealer"), (
-            "Worth noting for your category specifically: SMAM's farm-"
+            "Worth noting for your category specifically: SMAM's farm "
             "machinery subsidy has buyers actively searching for equipment "
-            "dealers online right now — a weak web presence costs you "
+            "dealers online right now. A weak web presence costs you "
             "exactly that traffic, not just polish.\n"
         )),
     ]
 
     # Real credential, agriculture leads only (added 2026-09-07, on request;
     # narrowed same day to its own explicit flag rather than firing on
-    # every sector=="agriculture" lead automatically). Metazyne (metazyne.in)
-    # is MMGA's own agriculture-focused site/brand, @agriusindia its
-    # Instagram — a true, checkable fact about MMGA's own work in this
+    # every sector=="agriculture" lead automatically; corrected same day
+    # again after the user clarified the actual claim). Metazyne (metazyne.in)
+    # and Agrius (@agriusindia) are two of MMGA's own agriculture clients:
+    # MMGA built the Metazyne website and runs the Agrius social pages.
+    # NOT "MMGA's own brand" — the first version of this line said that,
+    # which was factually wrong, and it was corrected on direct user
+    # feedback. A true, checkable fact about MMGA's own work in this
     # sector, not a claim about the lead. Only appears when the frontend's
     # dedicated "Generate for Agriculture" button set include_agri_credibility,
     # not on the ordinary "Generate AI Audit & Draft" button even for an
     # agriculture-tagged lead.
     _AGRI_CREDIBILITY_LINE = (
-        "Worth mentioning: we've actually built out our own agriculture "
-        "brand, Metazyne (metazyne.in) — you can see the work on Instagram "
-        "at instagram.com/agriusindia.\n"
+        "Worth mentioning: we work in agriculture too. We built the "
+        "Metazyne website (metazyne.in) and manage the Agrius social "
+        "pages (instagram.com/agriusindia).\n"
     )
 
     def generate_email(
