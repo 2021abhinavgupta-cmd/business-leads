@@ -175,7 +175,16 @@ function App() {
     setLeadsPage(1);
     try {
       const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10 });
-      setLeads(res.data.leads.map(lead => ({ ...lead, auditState: 'none' })));
+      // A plain Home-tab search for an agri-sounding niche (e.g. typing
+      // "agriculture" directly instead of using the dedicated Agriculture
+      // tab) should still get the "Generate for Agriculture" button — tag
+      // sector the same way the Agriculture tab's own searches do.
+      const isAgriNiche = /agri|farm|krishi|agro/i.test(niche || '');
+      setLeads(res.data.leads.map(lead => ({
+        ...lead,
+        auditState: 'none',
+        ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: niche } : {}),
+      })));
     } catch (err) {
       console.error('Search failed:', err);
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
