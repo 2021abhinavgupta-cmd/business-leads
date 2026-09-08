@@ -25,6 +25,7 @@ from analyzer.visuals import (
     generate_audit_screenshot,
     make_screenshot_filename,
     make_mobile_screenshot_filename,
+    make_closeup_screenshot_filename,
 )
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
@@ -829,31 +830,37 @@ async def send_email(
                 )
 
         # Use existing screenshots (same collision-safe names
-        # generate_audit_screenshot wrote). BOTH captures are attached now:
-        # the desktop one carries the red-box evidence, the mobile one is what
+        # generate_audit_screenshot wrote). All three captures are attached
+        # now: the desktop one carries the marked evidence, the close up is a
+        # tight crop of that same marked element, and the mobile one is what
         # most of these prospects' own customers actually see. Each is
         # captioned for what it really is in base_sender — the single
         # hardcoded "on mobile" caption used to sit above the DESKTOP image on
         # every send.
         image_path = None
         mobile_image_path = None
+        closeup_image_path = None
         if not req.attach_screenshot:
             print(f"[Send] Sending to {req.email} without the screenshot — attachment disabled for this draft.")
         elif req.company and req.website:
             for filename, target in (
                 (make_screenshot_filename(req.company, req.website), "desktop"),
                 (make_mobile_screenshot_filename(req.company, req.website), "mobile"),
+                (make_closeup_screenshot_filename(req.company, req.website), "closeup"),
             ):
                 candidate_path = os.path.join(SCREENSHOTS_DIR, filename)
                 if os.path.exists(candidate_path):
                     if target == "desktop":
                         image_path = candidate_path
-                    else:
+                    elif target == "mobile":
                         mobile_image_path = candidate_path
+                    else:
+                        closeup_image_path = candidate_path
 
         message_id = await asyncio.to_thread(
             ses.send_email, req.email, req.subject, req.body,
             image_path=image_path, mobile_image_path=mobile_image_path,
+            closeup_image_path=closeup_image_path,
         )
         success = bool(message_id)
 

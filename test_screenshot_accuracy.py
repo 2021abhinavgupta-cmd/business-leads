@@ -194,17 +194,24 @@ def test_send_email_forwards_the_mobile_screenshot_to_the_builder(tmp_path):
     sender = SESSender()
     seen = {}
 
-    def _fake_build(to_email, subject, body, message_id, image_path=None, mobile_image_path=None):
+    def _fake_build(to_email, subject, body, message_id, image_path=None,
+                     mobile_image_path=None, closeup_image_path=None):
         seen["image_path"] = image_path
         seen["mobile_image_path"] = mobile_image_path
+        seen["closeup_image_path"] = closeup_image_path
         raise RuntimeError("stop here — the arguments are what this test is about")
 
     sender._build_initial_message = _fake_build
     with pytest.raises(Exception):
         sender.send_email("lead@example.com", "S", "B",
-                          image_path="/d_audit.jpg", mobile_image_path="/d_mobile.jpg")
+                          image_path="/d_audit.jpg", mobile_image_path="/d_mobile.jpg",
+                          closeup_image_path="/d_closeup.jpg")
 
-    assert seen == {"image_path": "/d_audit.jpg", "mobile_image_path": "/d_mobile.jpg"}
+    assert seen == {
+        "image_path": "/d_audit.jpg",
+        "mobile_image_path": "/d_mobile.jpg",
+        "closeup_image_path": "/d_closeup.jpg",
+    }
 
 
 def test_the_send_endpoint_looks_up_both_screenshot_filenames():
@@ -217,6 +224,21 @@ def test_the_approved_sender_also_forwards_both():
     """Third call site — the one most likely to be forgotten."""
     source = _source("send_approved.py")
     assert "mobile_image_path=mobile_image_path" in source
+
+
+def test_the_send_endpoint_also_looks_up_the_closeup_crop():
+    """
+    Same parameter-drift guard as the mobile one above, for the close up
+    crop added 2026-09-08 (make_closeup_screenshot_filename).
+    """
+    source = _source("app.py")
+    assert "make_closeup_screenshot_filename" in source
+    assert "closeup_image_path=closeup_image_path" in source
+
+
+def test_the_approved_sender_also_forwards_the_closeup_crop():
+    source = _source("send_approved.py")
+    assert "closeup_image_path=closeup_image_path" in source
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +311,9 @@ async def test_a_browser_failure_while_highlighting_is_not_fatal():
 @pytest.mark.asyncio
 async def test_the_highlight_is_removed_before_the_other_checks_measure():
     """
-    The overlay is a real element. Left in place it would be counted by the
-    font and stretched-image checks that run straight afterwards.
+    The overlay is a real element (now two: the box and its label, added
+    2026-09-08). Left in place either would be counted by the font and
+    stretched-image checks that run straight afterwards.
     """
     removed = {}
 
@@ -301,7 +324,7 @@ async def test_the_highlight_is_removed_before_the_other_checks_measure():
 
     await visuals._remove_highlight(_Page())
     assert "remove()" in removed["script"]
-    assert removed["arg"] == visuals._HIGHLIGHT_OVERLAY_ID
+    assert removed["arg"] == [visuals._HIGHLIGHT_OVERLAY_ID, visuals._HIGHLIGHT_LABEL_ID]
 
 
 def test_the_axe_audit_returns_candidates_rather_than_coordinates():
@@ -583,16 +606,23 @@ async def test_every_capture_disables_animations_and_hides_the_caret():
 
 def test_nothing_screenshots_the_page_without_going_through_capture():
     """
-    A second, raw page.screenshot() call would silently reintroduce
-    non-deterministic capture for whichever image it produced.
+    A second, undocumented raw page/element .screenshot() call would silently
+    reintroduce non-deterministic capture for whichever image it produced.
+
+    Exactly two call sites are legitimate: _capture (the full page) and
+    _capture_closeup (added 2026-09-08, a tight crop of the marked element,
+    taken while it's still highlighted). Both are pinned here by name and
+    both carry the same animations/caret determinism options — a THIRD call
+    site anywhere else in the file is what this test exists to catch.
     """
     source = _source("analyzer/visuals.py")
     raw = [
         line for line in source.splitlines()
         if ".screenshot(" in line and "async def screenshot" not in line
     ]
-    assert len(raw) == 1, f"expected only _capture to screenshot, found: {raw}"
-    assert "full_page=False, animations=\"disabled\", caret=\"hide\"" in raw[0]
+    assert len(raw) == 2, f"expected only _capture and _capture_closeup to screenshot, found: {raw}"
+    assert any("full_page=False, animations=\"disabled\", caret=\"hide\"" in line for line in raw)
+    assert any('el.screenshot(animations="disabled", caret="hide")' in line for line in raw)
 
 
 @pytest.mark.asyncio

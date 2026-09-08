@@ -35,25 +35,29 @@ async def send_approved_emails():
 
         print(f"  Sending email to {email} ({company})...")
 
-        # Generate fresh screenshots for the email. Both captures are attached
-        # (see BaseSender._build_initial_message) — this used to keep only the
-        # desktop path and drop the mobile one on the floor, which is the same
-        # two-call-sites-drift shape as the /api/audit vs main.py bug in
-        # CLAUDE.md §8: whenever the screenshot plumbing gains a parameter,
-        # every caller of send_email needs it, not just the busiest one.
+        # Generate fresh screenshots for the email. All three captures are
+        # attached (see BaseSender._build_initial_message) — this used to
+        # keep only the desktop path and drop the mobile one on the floor,
+        # which is the same two-call-sites-drift shape as the /api/audit vs
+        # main.py bug in CLAUDE.md §8: whenever the screenshot plumbing gains
+        # a parameter, every caller of send_email needs it, not just the
+        # busiest one.
         image_path = None
         mobile_image_path = None
+        closeup_image_path = None
         if website:
             image_path, _html_content, extra_audit_data = await generate_audit_screenshot(website, company)
             mobile_image_path = (extra_audit_data or {}).get("mobile_image_path")
+            closeup_image_path = (extra_audit_data or {}).get("closeup_image_path")
 
         message_id = ses.send_email(
             email, subject, body,
             image_path=image_path, mobile_image_path=mobile_image_path,
+            closeup_image_path=closeup_image_path,
         )
         success = bool(message_id)
 
-        for path in (image_path, mobile_image_path):
+        for path in (image_path, mobile_image_path, closeup_image_path):
             if path:
                 try:
                     os.remove(path)

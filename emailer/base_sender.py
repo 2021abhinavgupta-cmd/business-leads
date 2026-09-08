@@ -377,11 +377,19 @@ class BaseSender:
     _IMAGE_CAPTIONS = {
         "audit_img": "How your site renders on a desktop browser:",
         "audit_img_mobile": "And how the same page renders on a phone:",
+        # Only ever present alongside audit_img, when a box was actually
+        # drawn on that capture — see analyzer/visuals.py's
+        # _capture_closeup. Added after a live report that a reader could
+        # mistake the marker on the full-page image for the site's own
+        # design; a tight crop of the same element removes that doubt
+        # outright instead of relying on the marker alone.
+        "audit_img_closeup": "A close up crop of the exact spot the magenta box above is pointing at:",
     }
 
     def _build_initial_message(
         self, to_email: str, subject: str, body: str, message_id: str,
         image_path: str = None, mobile_image_path: str = None,
+        closeup_image_path: str = None,
     ) -> MIMEMultipart:
         """
         Build the first-touch message as multipart/mixed raw MIME carrying
@@ -389,10 +397,12 @@ class BaseSender:
         text/plain alternative heavily) plus List-Unsubscribe headers.
 
         Any screenshot given is embedded inline as a related part rather than
-        attached as a file. Both captures are included when both exist, each
-        under its own caption — the desktop view is where the red-box evidence
-        is drawn, and the mobile view is what most of these prospects'
-        customers actually see.
+        attached as a file. All three captures are included when they exist,
+        each under its own caption — the desktop view is where the marked
+        evidence is drawn, the close up is a tight crop of the same marked
+        element for anyone who can't easily spot it at full-page scale, and
+        the mobile view is what most of these prospects' customers actually
+        see.
         """
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
@@ -422,7 +432,11 @@ class BaseSender:
         # caption for an image the recipient will see as a broken placeholder.
         attachments = [
             (cid, path)
-            for cid, path in (("audit_img", image_path), ("audit_img_mobile", mobile_image_path))
+            for cid, path in (
+                ("audit_img", image_path),
+                ("audit_img_closeup", closeup_image_path),
+                ("audit_img_mobile", mobile_image_path),
+            )
             if path and os.path.exists(path)
         ]
 
@@ -507,15 +521,17 @@ class BaseSender:
     # --- sending --------------------------------------------------------
 
     def send_email(self, to_email: str, subject: str, body: str, image_path: str = None,
-                   mobile_image_path: str = None):
+                   mobile_image_path: str = None, closeup_image_path: str = None):
         """
         Send the first-touch cold email.
 
         Args:
-            image_path:        Desktop screenshot, the one carrying the red box.
-            mobile_image_path: Mobile screenshot. Optional and independent —
-                either, both or neither may be given, and the captions in the
+            image_path:         Desktop screenshot, the one carrying the marked box.
+            mobile_image_path:  Mobile screenshot. Optional and independent —
+                any of the three may be given, and the captions in the
                 message are built from whichever actually exist on disk.
+            closeup_image_path: Tight crop of just the marked element on the
+                desktop capture. Only ever set when a box was actually drawn.
 
         Returns:
             The RFC Message-ID (str, truthy) if the transport accepted the
@@ -534,6 +550,7 @@ class BaseSender:
             msg = self._build_initial_message(
                 to_email, subject, body, message_id,
                 image_path=image_path, mobile_image_path=mobile_image_path,
+                closeup_image_path=closeup_image_path,
             )
             try:
                 self._transport_send(msg, to_email)

@@ -777,7 +777,7 @@ class AIAuditor:
     _VISUAL_CLAIM_KEYWORDS = (
         "screenshot", "font", "typography", "align", "spacing", "layout",
         "colour", "color", "cluttered", "blurry", "pixelated", "overlap",
-        "looks ", "visual", "design", "red box",
+        "looks ", "visual", "design", "magenta box",
     )
 
     @staticmethod
@@ -1183,10 +1183,11 @@ class AIAuditor:
             # see CLAUDE.md §8). A worked example is the strongest signal in
             # a prompt, so an example that breaks the rules teaches the model
             # to break them.
-            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the red box, and you MUST say "
+            "If SCREENSHOT VISUAL FLAW exists, you MUST explicitly mention the magenta box, and you MUST say "
             "which image it is in (the desktop screenshot or the mobile one) exactly as the flaw line states "
-            "(e.g., 'I attached a screenshot of your homepage. The red box is around a button that screen "
-            "readers cannot announce at all, so customers using one have no way to find it'). "
+            "(e.g., 'I attached a screenshot of your homepage. The magenta box is around a button that screen "
+            "readers cannot announce at all, so customers using one have no way to find it. I also cropped in "
+            "close on it below so it is easy to see exactly what I mean'). "
             "Describe only what the flaw text actually says. Do NOT add a consequence it does not state, "
             "and in particular do NOT claim an accessibility problem affects SEO or Google ranking.\n"
             "If their Tech Stack uses Shopify/WordPress/etc, mention it specifically so it feels personalized.\n"

@@ -66,6 +66,7 @@ async def process_single_lead(lead: dict) -> str:
     print(f"  Generating visual evidence & scraping for {website}...")
     image_path, html_content, extra_audit_data = await generate_audit_screenshot(website, company)
     mobile_image_path = (extra_audit_data or {}).get("mobile_image_path")
+    closeup_image_path = (extra_audit_data or {}).get("closeup_image_path")
 
     # If Playwright couldn't render the page after every retry, don't draft
     # anything at all — on explicit request, after this exact failure mode
@@ -176,7 +177,7 @@ async def process_single_lead(lead: dict) -> str:
         sheets.save_draft(lead["row_number"], subject, body)
         
     # Clean up the screenshot files to save space
-    for path in (image_path, mobile_image_path):
+    for path in (image_path, mobile_image_path, closeup_image_path):
         if path:
             try:
                 os.remove(path)

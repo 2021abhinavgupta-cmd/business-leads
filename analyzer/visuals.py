@@ -103,6 +103,21 @@ _MIN_HIGHLIGHT_PX = 12
 # Marker id for the injected highlight, so it can be removed again and so a
 # stray one from a previous page can never be screenshotted twice.
 _HIGHLIGHT_OVERLAY_ID = "__lead_audit_highlight__"
+_HIGHLIGHT_LABEL_ID = _HIGHLIGHT_OVERLAY_ID + "_label"
+
+# Reported live (2026-09-08): a recipient mistook a site's own native red
+# "urgent" icon near a Contact Us button for the marker this pipeline draws,
+# because red is exactly the color a real site's own UI already reaches for
+# (error states, alert badges, "sale" ribbons). A marker that can be confused
+# with real content is not doing its job, no matter how correctly it is
+# positioned. Magenta essentially never appears in ordinary site design, and
+# Set-of-Mark visual-grounding research (arXiv:2310.11441; see also the
+# WebMarker project, github.com/reidbarber/webmarker) finds a bare colored box
+# is still ambiguous on its own — pairing it with a short text label is what
+# actually removes the ambiguity, for a human reader and for the vision judge
+# alike. See test_red_box_viewport.py (name kept, now reads magenta pixels).
+_HIGHLIGHT_COLOR = "#ff00ff"
+_HIGHLIGHT_LABEL_TEXT = "MMGA FLAGGED THIS"
 
 
 def normalise_url(url: str) -> str:
@@ -134,6 +149,17 @@ def make_mobile_screenshot_filename(company_name: str, url: str) -> str:
     them ends up looking for a file the other never wrote.
     """
     return make_screenshot_filename(company_name, url).replace("_audit.jpg", "_mobile.jpg")
+
+
+def make_closeup_screenshot_filename(company_name: str, url: str) -> str:
+    """
+    Filename of the CLOSE UP crop of the highlighted element, when one was
+    captured. Same "_audit.jpg" -> "_closeup.jpg" convention as the mobile
+    name above, for the same reason: the send path re-derives this filename
+    from scratch rather than being handed a path, so a second definition of
+    the suffix is how it ends up looking for a file this module never wrote.
+    """
+    return make_screenshot_filename(company_name, url).replace("_audit.jpg", "_closeup.jpg")
 
 
 async def _discover_extra_urls_via_sitemap(base_url: str) -> list[str]:
@@ -268,7 +294,7 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
     try:
         return await page.evaluate(
             """(payload) => {
-                const { candidates, maxArea, minPx, overlayId } = payload;
+                const { candidates, maxArea, minPx, overlayId, labelId, color, labelText } = payload;
                 const vw = window.innerWidth;
                 const vh = window.innerHeight;
 
@@ -276,6 +302,8 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
                 // overlay somehow survived a navigation.
                 const stale = document.getElementById(overlayId);
                 if (stale) stale.remove();
+                const staleLabel = document.getElementById(labelId);
+                if (staleLabel) staleLabel.remove();
 
                 for (const candidate of candidates) {
                     let el = null;
@@ -319,7 +347,7 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
                         'top:' + (rect.top - 4) + 'px',
                         'width:' + (rect.width + 8) + 'px',
                         'height:' + (rect.height + 8) + 'px',
-                        'border:4px solid #ff0000',
+                        'border:4px solid ' + color,
                         'border-radius:3px',
                         'box-sizing:border-box',
                         'background:transparent',
@@ -327,6 +355,41 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
                         'z-index:2147483647'
                     ].join(';');
                     document.documentElement.appendChild(box);
+
+                    // A labeled tag next to the box, not just a colored
+                    // outline on its own — a bare box can still be mistaken
+                    // for the site's own design (see the comment on
+                    // _HIGHLIGHT_COLOR). Placed above the box when there is
+                    // room, below it otherwise, so it never renders off the
+                    // top of the captured viewport.
+                    const label = document.createElement('div');
+                    label.id = labelId;
+                    const labelHeight = 22;
+                    const spaceAbove = (rect.top - 4) >= labelHeight;
+                    const labelTop = spaceAbove ? (rect.top - 4 - labelHeight) : (rect.bottom + 4);
+                    // Solid black with white text — deliberately NEITHER
+                    // uses the marker color, so the pixel tests (which scan
+                    // for that color specifically to find the box) see the
+                    // box and only the box. A filled tag painted in the same
+                    // color as the outline would be indistinguishable from
+                    // it by color and would throw off every "exactly where
+                    // is the box" assertion, since the label sits outside
+                    // the box's own bounding rectangle.
+                    label.textContent = labelText;
+                    label.style.cssText = [
+                        'position:fixed',
+                        'left:' + Math.max(0, rect.left - 4) + 'px',
+                        'top:' + labelTop + 'px',
+                        'background:#111111',
+                        'color:#ffffff',
+                        'font:bold 12px Arial, sans-serif',
+                        'padding:2px 8px',
+                        'border-radius:2px',
+                        'pointer-events:none',
+                        'z-index:2147483647',
+                        'white-space:nowrap'
+                    ].join(';');
+                    document.documentElement.appendChild(label);
 
                     return {
                         selector: candidate.selector,
@@ -345,6 +408,9 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
                 "maxArea": _MAX_HIGHLIGHT_AREA_FRACTION,
                 "minPx": _MIN_HIGHLIGHT_PX,
                 "overlayId": _HIGHLIGHT_OVERLAY_ID,
+                "labelId": _HIGHLIGHT_LABEL_ID,
+                "color": _HIGHLIGHT_COLOR,
+                "labelText": _HIGHLIGHT_LABEL_TEXT,
             },
         )
     except Exception as e:
@@ -353,14 +419,47 @@ async def _highlight_element(page, candidates: list[dict]) -> dict | None:
 
 
 async def _remove_highlight(page) -> None:
-    """Take the highlight back off, so later checks measure the real page."""
+    """Take the highlight (box and label) back off, so later checks measure the real page."""
     try:
         await page.evaluate(
-            "(id) => { const el = document.getElementById(id); if (el) el.remove(); }",
-            _HIGHLIGHT_OVERLAY_ID,
+            """(ids) => {
+                for (const id of ids) {
+                    const el = document.getElementById(id);
+                    if (el) el.remove();
+                }
+            }""",
+            [_HIGHLIGHT_OVERLAY_ID, _HIGHLIGHT_LABEL_ID],
         )
     except Exception:
         pass
+
+
+async def _capture_closeup(page, selector: str) -> bytes | None:
+    """
+    A tight crop of just the flagged element, taken while the highlight is
+    still on it — so the crop itself shows the marked border, not just bare
+    content.
+
+    Requested after a live report that the full-page image alone left room
+    for doubt about exactly what the box pointed at: at full-page scale a
+    small element's outline can be easy to miss, or mistaken for something
+    else on the page (see the comment on _HIGHLIGHT_COLOR). A second, tightly
+    cropped image next to it removes that doubt outright rather than relying
+    on the marker alone to carry it.
+
+    Best-effort and non-fatal: an element inside an iframe, or one that
+    becomes unlocatable between the highlight call and this one, degrades to
+    None rather than failing the audit — the full-page highlighted screenshot
+    is still there either way.
+    """
+    try:
+        el = await page.query_selector(selector)
+        if not el:
+            return None
+        return await el.screenshot(animations="disabled", caret="hide")
+    except Exception as e:
+        print(f"[Visuals] Could not capture close up crop (non-critical): {e}")
+        return None
 
 
 async def _capture(page) -> bytes:
@@ -400,11 +499,13 @@ async def _audit_current_page(page, context, label: str) -> dict:
     """
     violations, candidates = await _run_axe_audit(page)
 
-    # Highlight, capture, un-highlight — in that order and with nothing in
-    # between, so the outline in the image is the element axe-core actually
-    # objected to, and the checks below still measure the unmodified page.
+    # Highlight, capture (full page, then a tight crop of the same element
+    # while it's still marked), un-highlight — in that order and with nothing
+    # in between, so both images show the element axe-core actually objected
+    # to, and the checks below still measure the unmodified page.
     visual_flaw = await _highlight_element(page, candidates)
     screenshot_bytes = await _capture(page)
+    closeup_bytes = await _capture_closeup(page, visual_flaw["selector"]) if visual_flaw else None
     await _remove_highlight(page)
 
     broken_links, links_checked = await _check_broken_assets(page, context)
@@ -438,6 +539,7 @@ async def _audit_current_page(page, context, label: str) -> dict:
     return {
         "label": label,
         "screenshot_bytes": screenshot_bytes,
+        "closeup_bytes": closeup_bytes,
         "violations": violations,
         "visual_flaw": visual_flaw,
         "broken_links": broken_links,
@@ -544,6 +646,7 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
         - response_headers: dict of HTTP response headers from the homepage load (for security-header checks)
         - pages_audited: list of page paths that were actually crawled
         - mobile_image_path: path to the separate mobile-viewport screenshot, or None if it failed
+        - closeup_image_path: tight crop of just the marked element on the desktop capture, or None if no box was drawn
         - console_errors: JS console error messages captured across every page visited
         - mixed_content_urls: HTTP resource URLs loaded on an HTTPS page
         - mobile_horizontal_overflow: True if the homepage requires horizontal scrolling at 390px width
@@ -867,6 +970,11 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
 
                     # The mobile capture gets the same treatment as the
                     # desktop one: highlight in-browser, capture, un-highlight.
+                    # No separate close up crop here — at 390px wide the box
+                    # already occupies a much bigger share of the frame than
+                    # it does on the 1280px desktop capture, so the ambiguity
+                    # the close up exists to remove is far less of a problem
+                    # on this image to begin with.
                     mobile_visual_flaw = await _highlight_element(mobile_page, mobile_candidates)
                     mobile_screenshot_bytes = await _capture(mobile_page)
                     await _remove_highlight(mobile_page)
@@ -883,9 +991,10 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
 
                 await browser.close()
 
-        # Pick whichever audited page has the most severe visual flaw (red-box
-        # evidence) to attach to the email — falls back to the homepage if no
-        # page had a violation the browser could actually outline.
+        # Pick whichever audited page has the most severe visual flaw
+        # (magenta-box evidence) to attach to the email — falls back to the
+        # homepage if no page had a violation the browser could actually
+        # outline.
         best = pages_checked[0]
         for candidate in pages_checked[1:]:
             if candidate["visual_flaw"] and (
@@ -895,7 +1004,7 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             ):
                 best = candidate
 
-        # The red box is ALREADY in these bytes — the browser rendered it as
+        # The box is ALREADY in these bytes — the browser rendered it as
         # part of the page (see _highlight_element), so Pillow's only job here
         # is the JPEG conversion. Nothing is drawn onto the image after the
         # fact any more, which is what removes the possibility of the outline
@@ -906,12 +1015,24 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
         if best["visual_flaw"]:
             page_note = f" on the {best['label']} page" if best["label"] != "/" else ""
             visual_flaw_context = (
-                f"The red box in the desktop screenshot highlights an accessibility "
+                f"The magenta box in the desktop screenshot highlights an accessibility "
                 f"flaw{page_note}: {best['visual_flaw']['description']}."
             )
 
         filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
+
+        # A tight crop of just the marked element, saved separately when one
+        # was actually captured (see _capture_closeup) — a second, unambiguous
+        # image next to the full-page one, rather than relying on the marker
+        # alone to make clear what it points at.
+        closeup_filepath = None
+        if best.get("closeup_bytes"):
+            closeup_img = Image.open(BytesIO(best["closeup_bytes"])).convert("RGB")
+            closeup_filepath = os.path.join(
+                SCREENSHOTS_DIR, make_closeup_screenshot_filename(company_name, url)
+            )
+            closeup_img.save(closeup_filepath, format="JPEG", quality=85)
 
         mobile_filepath = None
         if mobile_screenshot_bytes:
@@ -955,9 +1076,9 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             # Set only when a box was genuinely drawn into the mobile capture
             # too. Kept separate from the desktop one so the prompt can say
             # which image a box is in — both are attached to the email now,
-            # and "the red box" is ambiguous across two pictures.
+            # and "the magenta box" is ambiguous across two pictures.
             "mobile_visual_flaw_context": (
-                f"The red box in the mobile screenshot highlights an accessibility flaw: "
+                f"The magenta box in the mobile screenshot highlights an accessibility flaw: "
                 f"{mobile_visual_flaw['description']}."
                 if mobile_visual_flaw else ""
             ),
@@ -971,6 +1092,7 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
             "final_url": final_url,
             "pages_audited": [p["label"] for p in pages_checked],
             "mobile_image_path": mobile_filepath,
+            "closeup_image_path": closeup_filepath,
             "real_web_vitals": real_web_vitals,
             "text_renderable": text_renderable,
         }

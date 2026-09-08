@@ -1,5 +1,7 @@
 """
-Real-browser tests for the red-box highlight.
+Real-browser tests for the highlight (a magenta box + a black/white label
+tag, since 2026-09-08 — see analyzer/visuals.py's _HIGHLIGHT_COLOR comment
+for why it moved off red).
 
 Originally written for the 2026-08-07 viewport-bounds bug: the box-picking
 loop accepted any bounding_box() result without checking it was inside the
@@ -17,7 +19,7 @@ the screenshot itself.
 
 That change makes a stronger assertion possible than the old suite could
 make: these tests read the actual PIXELS back out of the capture and check the
-red outline is really there, and really around the element axe-core objected
+outline is really there, and really around the element axe-core objected
 to. The old tests could only check a coordinate tuple, which is exactly the
 thing that could be right while the image was wrong.
 
@@ -65,13 +67,25 @@ async def _run_against_html(html: str, settle_ms: int = 0):
         return violations, highlight, image
 
 
-def _red_pixels(png_bytes):
-    """Bounding box of the pure-red outline in a capture, or None."""
+def _marker_pixels(png_bytes):
+    """
+    Bounding box of the magenta outline in a capture, or None.
+
+    Renamed from _red_pixels 2026-09-08 when the marker color changed from
+    red to magenta (see analyzer/visuals.py's _HIGHLIGHT_COLOR comment) — a
+    reader had mistaken a real site's own native red icon for this pipeline's
+    marker, and red is exactly the color a real site's own UI reaches for
+    (error states, alert badges), so it was a poor choice for something that
+    must never be confused with real content. The label tag added alongside
+    the box is deliberately black/white, not magenta, specifically so it
+    contributes no pixels here and this function still measures the box
+    alone — see the comment on the label's style in _highlight_element.
+    """
     img = Image.open(BytesIO(png_bytes)).convert("RGB")
     xs, ys = [], []
     for x, y in ((x, y) for y in range(0, img.height, 2) for x in range(0, img.width, 2)):
         r, g, b = img.getpixel((x, y))
-        if r > 200 and g < 80 and b < 80:
+        if r > 200 and b > 200 and g < 80:
             xs.append(x)
             ys.append(y)
     if not xs:
@@ -98,7 +112,7 @@ async def test_off_screen_violation_is_rejected_not_drawn_invisibly():
     assert highlight is None
     # And nothing was drawn — the old bug produced a box the recipient could
     # not see while the copy still described one.
-    assert _red_pixels(image) is None
+    assert _marker_pixels(image) is None
 
 
 async def test_a_wrapper_covering_most_of_the_frame_is_rejected():
@@ -119,7 +133,7 @@ async def test_a_wrapper_covering_most_of_the_frame_is_rejected():
     violations, highlight, image = await _run_against_html(html)
     assert any(v["id"] == "button-name" for v in violations)
     assert highlight is None
-    assert _red_pixels(image) is None
+    assert _marker_pixels(image) is None
 
 
 async def test_a_small_in_viewport_violation_is_still_highlighted():
@@ -157,7 +171,7 @@ async def test_the_outline_is_actually_present_in_the_captured_pixels():
     """
     _violations, highlight, image = await _run_against_html(html)
     assert highlight is not None
-    assert _red_pixels(image) is not None
+    assert _marker_pixels(image) is not None
 
 
 async def test_the_outline_lands_on_the_element_axe_objected_to():
@@ -173,7 +187,7 @@ async def test_the_outline_lands_on_the_element_axe_objected_to():
     """
     _violations, highlight, image = await _run_against_html(html)
     assert highlight is not None
-    drawn = _red_pixels(image)
+    drawn = _marker_pixels(image)
     assert drawn is not None
 
     # The outline is inset/outset by a few px and sampled every 2px, so allow
@@ -214,7 +228,7 @@ async def test_the_outline_follows_an_element_that_moved_after_the_audit_ran():
     assert highlight["x"] > 600
     assert highlight["y"] < 200
 
-    drawn = _red_pixels(image)
+    drawn = _marker_pixels(image)
     assert drawn is not None
     tolerance = 12
     assert abs(drawn[0] - highlight["x"]) < tolerance
@@ -234,7 +248,7 @@ async def test_an_invisible_element_is_never_highlighted():
     """
     _violations, highlight, image = await _run_against_html(html)
     assert highlight is None
-    assert _red_pixels(image) is None
+    assert _marker_pixels(image) is None
 
 
 async def test_the_highlight_is_gone_after_removal():
@@ -260,7 +274,7 @@ async def test_the_highlight_is_gone_after_removal():
         finally:
             await browser.close()
 
-    assert _red_pixels(after) is None
+    assert _marker_pixels(after) is None
 
 
 # ---------------------------------------------------------------------------
