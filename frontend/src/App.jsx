@@ -138,6 +138,22 @@ function App() {
   const [mncSearching, setMncSearching] = useState(false);
   const [mncProgress, setMncProgress] = useState(null);
   const [mncLastResult, setMncLastResult] = useState('');
+  // "Search Local Businesses" — same auto-search-by-location mechanism as
+  // MNC search above, but for small/medium/local businesses (requested
+  // 2026-09-08: "can i add for small medium and local brands too like
+  // this"). Unlike MNC search there's no need for a new curated list — this
+  // tool already ships one (NICHES, searchOptions.js, ~130 categories
+  // spanning health, fitness, food, retail, trades, professional services
+  // etc.), built specifically around businesses this pipeline audits well.
+  // Runs the full list by default (confirmed over a smaller subset), so a
+  // real run is long (30+ minutes at the 13s/request pacing below) —
+  // stoppable mid-run like the MNC/Agriculture bulk runners.
+  const [showLocalSearch, setShowLocalSearch] = useState(false);
+  const [localNiches, setLocalNiches] = useState('');
+  const [localCity, setLocalCity] = useState('');
+  const [localSearching, setLocalSearching] = useState(false);
+  const [localProgress, setLocalProgress] = useState(null);
+  const [localLastResult, setLocalLastResult] = useState('');
   const [loadingNearby, setLoadingNearby] = useState(false);
   const [nearbyRadiusKm, setNearbyRadiusKm] = useState(5);
   const [manualCompany, setManualCompany] = useState('');
@@ -403,6 +419,65 @@ function App() {
         mncStopRef.current
           ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
           : `Looked up ${names.length} compan${names.length === 1 ? 'y' : 'ies'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
+      );
+    }
+  };
+
+  // One real /api/search lookup for one local-business niche, using the
+  // main form's own Leads-per-search value (unlike runOneMncSearch's fixed
+  // limit=1 — an ordinary niche search wants several candidates, not one
+  // exact listing). Tags the same sector regexes handleSearch already uses
+  // (a couple of NICHES entries, e.g. "Textile Manufacturer", genuinely
+  // match them) so results stay consistent with a plain Dashboard search.
+  const runOneLocalSearch = async (nicheChoice, cityVal) => {
+    const res = await axios.post(`${API_BASE}/api/search`, { niche: nicheChoice, city: cityVal, limit: parseInt(limit) || 10, async_mode: true });
+    const rawLeads = res.data?.started ? await pollSearchResult(res.data.key) : res.data.leads;
+    const isAgriNiche = /agri|farm|krishi|agro/i.test(nicheChoice);
+    const isTextileNiche = /textile|fabric|garment|apparel|yarn|weav|cotton/i.test(nicheChoice);
+    const tagged = rawLeads.map(lead => ({
+      ...lead,
+      auditState: 'none',
+      sourceType: 'local-search',
+      ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: nicheChoice } : {}),
+      ...(isTextileNiche ? { sector: 'textile', sectorDetail: nicheChoice } : {}),
+    }));
+    setLeads(prev => [...tagged, ...prev]);
+    return tagged.length;
+  };
+
+  // Runs one search per niche, sequentially, 13s apart — identical
+  // pacing/stop pattern to handleMncSearch/handleSearchAllNiches.
+  // Niches box left blank -> the full NICHES list (searchOptions.js);
+  // typing a custom list overrides it.
+  const localStopRef = useRef(false);
+  const handleLocalSearch = async (e) => {
+    e.preventDefault();
+    const typed = localNiches.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    const nichesToRun = typed.length > 0 ? typed : NICHES;
+    if (!localCity.trim()) { alert('Enter a city first.'); return; }
+    localStopRef.current = false;
+    setLocalSearching(true);
+    setLocalLastResult('');
+    let totalAdded = 0;
+    try {
+      for (let i = 0; i < nichesToRun.length; i++) {
+        if (localStopRef.current) break;
+        setLocalProgress({ current: i + 1, total: nichesToRun.length, label: nichesToRun[i] });
+        try {
+          totalAdded += await runOneLocalSearch(nichesToRun[i], localCity);
+        } catch (err) {
+          console.error(`Local search failed for ${nichesToRun[i]}:`, err);
+        }
+        setLeadsPage(1);
+        if (i < nichesToRun.length - 1 && !localStopRef.current) await new Promise(r => setTimeout(r, 13000));
+      }
+    } finally {
+      setLocalSearching(false);
+      setLocalProgress(null);
+      setLocalLastResult(
+        localStopRef.current
+          ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
+          : `Searched ${nichesToRun.length} niche${nichesToRun.length === 1 ? '' : 's'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
       );
     }
   };
@@ -1047,6 +1122,9 @@ function App() {
           <button type="button" onClick={() => setShowMncSearch(!showMncSearch)} style={{ background: showMncSearch ? '#fee2e2' : '#f8fafc', border: showMncSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMncSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showMncSearch ? 'Cancel' : 'Search MNCs'}
           </button>
+          <button type="button" onClick={() => setShowLocalSearch(!showLocalSearch)} style={{ background: showLocalSearch ? '#fee2e2' : '#f8fafc', border: showLocalSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showLocalSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            {showLocalSearch ? 'Cancel' : 'Search Local Businesses'}
+          </button>
         </div>
       </form>
       {loadingSearch && searchProgressNote && (
@@ -1135,6 +1213,49 @@ function App() {
             )}
             {!mncSearching && mncLastResult && (
               <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{mncLastResult}</p>
+            )}
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showLocalSearch && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleLocalSearch}>
+            <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
+              Just give a city — this runs every niche in the built-in list ({NICHES.length} categories: health, fitness, food,
+              retail, trades, professional services and more) there automatically. A full run takes 30+ minutes (stoppable
+              anytime) since it's paced to respect the search rate limit. Type your own niches below to run a shorter custom list instead.
+            </div>
+            <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
+              <label>Niches <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional — leave blank for the full built-in list)</span></label>
+              <textarea
+                rows={2}
+                value={localNiches}
+                onChange={e => setLocalNiches(e.target.value)}
+                placeholder={"Leave blank to search every built-in niche, or type your own:\nDentist\nSalon\nGym"}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontFamily: 'inherit', fontSize: '14px', resize: 'vertical' }}
+              />
+            </div>
+            <div className="input-group" style={{ maxWidth: 200 }}>
+              <label>City (or a whole state)</label>
+              <input type="text" list="city-options" value={localCity} onChange={e => setLocalCity(e.target.value)} placeholder="e.g. Pune" />
+            </div>
+            <button type="submit" className="primary-btn" disabled={localSearching} style={{ background: localSearching ? '#94a3b8' : '#0891b2' }}>
+              {localSearching ? <Loader2 className="spin" /> : <Search />}
+              {localSearching ? 'Searching...' : 'Search Local Businesses'}
+            </button>
+            {localSearching && (
+              <button type="button" onClick={() => { localStopRef.current = true; }} style={{ padding: '0 16px', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
+                Stop
+              </button>
+            )}
+            {localProgress && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                {localProgress.current}/{localProgress.total}: {localProgress.label}{searchProgressNote ? ` — ${searchProgressNote}` : ''}
+              </p>
+            )}
+            {!localSearching && localLastResult && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{localLastResult}</p>
             )}
           </motion.form>
         )}
