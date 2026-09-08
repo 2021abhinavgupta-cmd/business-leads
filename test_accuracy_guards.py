@@ -168,6 +168,76 @@ def test_places_field_mask_requests_the_pagination_token():
 
 
 # ---------------------------------------------------------------------------
+# /api/search freezing every other concurrent request, reported live as a
+# 502 on a search that happened while an Autopilot audit was still running
+#
+# _scrape_via_api is a plain synchronous method (a real time.sleep between
+# pages plus blocking httpx.Client().post() calls) — every other network
+# call in this codebase's async routes is either genuinely async or wrapped
+# in asyncio.to_thread specifically so it can't block the shared event loop.
+# scrape_google_maps looked async (it's an `async def`) but was calling
+# _scrape_via_api directly, so the whole process froze — no other request,
+# including an in-progress audit's own awaits or the frontend's 5s
+# /api/costs poll, could be served until it returned.
+# ---------------------------------------------------------------------------
+
+def test_scrape_google_maps_wraps_the_blocking_call_in_a_thread():
+    import inspect
+    from scrapers.google_maps import GoogleMapsScraper
+
+    source = inspect.getsource(GoogleMapsScraper.scrape_google_maps)
+    assert "asyncio.to_thread" in source and "_scrape_via_api" in source, (
+        "_scrape_via_api does real time.sleep()/blocking httpx calls — "
+        "calling it directly from this async method freezes every other "
+        "concurrent request on the process for its whole duration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scrape_google_maps_does_not_freeze_the_event_loop(monkeypatch):
+    """
+    Behavioural version of the guard above: actually run scrape_google_maps
+    with a slow synchronous stand-in for _scrape_via_api and confirm a
+    concurrently-running coroutine still gets to make progress, rather than
+    only resuming once the scrape finishes.
+    """
+    import asyncio
+    import time as time_module
+
+    from scrapers.google_maps import GoogleMapsScraper
+
+    scraper = GoogleMapsScraper()
+    scraper.api_key = "fake-key-for-this-test"
+
+    def _slow_blocking_scrape(niche, city, limit):
+        time_module.sleep(0.3)
+        return []
+
+    monkeypatch.setattr(scraper, "_scrape_via_api", _slow_blocking_scrape)
+
+    ticks = 0
+
+    async def _tick_counter():
+        nonlocal ticks
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    await asyncio.gather(
+        scraper.scrape_google_maps("gym", "Mumbai", limit=5),
+        _tick_counter(),
+    )
+
+    # A frozen event loop would starve the counter until the blocking call
+    # returned, so it would land at (or very near) 0 real ticks logged
+    # during that window. asyncio.to_thread keeps the loop free to run it.
+    assert ticks > 5, (
+        f"only {ticks} ticks progressed while the scrape ran — the event "
+        "loop looks frozen"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Daily send cap
 #
 # DAILY_EMAIL_LIMIT was only checked in main.py's batch loop, which never
