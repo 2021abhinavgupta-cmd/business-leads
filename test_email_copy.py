@@ -290,6 +290,42 @@ def test_non_agriculture_lead_never_mentions_metazyne_even_if_flagged():
     assert "agriusindia" not in body.lower()
 
 
+def test_alpine_texworld_credibility_line_requires_the_explicit_flag():
+    """
+    Same mechanism as the Metazyne line above, gated the same way — the
+    frontend only sets it from a dedicated "Generate for Textile" button.
+    """
+    _, body = _sender().generate_email(
+        "Acme Textiles", "Priya", _ANALYSIS, "Kshitij",
+        sector="textile", include_textile_credibility=True,
+    )
+    assert "alpinetexworld.com" in body
+
+
+def test_textile_sector_alone_does_not_mention_alpine_texworld():
+    """The ordinary button on a textile lead must not add this line."""
+    _, body = _sender().generate_email("Acme Textiles", "Priya", _ANALYSIS, "Kshitij", sector="textile")
+    assert "alpinetexworld" not in body.lower()
+
+
+def test_non_textile_lead_never_mentions_alpine_texworld_even_if_flagged():
+    """The flag alone can't leak this onto a non-textile lead's copy."""
+    _, body = _sender().generate_email(
+        "Acme Dental", "Priya", _ANALYSIS, "Kshitij", include_textile_credibility=True,
+    )
+    assert "alpinetexworld" not in body.lower()
+
+
+def test_agri_and_textile_credibility_flags_are_independent():
+    """A textile lead flagged with the AGRI flag must not get either line, and vice versa — each requires its own matching sector."""
+    _, body = _sender().generate_email(
+        "Acme Textiles", "Priya", _ANALYSIS, "Kshitij",
+        sector="textile", include_agri_credibility=True,
+    )
+    assert "metazyne" not in body.lower()
+    assert "alpinetexworld" not in body.lower()
+
+
 def test_the_default_variant_is_short():
     """
     Switched 2026-08-10: the founder independently reported the exact

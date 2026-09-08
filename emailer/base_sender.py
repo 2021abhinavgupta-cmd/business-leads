@@ -181,9 +181,18 @@ class BaseSender:
         "pages (instagram.com/agriusindia).\n"
     )
 
+    # Real credential, textile leads only (added 2026-09-08, on request,
+    # same opt-in-per-draft gating as the agriculture line above). Alpine
+    # Texworld is a real client of MMGA's — the site was built by MMGA.
+    _TEXTILE_CREDIBILITY_LINE = (
+        "Worth mentioning: we work in textiles too. We built the Alpine "
+        "Texworld website (alpinetexworld.com).\n"
+    )
+
     def generate_email(
         self, company: str, contact_name: str, analysis: dict, your_name: str,
         sector: str = "", sector_detail: str = "", include_agri_credibility: bool = False,
+        include_textile_credibility: bool = False,
     ) -> tuple[str, str]:
         """
         Generate the subject and body for the cold email.
@@ -210,6 +219,11 @@ class BaseSender:
                 the sector check is a server-side backstop so the flag alone
                 can never put an agriculture-specific claim on a lead from
                 any other sector.
+            include_textile_credibility: Same mechanism as
+                include_agri_credibility, but adds _TEXTILE_CREDIBILITY_LINE
+                (the Alpine Texworld mention) when True AND sector ==
+                "textile" — both required, gated behind the frontend's
+                dedicated "Generate for Textile" button.
 
         Returns:
             (subject, body) as plain text strings.
@@ -276,6 +290,9 @@ class BaseSender:
 
         if sector == "agriculture" and include_agri_credibility:
             body_lines.append(self._AGRI_CREDIBILITY_LINE)
+
+        if sector == "textile" and include_textile_credibility:
+            body_lines.append(self._TEXTILE_CREDIBILITY_LINE)
 
         body_lines.extend(self._closing_lines(variant, your_name))
 

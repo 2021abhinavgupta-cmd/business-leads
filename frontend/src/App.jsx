@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, HelpCircle } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
@@ -270,12 +270,16 @@ function App() {
       // A plain Home-tab search for an agri-sounding niche (e.g. typing
       // "agriculture" directly instead of using the dedicated Agriculture
       // tab) should still get the "Generate for Agriculture" button — tag
-      // sector the same way the Agriculture tab's own searches do.
+      // sector the same way the Agriculture tab's own searches do. Textile
+      // (added 2026-09-08, no dedicated tab — just this tagging plus the
+      // credibility line) works the same way off the same niche text box.
       const isAgriNiche = /agri|farm|krishi|agro/i.test(niche || '');
+      const isTextileNiche = /textile|fabric|garment|apparel|yarn|weav|cotton/i.test(niche || '');
       setLeads(res.data.leads.map(lead => ({
         ...lead,
         auditState: 'none',
         ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: niche } : {}),
+        ...(isTextileNiche ? { sector: 'textile', sectorDetail: niche } : {}),
       })));
     } catch (err) {
       console.error('Search failed:', err);
@@ -473,20 +477,25 @@ function App() {
   // `force` bypasses the server's short-TTL result cache — set by the
   // Retry button, since a deliberate re-audit wants fresh data rather
   // than a replay of the verdict that just failed or looked wrong.
-  // includeAgriCredibility is null on a plain call (e.g. Retry Audit) — that
-  // means "keep whatever this lead was already set to", so retrying a
-  // failed agri-credibility audit doesn't silently drop the Metazyne line.
-  // Only the two Generate buttons below ever pass an explicit true/false.
-  const handleAudit = async (index, force = false, includeAgriCredibility = null) => {
+  // includeAgriCredibility/includeTextileCredibility are null on a plain
+  // call (e.g. Retry Audit) — that means "keep whatever this lead was
+  // already set to", so retrying a failed credibility-line audit doesn't
+  // silently drop the line. Only the dedicated Generate buttons below ever
+  // pass an explicit true/false.
+  const handleAudit = async (index, force = false, includeAgriCredibility = null, includeTextileCredibility = null) => {
     const lead = leadsRef.current[index];
     const effectiveIncludeAgri = includeAgriCredibility !== null
       ? includeAgriCredibility
       : !!lead.includeAgriCredibility;
+    const effectiveIncludeTextile = includeTextileCredibility !== null
+      ? includeTextileCredibility
+      : !!lead.includeTextileCredibility;
     setLeads(prev => {
       const newLeads = [...prev];
       newLeads[index].auditState = 'auditing';
       newLeads[index].auditProgress = null;
       newLeads[index].includeAgriCredibility = effectiveIncludeAgri;
+      newLeads[index].includeTextileCredibility = effectiveIncludeTextile;
       return newLeads;
     });
 
@@ -579,6 +588,7 @@ function App() {
         sector: lead.sector || '',
         sector_detail: lead.sectorDetail || '',
         include_agri_credibility: effectiveIncludeAgri,
+        include_textile_credibility: effectiveIncludeTextile,
         async_mode: !!lead.Website,
       });
 
@@ -943,13 +953,21 @@ function App() {
 
               {lead.auditState === 'none' && lead.Website && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
-                  <button className="audit-btn" onClick={() => handleAudit(i, false, false)}><Activity size={18} /> Generate AI Audit & Draft</button>
+                  <button className="audit-btn" onClick={() => handleAudit(i, false, false, false)}><Activity size={18} /> Generate AI Audit & Draft</button>
                   {/* Agriculture-sourced leads only — adds a few lines about
                       Metazyne/@agriusindia to the draft. Kept off the plain
                       button above so it's opt-in per draft, not automatic. */}
                   {lead.sector === 'agriculture' && (
-                    <button className="audit-btn" style={{ background: '#166534' }} onClick={() => handleAudit(i, false, true)}>
+                    <button className="audit-btn" style={{ background: '#166534' }} onClick={() => handleAudit(i, false, true, false)}>
                       <Sprout size={18} /> Generate for Agriculture
+                    </button>
+                  )}
+                  {/* Textile-sourced leads only (added 2026-09-08) — adds a
+                      line about alpinetexworld.com to the draft. Same
+                      opt-in-per-draft gating as the agriculture line above. */}
+                  {lead.sector === 'textile' && (
+                    <button className="audit-btn" style={{ background: '#7c3aed' }} onClick={() => handleAudit(i, false, false, true)}>
+                      <Shirt size={18} /> Generate for Textile
                     </button>
                   )}
                 </div>
