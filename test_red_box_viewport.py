@@ -36,6 +36,7 @@ from playwright.async_api import async_playwright
 from analyzer.visuals import (
     _MIN_HIGHLIGHT_PX,
     _capture,
+    _check_stretched_images,
     _highlight_element,
     _remove_highlight,
     _run_axe_audit,
@@ -97,18 +98,28 @@ def _marker_pixels(png_bytes):
 # The two originally-reported failure modes
 # ---------------------------------------------------------------------------
 
+# A button styled with near-identical foreground/background colors — a
+# reliable, deliberate color-contrast failure (axe-core files this under
+# "incomplete", not "violations" — see _run_axe_audit's comment — but the
+# defect is exactly as visible either way). Used throughout this file
+# instead of an empty <button></button> (which only trips axe's
+# button-name rule) because button-name has no visible symptom and is
+# filtered out of the highlight candidate list entirely — see
+# _VISUALLY_APPARENT_AXE_RULES in analyzer/visuals.py.
+_LOW_CONTRAST_STYLE = "color:#fefefe; background-color:#ffffff; border:none;"
+
+
 async def test_off_screen_violation_is_rejected_not_drawn_invisibly():
-    # A button (empty, so axe's button-name rule fires) sitting 5000px down
-    # the page. It is a perfectly real violation with a perfectly valid box,
-    # but it is nowhere near the 800px-tall viewport that gets captured.
-    html = """
+    # A low-contrast button sitting 5000px down the page. It is a perfectly
+    # real violation with a perfectly valid box, but it is nowhere near the
+    # 800px-tall viewport that gets captured.
+    html = f"""
     <html><body style="margin:0">
         <div style="height: 5000px;"></div>
-        <button></button>
+        <button style="{_LOW_CONTRAST_STYLE}">Book Now</button>
     </body></html>
     """
-    violations, highlight, image = await _run_against_html(html)
-    assert any(v["id"] == "button-name" for v in violations)
+    _violations, highlight, image = await _run_against_html(html)
     assert highlight is None
     # And nothing was drawn — the old bug produced a box the recipient could
     # not see while the copy still described one.
@@ -125,27 +136,25 @@ async def test_a_wrapper_covering_most_of_the_frame_is_rejected():
     accidentally being caught by the bounds check. The old guard was an AND
     over both dimensions, which this element would have passed.
     """
-    html = """
+    html = f"""
     <html><body style="margin:0">
-        <button style="width: 1000px; height: 700px;"></button>
+        <button style="width: 1000px; height: 700px; {_LOW_CONTRAST_STYLE}">Book Now</button>
     </body></html>
     """
-    violations, highlight, image = await _run_against_html(html)
-    assert any(v["id"] == "button-name" for v in violations)
+    _violations, highlight, image = await _run_against_html(html)
     assert highlight is None
     assert _marker_pixels(image) is None
 
 
 async def test_a_small_in_viewport_violation_is_still_highlighted():
     """The guards must not have made every candidate unhighlightable."""
-    html = """
+    html = f"""
     <html><body style="margin:0">
         <div style="height: 100px;"></div>
-        <button style="width: 40px; height: 20px;"></button>
+        <button style="width: 40px; height: 20px; {_LOW_CONTRAST_STYLE}">B</button>
     </body></html>
     """
-    violations, highlight, image = await _run_against_html(html)
-    assert any(v["id"] == "button-name" for v in violations)
+    _violations, highlight, image = await _run_against_html(html)
     assert highlight is not None
     assert highlight["width"] >= _MIN_HIGHLIGHT_PX
     assert highlight["height"] >= _MIN_HIGHLIGHT_PX
@@ -163,10 +172,10 @@ async def test_the_outline_is_actually_present_in_the_captured_pixels():
     be perfectly correct while the image has no box in it, or a box somewhere
     else entirely.
     """
-    html = """
+    html = f"""
     <html><body style="margin:0">
         <div style="height: 200px;"></div>
-        <button style="width: 120px; height: 60px;"></button>
+        <button style="width: 120px; height: 60px; {_LOW_CONTRAST_STYLE}">Book Now</button>
     </body></html>
     """
     _violations, highlight, image = await _run_against_html(html)
@@ -179,10 +188,10 @@ async def test_the_outline_lands_on_the_element_axe_objected_to():
     The box in the picture and the element it claims to be about must be the
     same place. This is the assertion that a stale coordinate would fail.
     """
-    html = """
+    html = f"""
     <html><body style="margin:0">
         <div style="height: 300px;"></div>
-        <button style="margin-left: 500px; width: 120px; height: 60px;"></button>
+        <button style="margin-left: 500px; width: 120px; height: 60px; {_LOW_CONTRAST_STYLE}">Book Now</button>
     </body></html>
     """
     _violations, highlight, image = await _run_against_html(html)
@@ -211,9 +220,12 @@ async def test_the_outline_follows_an_element_that_moved_after_the_audit_ran():
     the rect is now read and the outline appended in the same synchronous
     evaluate(), the box cannot be anywhere but on the element.
     """
-    html = """
+    html = (
+        """
     <html><body style="margin:0">
-        <button id="mover" style="position:absolute; left:0px; top:400px; width:120px; height:60px;"></button>
+        <button id="mover" style="position:absolute; left:0px; top:400px; width:120px; height:60px; """
+        + _LOW_CONTRAST_STYLE
+        + """">Book Now</button>
         <script>
             setTimeout(() => {
                 document.getElementById('mover').style.left = '700px';
@@ -222,6 +234,7 @@ async def test_the_outline_follows_an_element_that_moved_after_the_audit_ran():
         </script>
     </body></html>
     """
+    )
     _violations, highlight, image = await _run_against_html(html, settle_ms=400)
     assert highlight is not None
     # It really did move before the capture.
@@ -256,10 +269,10 @@ async def test_the_highlight_is_gone_after_removal():
     The overlay is a real DOM element. Left in place it would be counted by
     the font-consistency and stretched-image checks that run right after it.
     """
-    html = """
+    html = f"""
     <html><body style="margin:0">
         <div style="height: 100px;"></div>
-        <button style="width: 80px; height: 40px;"></button>
+        <button style="width: 80px; height: 40px; {_LOW_CONTRAST_STYLE}">Book Now</button>
     </body></html>
     """
     async with async_playwright() as p:
@@ -315,3 +328,92 @@ async def test_a_mid_flight_entrance_animation_is_captured_at_its_end_state():
     img = Image.open(BytesIO(image)).convert("RGB")
     r, g, b = img.getpixel((640, 400))
     assert r > 240 and g < 40 and b < 40, f"expected the fade to be finished, got {(r, g, b)}"
+
+
+# ---------------------------------------------------------------------------
+# Only visually-apparent violations get boxed (reported live: a box landed
+# on a share icon with no visible defect at all)
+# ---------------------------------------------------------------------------
+
+async def test_a_violation_with_no_visible_symptom_is_never_boxed():
+    """
+    button-name (a missing accessible name) has no visual signature — the
+    button looks completely normal to a sighted person. A real violation,
+    but not a highlight candidate: see _VISUALLY_APPARENT_AXE_RULES.
+    """
+    html = """
+    <html><body style="margin:0">
+        <div style="height: 100px;"></div>
+        <button style="width: 80px; height: 40px;"></button>
+    </body></html>
+    """
+    violations, highlight, image = await _run_against_html(html)
+    assert any(v["id"] == "button-name" for v in violations)
+    assert highlight is None
+    assert _marker_pixels(image) is None
+
+
+async def test_a_visually_apparent_violation_still_wins_over_an_invisible_one():
+    """
+    A page with both kinds of violation present must box the one a human
+    can actually see, not whichever happened to be found first.
+    """
+    html = f"""
+    <html><body style="margin:0">
+        <div style="height: 100px;"></div>
+        <button style="width: 60px; height: 30px;"></button>
+        <button style="width: 120px; height: 60px; {_LOW_CONTRAST_STYLE}">Book Now</button>
+    </body></html>
+    """
+    violations, highlight, image = await _run_against_html(html)
+    assert any(v["id"] == "button-name" for v in violations)
+    # color-contrast lands in axe's "incomplete" bucket, not "violations" —
+    # see _run_axe_audit's comment — so the real proof this fixture worked
+    # as intended is the highlight itself: the 120px contrast button, not
+    # the 60px button-name-only one.
+    assert highlight is not None
+    assert highlight["width"] >= 100
+
+
+# ---------------------------------------------------------------------------
+# A stretched image is a highlight candidate too
+# ---------------------------------------------------------------------------
+
+_TINY_PNG_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
+    "2mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+async def test_a_stretched_image_becomes_a_highlight_candidate():
+    """
+    A 1x1 PNG blown up to 300x300 is exactly the "obviously blurry photo"
+    case a business owner recognises on sight — a much better highlight
+    target than most axe-core rules. No axe violation is present at all
+    here (an <img> with alt text and fine contrast is accessibility-clean),
+    so this candidate is the only way anything gets boxed.
+    """
+    html = f"""
+    <html><body style="margin:0">
+        <div style="height: 50px;"></div>
+        <img src="{_TINY_PNG_DATA_URI}" alt="Product photo"
+             style="width: 300px; height: 300px;">
+    </body></html>
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=VIEWPORT)
+        await page.set_content(html)
+        try:
+            await page.wait_for_timeout(200)  # let the data URI decode
+            violations, axe_candidates = await _run_axe_audit(page)
+            _count, stretched_candidates = await _check_stretched_images(page)
+            assert stretched_candidates, "expected the stretched <img> to be a candidate"
+            highlight = await _highlight_element(page, axe_candidates + stretched_candidates)
+            image = await _capture(page)
+            await _remove_highlight(page)
+        finally:
+            await browser.close()
+
+    assert highlight is not None
+    assert _marker_pixels(image) is not None

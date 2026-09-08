@@ -550,6 +550,11 @@ async def _audit_current_page(page, context, label: str) -> dict:
     the page's life — see _highlight_element.
     """
     violations, candidates = await _run_axe_audit(page)
+    # Stretched-image candidates run before the highlight so a blurry photo
+    # can compete for the box alongside axe's visually-apparent violations —
+    # appended after axe's, so a real accessibility issue still wins ties.
+    stretched_images, stretched_candidates = await _check_stretched_images(page)
+    candidates = candidates + stretched_candidates
 
     # Highlight, capture (full page, then a tight crop of the same element
     # while it's still marked), un-highlight — in that order and with nothing
@@ -562,7 +567,6 @@ async def _audit_current_page(page, context, label: str) -> dict:
 
     broken_links, links_checked = await _check_broken_assets(page, context)
     font_families = await _check_font_consistency(page)
-    stretched_images = await _check_stretched_images(page)
 
     try:
         title = await page.title()
@@ -1207,14 +1211,40 @@ async def _get_real_web_vitals(page) -> dict:
         return {}
 
 
+_VISUALLY_APPARENT_AXE_RULES = frozenset({
+    "color-contrast",
+    "color-contrast-enhanced",
+    "target-size",
+    "empty-heading",
+    "empty-table-header",
+    "link-in-text-block",
+})
+# Most axe-core rules catch a problem with no visible symptom at all — a
+# missing aria-label, an unlabeled landmark, a duplicate id, a missing lang
+# attribute. The flagged element renders completely normally to a sighted
+# person, so boxing it in the audit screenshot reads as arbitrary to the
+# person receiving the email: nothing about the marked spot actually looks
+# wrong, and it usually has nothing to do with whatever the copy is about.
+# Reported live from a real send — a Maps-search agriculture lead's box
+# landed on a small share icon with no explanation a recipient could
+# connect to anything. Checked axe-core's own rule-descriptions.md
+# (dequelabs/axe-core) for the rules whose failure a sighted person can
+# actually notice by looking, rather than guessing: contrast that's
+# visibly washed out, a target that's visibly cramped, a heading/table
+# header that's visibly blank, a link that doesn't visually stand out from
+# its paragraph. Only the highlight candidate list is filtered — the full
+# `violations` list (accessibility flaw text/counts) is unaffected.
+
+
 async def _run_axe_audit(page) -> tuple[list, list[dict]]:
     """
     Run the axe-core accessibility engine on the current page.
 
     Returns (violations, highlight_candidates). The candidates are selectors
-    ranked most-severe-first; _highlight_element picks and draws one. This
-    function no longer resolves coordinates itself — see the comment on the
-    candidate list below.
+    ranked most-severe-first, filtered to _VISUALLY_APPARENT_AXE_RULES so the
+    box only ever lands on something a sighted person can actually notice;
+    _highlight_element picks and draws one. This function no longer resolves
+    coordinates itself — see the comment on the candidate list below.
     """
     try:
         from axe_playwright_python.async_playwright import Axe
@@ -1247,27 +1277,54 @@ async def _run_axe_audit(page) -> tuple[list, list[dict]]:
         # away from the picture on any page with a carousel or a late-settling
         # layout — see _highlight_element's docstring.
         candidates = []
-        for v in violations:
-            for node in v.get("nodes", []):
-                target_selectors = node.get("target", [])
-                if not target_selectors:
+
+        def _add_candidates(rule_list):
+            for v in rule_list:
+                if v["id"] not in _VISUALLY_APPARENT_AXE_RULES:
                     continue
-                selector = target_selectors[0]
-                if isinstance(selector, list):
-                    if not selector:
+                for node in v.get("nodes", []):
+                    target_selectors = node.get("target", [])
+                    if not target_selectors:
                         continue
-                    selector = selector[0]
-                if not isinstance(selector, str):
-                    continue
-                # Root-level elements make no useful highlight — boxing <body>
-                # is the same as boxing nothing.
-                if selector.strip().lower() in ("html", "body", "head"):
-                    continue
-                candidates.append({
-                    "selector": selector,
-                    "description": v.get("help", ""),
-                    "impact": v.get("impact", "minor"),
-                })
+                    selector = target_selectors[0]
+                    if isinstance(selector, list):
+                        if not selector:
+                            continue
+                        selector = selector[0]
+                    if not isinstance(selector, str):
+                        continue
+                    # Root-level elements make no useful highlight — boxing
+                    # <body> is the same as boxing nothing.
+                    if selector.strip().lower() in ("html", "body", "head"):
+                        continue
+                    candidates.append({
+                        "selector": selector,
+                        "description": v.get("help", ""),
+                        "impact": v.get("impact", "minor"),
+                    })
+
+        _add_candidates(violations)
+
+        # color-contrast/-enhanced routinely lands in axe-core's "incomplete"
+        # bucket instead of "violations" — live-verified here: a plain
+        # white-on-white element with an explicit 1:1 contrastRatio still
+        # comes back "incomplete", not "violation", a known quirk of how
+        # axe-core's contrast check flags results for manual confirmation
+        # rather than an ambiguous measurement. The underlying defect reads
+        # exactly as washed-out to a human either way, so it is still a
+        # legitimate highlight candidate — added after every definitive
+        # violation, since certain should still outrank needs-review.
+        incomplete_contrast = [
+            {
+                "id": v.get("id", ""),
+                "impact": v.get("impact", "minor"),
+                "help": v.get("help", ""),
+                "nodes": v.get("nodes", []),
+            }
+            for v in results.response.get("incomplete", [])
+            if v.get("id") in ("color-contrast", "color-contrast-enhanced")
+        ]
+        _add_candidates(incomplete_contrast)
 
         # Violations are already sorted most-severe-first above, so this list
         # inherits that order. Capped because it is serialised into a single
@@ -1324,30 +1381,53 @@ async def _check_font_consistency(page) -> list:
         return []
 
 
-async def _check_stretched_images(page) -> int:
+async def _check_stretched_images(page) -> tuple[int, list[dict]]:
     """
     Count visible <img> elements displayed significantly larger than their
     natural (source) resolution — a classic cause of blurry/pixelated
     images that immediately reads as unpolished.
+
+    Also returns each offending element as a highlight candidate, in the
+    same shape _run_axe_audit's candidates use. A stretched, pixelated
+    photo is exactly the kind of thing a business owner can see is wrong
+    just by looking at it — a much better highlight target than most
+    axe-core rules (see _VISUALLY_APPARENT_AXE_RULES) — so these are fed
+    into the same candidate list rather than only ever being described in
+    prose. Each offending <img> gets a one-off `data-mmga-flaw` marker
+    attribute so it has a selector _highlight_element can re-find; the
+    attribute is inert and harmless left on the page afterwards.
     """
     try:
-        count = await page.evaluate("""() => {
+        markers = await page.evaluate("""() => {
             const imgs = document.querySelectorAll('img');
-            let stretched = 0;
+            const found = [];
+            let idx = 0;
             for (const img of imgs) {
                 const rect = img.getBoundingClientRect();
                 if (rect.width < 40 || rect.height < 40) continue; // ignore icons
                 if (!img.naturalWidth || !img.naturalHeight) continue;
                 if (rect.width > img.naturalWidth * 1.4 || rect.height > img.naturalHeight * 1.4) {
-                    stretched++;
+                    const marker = 'mmga-stretched-' + idx;
+                    img.setAttribute('data-mmga-flaw', marker);
+                    found.push(marker);
+                    idx++;
                 }
             }
-            return stretched;
+            return found;
         }""")
-        return count or 0
+        markers = markers or []
+        candidates = [
+            {
+                "selector": f'[data-mmga-flaw="{marker}"]',
+                "description": "This image is stretched beyond its real resolution and looks blurry or pixelated",
+                "impact": "moderate",
+            }
+            for marker in markers
+        ]
+        return len(markers), candidates
     except Exception as e:
         print(f"[Visuals] Stretched image check failed (non-critical): {e}")
-        return 0
+        return 0, []
 
 
 async def _can_render_text(page) -> bool:
