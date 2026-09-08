@@ -152,6 +152,14 @@ function App() {
   const [currentVariant, setCurrentVariant] = useState('');
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
+  // Day/Week/Month/All section grouping for the Drafts and History tabs
+  // (requested: "see day wise and arrange day week and month wise"),
+  // independent per tab since a user reviewing today's drafts and skimming
+  // a month of sent history are different tasks. Purely a rendering
+  // concern — groupByPeriod() below buckets the same array the tab
+  // already fetches, no backend change.
+  const [draftsGroupBy, setDraftsGroupBy] = useState('day');
+  const [historyGroupBy, setHistoryGroupBy] = useState('day');
   const [expandedEmail, setExpandedEmail] = useState(null);
   // Keyed by email_history row id -> { loading, sending, subject, body,
   // to_email, nextStage }. nextStage starts at 1 (first follow-up) and
@@ -692,6 +700,77 @@ function App() {
     if (isNaN(drafted)) return null;
     return Math.floor((Date.now() - drafted.getTime()) / 86400000);
   };
+
+  // Buckets a list of drafts/history rows into Day/Week/Month sections for
+  // the Drafts and History tabs' group-by control. `getTimestamp` pulls the
+  // sortable date string off each item (both tabs' rows already carry one —
+  // `timestamp`, "YYYY-MM-DD HH:MM:SS"). Parsed the same way draftAgeDays()
+  // above already does (no explicit UTC 'Z', so this reads it as local time
+  // in the browser) — deliberately consistent with the existing age badge
+  // rather than "more correct but disagrees with it". Rows the caller's own
+  // ordering already sorted newest-first stay in that order within each
+  // bucket; only bucket order (newest section first) is computed here.
+  // period === 'all' is a no-op passthrough, one section holding everything,
+  // so callers can render through the same grouped shape either way.
+  const groupByPeriod = (items, period, getTimestamp = (item) => item.timestamp) => {
+    if (period === 'all') {
+      return items.length ? [{ key: 'all', label: null, items }] : [];
+    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const buckets = new Map(); // insertion order == first-seen order == newest-first, since items arrive newest-first
+    for (const item of items) {
+      const raw = getTimestamp(item);
+      const parsed = raw ? new Date(String(raw).replace(' ', 'T')) : null;
+      const valid = parsed && !isNaN(parsed);
+      let key, label;
+      if (!valid) {
+        key = '_unknown';
+        label = 'Unknown date';
+      } else if (period === 'day') {
+        const day = new Date(parsed); day.setHours(0, 0, 0, 0);
+        key = day.toISOString().slice(0, 10);
+        const diffDays = Math.round((today - day) / 86400000);
+        label = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Yesterday'
+          : day.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: day.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
+      } else if (period === 'week') {
+        // Monday-start week, matching ISO/most calendars this tool's users are in.
+        const day = new Date(parsed); day.setHours(0, 0, 0, 0);
+        const dow = (day.getDay() + 6) % 7; // 0 = Monday
+        const monday = new Date(day); monday.setDate(day.getDate() - dow);
+        const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+        key = monday.toISOString().slice(0, 10);
+        const fmt = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        label = `Week of ${fmt(monday)} – ${fmt(sunday)}${monday.getFullYear() !== today.getFullYear() ? `, ${monday.getFullYear()}` : ''}`;
+      } else { // 'month'
+        key = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+        label = parsed.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+      }
+      if (!buckets.has(key)) buckets.set(key, { key, label, items: [] });
+      buckets.get(key).items.push(item);
+    }
+    return Array.from(buckets.values());
+  };
+
+  // Small pill row shared by the Drafts and History tabs' group-by control.
+  const GroupBySelector = ({ value, onChange }) => (
+    <div style={{ display: 'flex', gap: '6px' }}>
+      {['day', 'week', 'month', 'all'].map(opt => (
+        <button
+          key={opt}
+          onClick={() => onChange(opt)}
+          style={{
+            padding: '6px 14px', borderRadius: '999px', fontSize: '13px', cursor: 'pointer',
+            border: value === opt ? '1px solid rgba(16,185,129,0.5)' : '1px solid rgba(148,163,184,0.25)',
+            background: value === opt ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.08)',
+            color: value === opt ? '#10b981' : '#94a3b8',
+            fontWeight: value === opt ? 600 : 400,
+            textTransform: 'capitalize',
+          }}
+        >{opt === 'all' ? 'All' : opt}</button>
+      ))}
+    </div>
+  );
 
   // /api/send returns 409 when the draft carries unacknowledged review
   // warnings or is old enough that its audit data may be stale. That's a
@@ -1325,14 +1404,30 @@ function App() {
     </>
   );
 
-  const renderDrafts = () => (
+  const renderDrafts = () => {
+    const draftGroups = groupByPeriod(drafts, draftsGroupBy);
+    return (
     <div className="glass" style={{ padding: '24px' }}>
-      <h2><FileEdit style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Saved Drafts</h2>
-      <p style={{color: '#94a3b8', marginBottom: '24px'}}>AI-generated audits ready for your review and approval.</p>
-      
-      <div className="leads-grid" style={{ gridTemplateColumns: '1fr' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+        <div>
+          <h2 style={{ margin: 0 }}><FileEdit style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Saved Drafts</h2>
+          <p style={{color: '#94a3b8', margin: '8px 0 0'}}>AI-generated audits ready for your review and approval.</p>
+        </div>
+        <GroupBySelector value={draftsGroupBy} onChange={setDraftsGroupBy} />
+      </div>
+
+      <div className="leads-grid" style={{ gridTemplateColumns: '1fr', marginTop: '20px' }}>
         <AnimatePresence>
-          {drafts.map((draft, i) => (
+          {draftGroups.map(group => (
+            <div key={group.key}>
+              {group.label && (
+                <h4 style={{ margin: '20px 0 10px', color: '#94a3b8', fontSize: '14px', fontWeight: 600, borderBottom: '1px solid rgba(148,163,184,0.15)', paddingBottom: '6px' }}>
+                  {group.label} <span style={{ color: '#64748b', fontWeight: 400 }}>({group.items.length})</span>
+                </h4>
+              )}
+              {group.items.map((draft) => {
+                const i = drafts.findIndex(d => d.id === draft.id);
+                return (
             <motion.div key={draft.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="lead-card glass">
               <div className="lead-header">
                 <h3>{draft.company}</h3>
@@ -1411,12 +1506,16 @@ function App() {
                 </div>
               )}
             </motion.div>
+                );
+              })}
+            </div>
           ))}
         </AnimatePresence>
         {drafts.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No saved drafts.</p>}
       </div>
     </div>
-  );
+    );
+  };
 
   const handleCheckReplies = async () => {
     setCheckingReplies(true);
@@ -1486,10 +1585,14 @@ function App() {
     setFollowupDrafts(prev => ({ ...prev, [logId]: { nextStage: prev[logId]?.nextStage || 1 } }));
   };
 
-  const renderHistory = () => (
+  const renderHistory = () => {
+    const historyGroups = groupByPeriod(historyLogs, historyGroupBy);
+    return (
     <div className="glass" style={{ padding: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
         <h2 style={{ margin: 0 }}><Clock style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Email Sent History</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <GroupBySelector value={historyGroupBy} onChange={setHistoryGroupBy} />
         {replyCheckEnabled && (
           <button
             onClick={handleCheckReplies}
@@ -1500,6 +1603,7 @@ function App() {
             {checkingReplies ? 'Checking inbox...' : 'Check for replies'}
           </button>
         )}
+        </div>
       </div>
       <p style={{color: '#94a3b8', marginBottom: '16px', marginTop: '8px'}}>Persistent log of all outbound emails dispatched.</p>
 
@@ -1578,7 +1682,15 @@ function App() {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        {historyLogs.map(log => (
+        {historyGroups.map(group => (
+        <div key={group.key}>
+          {group.label && (
+            <h4 style={{ margin: '4px 0 12px', color: '#94a3b8', fontSize: '14px', fontWeight: 600, borderBottom: '1px solid rgba(148,163,184,0.15)', paddingBottom: '6px' }}>
+              {group.label} <span style={{ color: '#64748b', fontWeight: 400 }}>({group.items.length})</span>
+            </h4>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {group.items.map(log => (
           <div key={log.id} id={`history-${log.id}`} style={{ background: historyScrollTarget === log.id ? 'rgba(16,185,129,0.08)' : 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: historyScrollTarget === log.id ? '1px solid rgba(16,185,129,0.5)' : '1px solid rgba(255,255,255,0.1)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
@@ -1676,11 +1788,15 @@ function App() {
               </div>
             )}
           </div>
+          ))}
+          </div>
+        </div>
         ))}
         {historyLogs.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No emails sent yet.</p>}
       </div>
     </div>
-  );
+    );
+  };
 
   const renderCost = () => {
     return (
