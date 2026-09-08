@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, HelpCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -23,6 +23,27 @@ function normaliseWebsiteKey(url) {
     .replace(/^www\./, '');
 }
 
+// "Bigger client" comparators for the leads-grid "Sort by" control. Higher
+// score sorts first for every key. A lead that hasn't been audited yet has
+// no auditData.budget_signal at all, so 'tier'/'capital' treat it as the
+// lowest possible value rather than crashing or sorting it arbitrarily — it
+// isn't confirmed small, it's just unmeasured, but for THIS purpose (find
+// the biggest ones first) unmeasured has to sort after measured-and-
+// confirmed-established either way. Module-level (not inside App()) since
+// neither depends on component state — keeps the sort useMemo below from
+// needing a fresh reference on every render.
+const LEAD_SORT_TIER_RANK = { established: 2, growing: 1, unclear: 0 };
+const LEAD_SORT_COMPARATORS = {
+  default: null,
+  reviews: (lead) => Number(lead['Reviews Count']) || 0,
+  rating: (lead) => {
+    const r = parseFloat(lead.Rating);
+    return Number.isFinite(r) ? r : 0;
+  },
+  capital: (lead) => lead.auditData?.budget_signal?.paidup_capital || 0,
+  tier: (lead) => LEAD_SORT_TIER_RANK[lead.auditData?.budget_signal?.tier] ?? -1,
+};
+
 // Per-tab help content for the "?" button in the nav. Keyed by currentView,
 // so the button always explains the page you're actually looking at rather
 // than one generic help screen nobody reads past the first line.
@@ -36,12 +57,14 @@ const HELP_CONTENT = {
       'Always read the subject and body before sending — edit either one inline. A red "Review before sending" banner means an accuracy check flagged something specific; read it, don\'t just dismiss it.',
       'Leads with no website show a WhatsApp button instead, since there\'s nothing to audit.',
       '"Start Autopilot" runs the audit step on every un-audited lead in the list automatically, one at a time.',
+      'Type a state name instead of a city (e.g. "Maharashtra") to search the whole state in one go, not just one city.',
+      'Use "Sort by" to bring bigger clients to the top — Most reviews/Highest rating work on any fresh search; Budget tier/Highest MCA capital only have a value once you\'ve audited a lead.',
     ],
   },
   agriculture: {
     title: 'Agriculture — targeting the agriculture sector specifically',
     tips: [
-      'Set a city first — Maps and directory searches both need one (the government dealer list is the one exception; leave city blank there to pull from all of Maharashtra).',
+      'Set a city first — Maps and directory searches both need one (the government dealer list is the one exception; leave city blank there to pull from all of Maharashtra). A state name works too, for a Maps/directory search across the whole state.',
       'Click a niche card\'s "Maps" button for Google-Maps-sourced leads (needs the business to have a website to be audit-able).',
       'The colored "Directory" button searches whichever B2B directory is selected in the dropdown above (IndiaMART / TradeIndia / ExportersIndia, or "All Directories" to search all three) — good for suppliers with no website of their own.',
       '"Search licensed dealers" pulls from Maharashtra\'s own government-published dealer list — real phone/email already filled in, no guessing, but no website either, so use the WhatsApp button on those leads rather than the audit flow.',
@@ -111,6 +134,15 @@ function App() {
   
   const [leadsPage, setLeadsPage] = useState(1);
   const LEADS_PAGE_SIZE = 12;
+  // Which signal to sort the leads grid by, so bigger/more established
+  // businesses can be worked first instead of whatever order the scraper
+  // happened to return. 'reviews'/'rating' work on every lead the moment a
+  // search returns (Google Maps already supplies both); 'capital'/'tier'
+  // only have a real value once a lead has actually been audited (MCA
+  // lookup and the rest of the budget signal both run during /api/audit),
+  // so an un-audited lead sorts to the bottom on those two rather than
+  // being mistaken for "confirmed small".
+  const [leadSortKey, setLeadSortKey] = useState('default');
 
   const [historyLogs, setHistoryLogs] = useState([]);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
@@ -722,6 +754,22 @@ function App() {
     }
   };
 
+  // Indices into `leads`, not the leads themselves — every click handler
+  // below (handleAudit(i, ...), newLeads[i]..., etc.) already addresses a
+  // lead by its position in the real `leads` array, and that can't change
+  // just because the grid is displaying it in a different order. Sorting a
+  // copy of the leads and losing track of each one's real index would mutate
+  // the wrong lead the moment two cards swap position on screen.
+  const sortedLeadIndices = useMemo(() => {
+    const indices = leads.map((_, i) => i);
+    const scoreFn = LEAD_SORT_COMPARATORS[leadSortKey];
+    if (!scoreFn) return indices; // 'default' — as returned by the search
+    // Stable-ish: ties keep their original relative order since Array#sort
+    // in modern engines is a stable sort and neither score nor original
+    // index is ever equal-but-reordered here.
+    return indices.sort((a, b) => scoreFn(leads[b]) - scoreFn(leads[a]));
+  }, [leads, leadSortKey]);
+
   const renderHome = () => (
     <>
       <header className="header">
@@ -737,8 +785,12 @@ function App() {
           </datalist>
         </div>
         <div className="input-group">
-          <label>City</label>
-          <input type="text" list="city-options" value={city} onChange={e => setCity(e.target.value)} placeholder="e.g. Mumbai" required />
+          <label>City (or a whole state)</label>
+          <input
+            type="text" list="city-options" value={city} onChange={e => setCity(e.target.value)}
+            placeholder="e.g. Mumbai, or Maharashtra for the whole state" required
+            title="Type a city for a local search, or a state name (e.g. Maharashtra) to search the whole state in one go — useful for finding bigger, more established businesses beyond any single city."
+          />
           <datalist id="city-options">
             {CITIES.map(c => <option key={c} value={c} />)}
           </datalist>
@@ -804,22 +856,38 @@ function App() {
       </AnimatePresence>
 
       {leads.length > 0 && (
-        <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', marginBottom: '20px' }}>
-          <button 
-            className={`primary-btn ${isAutopilot ? 'danger' : ''}`} 
+        <div className="actions-bar" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', marginBottom: '20px', flexWrap: 'wrap' }}>
+          <button
+            className={`primary-btn ${isAutopilot ? 'danger' : ''}`}
             onClick={() => isAutopilot ? setIsAutopilot(false) : startAutopilot()}
             style={{ background: isAutopilot ? '#ef4444' : '#10b981', color: '#ffffff', border: 'none', padding: '12px 24px', fontSize: '16px', fontWeight: 'bold', borderRadius: '8px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}
           >
             <Activity className={isAutopilot ? 'spin' : ''} />
             {isAutopilot ? 'Stop Autopilot' : 'Start Autopilot (Audit All)'}
           </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label htmlFor="lead-sort" style={{ fontSize: '13px', color: '#64748b', fontWeight: 600 }}>Sort by</label>
+            <select
+              id="lead-sort"
+              value={leadSortKey}
+              onChange={e => { setLeadSortKey(e.target.value); setLeadsPage(1); }}
+              title="'Most reviews' and 'Highest rating' work on any fresh search. 'Highest capital' and 'Budget tier' need a lead to be audited first — unaudited leads sort last on those two, not as confirmed small."
+              style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', fontSize: '14px' }}
+            >
+              <option value="default">Default (as found)</option>
+              <option value="reviews">Most Google reviews</option>
+              <option value="rating">Highest rating</option>
+              <option value="tier">Budget tier (audited leads)</option>
+              <option value="capital">Highest MCA capital (audited leads)</option>
+            </select>
+          </div>
         </div>
       )}
 
       <div className="leads-grid">
         <AnimatePresence>
-          {leads.slice((leadsPage - 1) * LEADS_PAGE_SIZE, leadsPage * LEADS_PAGE_SIZE).map((lead, pageI) => {
-          const i = (leadsPage - 1) * LEADS_PAGE_SIZE + pageI;
+          {sortedLeadIndices.slice((leadsPage - 1) * LEADS_PAGE_SIZE, leadsPage * LEADS_PAGE_SIZE).map((i) => {
+          const lead = leads[i];
           return (
             <motion.div key={i} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className={`lead-card glass ${lead.auditState === 'rejected' ? 'rejected' : ''}`}>
               <div className="lead-header">
@@ -1084,8 +1152,12 @@ function App() {
 
       <div className="search-box glass" style={{ marginBottom: 16 }}>
         <div className="input-group">
-          <label>City</label>
-          <input type="text" list="city-options" value={agriCity} onChange={e => setAgriCity(e.target.value)} placeholder="e.g. Nashik" />
+          <label>City (or a whole state)</label>
+          <input
+            type="text" list="city-options" value={agriCity} onChange={e => setAgriCity(e.target.value)}
+            placeholder="e.g. Nashik, or Maharashtra for the whole state"
+            title="A state name (e.g. Maharashtra) searches the whole state in one go for Maps/directory searches, same as the Dashboard tab."
+          />
           <datalist id="city-options">
             {CITIES.map(c => <option key={c} value={c} />)}
           </datalist>

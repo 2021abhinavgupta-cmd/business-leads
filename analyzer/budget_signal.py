@@ -167,10 +167,22 @@ def estimate_budget_fit(
     # negatively — stale MCA data plus a business that simply re-registered
     # under a new entity is a real possibility, and asserting a negative
     # from it would be a worse mistake than staying silent.
+    # Kept as a raw number (not just baked into a signal string) so the
+    # dashboard can sort leads by it — requested on top of the tier badge,
+    # which only sorts established/growing/unclear into three buckets and
+    # loses any ordering within "established" itself. Only set when the
+    # match actually counted as a positive signal above (an inactive
+    # company's filed capital isn't evidence of anything to sort by either).
+    paidup_capital = None
+
     if mca_match:
         status = (mca_match.get("status") or "").lower()
         if not any(bad in status for bad in _INACTIVE_MCA_STATUSES):
             points += 3
+            try:
+                paidup_capital = float(mca_match.get("paidup_capital"))
+            except (TypeError, ValueError):
+                paidup_capital = None
             capital = _format_inr(mca_match.get("paidup_capital"))
             detail = f" (paid-up capital {capital})" if capital else ""
             signals.append(f"Registered with MCA as {mca_match.get('company_name') or 'a company'}{detail}")
@@ -184,7 +196,13 @@ def estimate_budget_fit(
     else:
         tier = "unclear"
 
-    return {"tier": tier, "points": points, "signals": signals, "label": _TIER_LABELS[tier]}
+    return {
+        "tier": tier,
+        "points": points,
+        "signals": signals,
+        "label": _TIER_LABELS[tier],
+        "paidup_capital": paidup_capital,
+    }
 
 
 # Ordering for the MIN_BUDGET_TIER gate. "unclear" is the floor, so a

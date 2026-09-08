@@ -66,9 +66,25 @@ export const NICHES = [
 // continues to work exactly as before — this narrows the suggestions, not
 // what the scraper accepts.
 //
+// This field is sent straight into Google's Places Text Search as free text
+// (`"{niche} in {city}"`, scrapers/google_maps.py) — there is no per-city
+// radius restriction, so it has always accepted a whole state name exactly
+// as well as a city ("Dental Clinic in Maharashtra" returns statewide
+// results, capped at Google's own ~60-result ceiling for one text query).
+// That wasn't previously discoverable from the UI at all. "Maharashtra
+// (whole state)" is listed first for exactly that reason — requested
+// 2026-09-08 specifically to reach bigger clients across the state rather
+// than being read as a typo and skipped.
+//
 // Ordered roughly by lead density (MMR and Pune first), then the rest of the
 // state grouped by region so a nearby city is easy to find.
 export const CITIES = [
+  // The whole state as a single search area — see the comment above. Kept
+  // as the plain state name (not "Maharashtra (whole state)") because this
+  // value is sent to the API exactly as typed; a parenthetical annotation
+  // baked into the actual query text is an unnecessary risk to Google's
+  // text-search parsing for a label that belongs in the UI, not the query.
+  'Maharashtra',
   // Mumbai Metropolitan Region
   'Mumbai', 'Navi Mumbai', 'Thane', 'Kalyan', 'Dombivli', 'Vasai', 'Virar',
   'Mira Bhayandar', 'Bhiwandi', 'Ulhasnagar', 'Ambernath', 'Badlapur',

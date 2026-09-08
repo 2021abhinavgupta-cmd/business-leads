@@ -121,6 +121,54 @@ def test_the_signal_explains_itself():
     assert all(isinstance(s, str) for s in result["signals"])
 
 
+def test_a_confirmed_mca_match_guarantees_established_and_exposes_capital():
+    """
+    Real filed financial data outweighs every other proxy here — worth
+    enough points on its own to reach "established" — and the raw capital
+    number is exposed as its own field (not just baked into the signal
+    string) so the dashboard can sort by it.
+    """
+    result = estimate_budget_fit(
+        rating=None, reviews_count=0, technologies=[], ig_followers=0,
+        mca_match={"company_name": "Acme Pvt Ltd", "status": "Active", "paidup_capital": "500000"},
+    )
+    assert result["tier"] == "established"
+    assert result["paidup_capital"] == 500000.0
+    assert "Acme Pvt Ltd" in result["signals"][0] or any("Acme Pvt Ltd" in s for s in result["signals"])
+
+
+def test_a_dissolved_mca_match_is_not_scored_positively_and_has_no_capital():
+    """
+    Stale MCA data plus a business that re-registered under a new entity is
+    a real possibility — asserting a negative from a dissolved status would
+    be a worse mistake than staying silent, so it scores as neutral, not
+    negative. Its capital shouldn't feed a sort meant to surface currently
+    thriving businesses either.
+    """
+    result = estimate_budget_fit(
+        rating=None, reviews_count=0, technologies=[], ig_followers=0,
+        mca_match={"company_name": "Old Co", "status": "Struck Off", "paidup_capital": "500000"},
+    )
+    assert result["tier"] == "unclear"
+    assert result["paidup_capital"] is None
+
+
+def test_no_mca_match_leaves_capital_as_none():
+    """The common case — most leads here are sole proprietorships with no MCA record at all."""
+    result = estimate_budget_fit(rating=None, reviews_count=0, technologies=[], ig_followers=0, mca_match=None)
+    assert result["paidup_capital"] is None
+
+
+def test_a_malformed_capital_value_does_not_raise():
+    """The free, loosely-typed government dataset can hand back anything."""
+    result = estimate_budget_fit(
+        rating=None, reviews_count=0, technologies=[], ig_followers=0,
+        mca_match={"company_name": "Acme", "status": "Active", "paidup_capital": "not a number"},
+    )
+    assert result["tier"] == "established"  # the match itself still counts
+    assert result["paidup_capital"] is None
+
+
 def test_it_never_reaches_the_drafting_prompt_or_the_sent_copy():
     """
     This is a dashboard-only prioritisation heuristic. If it were readable by
