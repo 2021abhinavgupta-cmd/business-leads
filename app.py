@@ -1017,6 +1017,114 @@ async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class GenerateFollowupRequest(BaseModel):
+    history_id: int
+    stage: int = 1
+
+@app.post("/api/generate-followup")
+async def generate_followup(
+    req: GenerateFollowupRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
+    """
+    History tab's "Generate Follow-up" button. Reads one specific past
+    send (by its email_history row id, not by website — a lead can have
+    more than one send over time) and drafts a follow-up that references
+    what that exact email actually said, via AIAuditor.generate_followup_
+    from_original — a real AI call, unlike scheduler.py's automated
+    sequence which uses BaseSender.generate_followup's hardcoded, name-
+    and-stage-only copy. Returns a draft for the frontend to show inline
+    and edit before sending; nothing is sent or persisted here.
+    """
+    original = await asyncio.to_thread(db.get_email_history_by_id, req.history_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="No such sent email.")
+
+    result = await asyncio.to_thread(
+        auditor.generate_followup_from_original,
+        original.get("company", ""),
+        # No decision-maker name is stored on the history row — the
+        # original recipient's display name was never persisted, only
+        # the address. "there" is the same safe fallback generate_email
+        # itself uses for a name it can't confirm is a real person.
+        "there",
+        os.getenv("YOUR_NAME", "Kshitij Gupta"),
+        original.get("subject", ""),
+        original.get("body", ""),
+        stage=req.stage,
+    )
+    if result is None:
+        raise HTTPException(status_code=502, detail="All AI providers failed to draft a follow-up. Try again shortly.")
+
+    ai_cost = result.get("ai_cost", 0.0)
+    if ai_cost:
+        await asyncio.to_thread(db.log_cost, "AI Followup", ai_cost, description=f"Follow-up draft for {original.get('company', '')}")
+
+    return {
+        "subject": result["subject"],
+        "body": result["body"],
+        "to_email": original.get("target_email", ""),
+        "company": original.get("company", ""),
+        "website": original.get("website", ""),
+        "original_message_id": original.get("message_id", ""),
+    }
+
+
+class SendFollowupRequest(BaseModel):
+    history_id: int
+    subject: str
+    body: str
+
+@app.post("/api/send-followup")
+async def send_followup_route(
+    req: SendFollowupRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
+    """
+    Sends the (possibly hand-edited) draft /api/generate-followup produced.
+    Re-derives the recipient/company/website/original message id from the
+    history row itself rather than trusting them from the client — only
+    the subject/body a human may have edited come from the request body.
+    """
+    sent_today = await asyncio.to_thread(db.count_emails_sent_today)
+    if sent_today >= config.DAILY_EMAIL_LIMIT:
+        raise HTTPException(status_code=429, detail=f"Daily sending limit reached ({sent_today}/{config.DAILY_EMAIL_LIMIT} in the last 24h).")
+
+    original = await asyncio.to_thread(db.get_email_history_by_id, req.history_id)
+    if not original:
+        raise HTTPException(status_code=404, detail="No such sent email.")
+
+    to_email = original.get("target_email", "")
+    if not to_email:
+        raise HTTPException(status_code=400, detail="That sent email has no recipient address on record.")
+
+    try:
+        success = await asyncio.to_thread(
+            ses.send_followup, to_email, req.subject, req.body,
+            in_reply_to=original.get("message_id", "") or "",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not success:
+        raise HTTPException(status_code=400, detail="Send failed — recipient may be on the suppression list, or the transport rejected it. Check server logs.")
+
+    await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Follow-up to {to_email}")
+    # message_id left blank: send_followup builds its own internally but
+    # does not return it (its only other caller, main.py's batch runner,
+    # has never logged follow-up sends to email_history at all — this is
+    # additive, not a regression). A second follow-up generated from this
+    # row later simply will not have anything to thread against.
+    await asyncio.to_thread(
+        db.log_email, original.get("company", ""), original.get("website", ""),
+        to_email, config.FROM_EMAIL, req.subject, req.body,
+        variant="followup-ai",
+    )
+    return {"status": "success"}
+
+
 @app.get("/api/sent-websites")
 async def get_sent_websites(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     """

@@ -153,6 +153,12 @@ function App() {
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
+  // Keyed by email_history row id -> { loading, sending, subject, body,
+  // to_email, nextStage }. nextStage starts at 1 (first follow-up) and
+  // becomes 2 once a follow-up has actually been sent for that row, so a
+  // second click asks for the explicit-yes-or-no final follow-up instead
+  // of re-offering help a second time.
+  const [followupDrafts, setFollowupDrafts] = useState({});
   // Keyed by normaliseWebsiteKey(website) -> { id, company, subject, timestamp }
   // of the most recent email_history row for that site — lets a freshly
   // re-searched lead (a new object in `leads`, auditState: 'none') show it
@@ -1382,6 +1388,54 @@ function App() {
     }
   };
 
+  // Reads the actual sent email (via /api/generate-followup, which reads
+  // it server-side) and drafts a follow-up in the same voice, rather than
+  // scheduler.py's automated sequence's hardcoded, name-and-stage-only copy.
+  const handleGenerateFollowup = async (logId) => {
+    const stage = followupDrafts[logId]?.nextStage || 1;
+    setFollowupDrafts(prev => ({ ...prev, [logId]: { ...prev[logId], loading: true } }));
+    try {
+      const res = await axios.post(`${API_BASE}/api/generate-followup`, { history_id: logId, stage });
+      setFollowupDrafts(prev => ({
+        ...prev,
+        [logId]: { ...prev[logId], loading: false, subject: res.data.subject, body: res.data.body, to_email: res.data.to_email, nextStage: stage },
+      }));
+    } catch (err) {
+      console.error('Generate follow-up failed:', err);
+      alert(`Could not draft a follow-up: ${err.response?.data?.detail || err.message}`);
+      setFollowupDrafts(prev => ({ ...prev, [logId]: { ...prev[logId], loading: false } }));
+    }
+  };
+
+  const handleEditFollowupField = (logId, field, value) => {
+    setFollowupDrafts(prev => ({ ...prev, [logId]: { ...prev[logId], [field]: value } }));
+  };
+
+  const handleSendFollowup = async (logId) => {
+    const draft = followupDrafts[logId];
+    if (!draft) return;
+    setFollowupDrafts(prev => ({ ...prev, [logId]: { ...prev[logId], sending: true } }));
+    try {
+      await axios.post(`${API_BASE}/api/send-followup`, {
+        history_id: logId, subject: draft.subject, body: draft.body,
+      });
+      alert('Follow-up sent.');
+      // Clear the draft and advance to the final-stage wording for next
+      // time, matching the 3-email sequence's own stage 1 -> stage 2 shape.
+      setFollowupDrafts(prev => ({ ...prev, [logId]: { nextStage: 2 } }));
+      const res = await axios.get(`${API_BASE}/api/history?t=${Date.now()}`);
+      setHistoryLogs(res.data.history);
+    } catch (err) {
+      console.error('Send follow-up failed:', err);
+      alert(`Could not send the follow-up: ${err.response?.data?.detail || err.message}`);
+      setFollowupDrafts(prev => ({ ...prev, [logId]: { ...prev[logId], sending: false } }));
+    }
+  };
+
+  const handleDiscardFollowup = (logId) => {
+    setFollowupDrafts(prev => ({ ...prev, [logId]: { nextStage: prev[logId]?.nextStage || 1 } }));
+  };
+
   const renderHistory = () => (
     <div className="glass" style={{ padding: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
@@ -1511,19 +1565,64 @@ function App() {
               </div>
               <div style={{ textAlign: 'right' }}>
                 <span style={{ fontSize: '12px', color: '#10b981', display: 'block' }}>{log.timestamp}</span>
-                <button 
+                <button
                   style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '13px', padding: '4px 0' }}
                   onClick={() => setExpandedEmail(expandedEmail === log.id ? null : log.id)}
                 >
                   {expandedEmail === log.id ? 'Hide Content' : 'View Content'}
                 </button>
+                <button
+                  style={{ display: 'block', marginLeft: 'auto', background: 'none', border: 'none', color: '#8b5cf6', cursor: followupDrafts[log.id]?.loading ? 'default' : 'pointer', fontSize: '13px', padding: '4px 0' }}
+                  onClick={() => handleGenerateFollowup(log.id)}
+                  disabled={followupDrafts[log.id]?.loading}
+                  title="Draft a follow-up that reads this exact email, via AI"
+                >
+                  {followupDrafts[log.id]?.loading
+                    ? 'Drafting...'
+                    : (followupDrafts[log.id]?.nextStage === 2 ? 'Generate Final Follow-up' : 'Generate Follow-up')}
+                </button>
               </div>
             </div>
-            
+
             {expandedEmail === log.id && (
               <div style={{ marginTop: '16px', padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px' }}>
                 <p style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 'bold' }}>Subject: {log.subject}</p>
                 <p style={{ margin: 0, fontSize: '13px', whiteSpace: 'pre-wrap', lineHeight: '1.6' }}>{log.body}</p>
+              </div>
+            )}
+
+            {followupDrafts[log.id]?.subject !== undefined && (
+              <div style={{ marginTop: '16px', padding: '16px', background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: '6px' }}>
+                <p style={{ margin: '0 0 10px 0', fontSize: '13px', fontWeight: 'bold', color: '#8b5cf6' }}>
+                  Follow-up draft — to {followupDrafts[log.id].to_email || log.target_email}
+                </p>
+                <input
+                  className="subject-editor"
+                  style={{ width: '100%', marginBottom: '8px', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.2)', color: '#e2e8f0', fontSize: '13px' }}
+                  value={followupDrafts[log.id].subject}
+                  onChange={(e) => handleEditFollowupField(log.id, 'subject', e.target.value)}
+                />
+                <textarea
+                  style={{ width: '100%', minHeight: '120px', padding: '8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.2)', color: '#e2e8f0', fontSize: '13px', fontFamily: 'inherit', resize: 'vertical' }}
+                  value={followupDrafts[log.id].body}
+                  onChange={(e) => handleEditFollowupField(log.id, 'body', e.target.value)}
+                />
+                <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                  <button
+                    onClick={() => handleSendFollowup(log.id)}
+                    disabled={followupDrafts[log.id].sending}
+                    style={{ padding: '8px 16px', background: '#8b5cf6', border: 'none', borderRadius: '6px', color: '#fff', cursor: followupDrafts[log.id].sending ? 'default' : 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                  >
+                    {followupDrafts[log.id].sending ? 'Sending...' : 'Send Follow-up'}
+                  </button>
+                  <button
+                    onClick={() => handleDiscardFollowup(log.id)}
+                    disabled={followupDrafts[log.id].sending}
+                    style={{ padding: '8px 16px', background: 'none', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '6px', color: '#94a3b8', cursor: 'pointer', fontSize: '13px' }}
+                  >
+                    Discard
+                  </button>
+                </div>
               </div>
             )}
           </div>

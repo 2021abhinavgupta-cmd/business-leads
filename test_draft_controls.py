@@ -169,9 +169,14 @@ def test_the_subject_is_editable_in_both_views():
     It was display-only while the body was editable, so a wrong subject meant
     discarding the whole draft — and the subject is the line the recipient
     actually sees first.
+
+    Three uses of the class as of 2026-09-08: the live-audit card, the
+    Saved Drafts card, and the History tab's "Generate Follow-up" inline
+    editor (added that day) — a genuinely third editable subject line, not
+    a duplicate of either original one.
     """
     jsx = _jsx()
-    assert jsx.count('className="subject-editor"') == 2
+    assert jsx.count('className="subject-editor"') == 3
     assert "<input" in jsx
 
 
