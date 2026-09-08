@@ -84,7 +84,19 @@ class GoogleMapsScraper:
         """
         print(f"[Maps] Attempting official API scrape for {niche} in {city}...")
         try:
-            leads = self._scrape_via_api(niche, city, limit)
+            # _scrape_via_api is a plain synchronous method — a real
+            # time.sleep(_REQUEST_DELAY) between pages plus blocking
+            # httpx.Client().post() calls, unlike every other network call
+            # in this codebase's async routes. Called directly (as it was
+            # until 2026-09-08) it runs straight on the single asyncio event
+            # loop, freezing EVERY other concurrent request on the process —
+            # an in-progress audit's own awaits, the frontend's 5s
+            # /api/costs poll, another search — until it returns. Live
+            # reported: a search 502'd while an Autopilot audit was still
+            # running for two other leads. asyncio.to_thread moves the
+            # blocking work off the event loop so it can't starve anything
+            # else; it does not make _scrape_via_api itself any faster.
+            leads = await asyncio.to_thread(self._scrape_via_api, niche, city, limit)
             if leads:
                 print(f"[Maps] API successful! Found {len(leads)} leads.")
                 return leads
