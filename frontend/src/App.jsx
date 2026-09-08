@@ -4,6 +4,7 @@ import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Hom
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
+import { MNC_NAMES } from './mncNames';
 import './App.css';
 
 // Strips everything but digits, since wa.me only accepts a bare
@@ -365,19 +366,27 @@ function App() {
   // Runs one lookup per company name, sequentially, 13s apart — same
   // pacing/rationale as handleSearchAllNiches below: /api/search's rate
   // limit is 5 requests/60s, and this loop can otherwise burst well past it
-  // for a real MNC list (a handful of well-known names is the common case,
-  // but nothing caps how many someone pastes in). One failed name doesn't
-  // stop the rest of the list.
+  // for a real MNC list. One failed name doesn't stop the rest of the list.
+  // Stoppable mid-run (mncStopRef), same ref-based pattern
+  // agriBulkStopRef/isAutopilotRef already use to dodge a stale closure.
+  //
+  // Names box left blank -> MNC_NAMES (mncNames.js), a curated default list
+  // of ~25 well-known MNCs, so "just give the location" (requested
+  // 2026-09-08) actually works with only a city typed in. Typing a custom
+  // list still overrides it, unchanged from before.
+  const mncStopRef = useRef(false);
   const handleMncSearch = async (e) => {
     e.preventDefault();
-    const names = mncNames.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
-    if (names.length === 0) { alert('Enter at least one company name.'); return; }
+    const typed = mncNames.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    const names = typed.length > 0 ? typed : MNC_NAMES;
     if (!mncCity.trim()) { alert('Enter a city first.'); return; }
+    mncStopRef.current = false;
     setMncSearching(true);
     setMncLastResult('');
     let totalAdded = 0;
     try {
       for (let i = 0; i < names.length; i++) {
+        if (mncStopRef.current) break;
         setMncProgress({ current: i + 1, total: names.length, label: names[i] });
         try {
           totalAdded += await runOneMncSearch(names[i], mncCity);
@@ -385,12 +394,16 @@ function App() {
           console.error(`MNC lookup failed for ${names[i]}:`, err);
         }
         setLeadsPage(1);
-        if (i < names.length - 1) await new Promise(r => setTimeout(r, 13000));
+        if (i < names.length - 1 && !mncStopRef.current) await new Promise(r => setTimeout(r, 13000));
       }
     } finally {
       setMncSearching(false);
       setMncProgress(null);
-      setMncLastResult(`Looked up ${names.length} compan${names.length === 1 ? 'y' : 'ies'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`);
+      setMncLastResult(
+        mncStopRef.current
+          ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
+          : `Looked up ${names.length} compan${names.length === 1 ? 'y' : 'ies'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
+      );
     }
   };
 
@@ -1089,15 +1102,16 @@ function App() {
         {showMncSearch && (
           <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleMncSearch}>
             <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
-              Look up specific large/multinational companies by name — each gets its own exact Google listing pulled (limit 1), rather than a category search. One per line or comma-separated.
+              Just give a city — this searches a built-in list of ~{MNC_NAMES.length} well-known MNCs there automatically.
+              Only type your own names below if you want a specific custom list instead.
             </div>
             <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
-              <label>Company Names</label>
+              <label>Company Names <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional — leave blank for the default MNC list)</span></label>
               <textarea
                 rows={2}
                 value={mncNames}
                 onChange={e => setMncNames(e.target.value)}
-                placeholder={"e.g. Google India\nMicrosoft India\nTata Consultancy Services"}
+                placeholder={"Leave blank to search the default list, or type your own:\nGoogle India\nMicrosoft India"}
                 style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontFamily: 'inherit', fontSize: '14px', resize: 'vertical' }}
               />
             </div>
@@ -1107,8 +1121,13 @@ function App() {
             </div>
             <button type="submit" className="primary-btn" disabled={mncSearching} style={{ background: mncSearching ? '#94a3b8' : '#4f46e5' }}>
               {mncSearching ? <Loader2 className="spin" /> : <Search />}
-              {mncSearching ? 'Looking up...' : 'Search MNCs'}
+              {mncSearching ? 'Searching...' : 'Search MNCs'}
             </button>
+            {mncSearching && (
+              <button type="button" onClick={() => { mncStopRef.current = true; }} style={{ padding: '0 16px', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
+                Stop
+              </button>
+            )}
             {mncProgress && (
               <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
                 {mncProgress.current}/{mncProgress.total}: {mncProgress.label}{searchProgressNote ? ` — ${searchProgressNote}` : ''}
