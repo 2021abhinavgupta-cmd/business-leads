@@ -12,6 +12,17 @@ function phoneToWhatsAppDigits(phone) {
   return (phone || '').replace(/\D/g, '');
 }
 
+// Matches app.py/db.py's normalisation for /api/sent-websites keys, so a
+// lead re-scraped later (different scheme, a stray "www.", a trailing
+// slash) still matches the website it was actually emailed at.
+function normaliseWebsiteKey(url) {
+  if (!url) return '';
+  return url.trim().toLowerCase()
+    .replace(/\/+$/, '')
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '');
+}
+
 // Per-tab help content for the "?" button in the nav. Keyed by currentView,
 // so the button always explains the page you're actually looking at rather
 // than one generic help screen nobody reads past the first line.
@@ -110,6 +121,15 @@ function App() {
   const [costLogs, setCostLogs] = useState([]);
   const [drafts, setDrafts] = useState([]);
   const [expandedEmail, setExpandedEmail] = useState(null);
+  // Keyed by normaliseWebsiteKey(website) -> { id, company, subject, timestamp }
+  // of the most recent email_history row for that site — lets a freshly
+  // re-searched lead (a new object in `leads`, auditState: 'none') show it
+  // was already emailed in a past session, which the session-local
+  // lead.auditState === 'sent' badge alone can't see.
+  const [sentWebsites, setSentWebsites] = useState({});
+  // Set by the "View sent email" button; consumed by the scroll-into-view
+  // effect once the History tab's rows are actually rendered.
+  const [historyScrollTarget, setHistoryScrollTarget] = useState(null);
 
   const isAutopilotRef = useRef(false);
   const leadsRef = useRef([]);
@@ -154,7 +174,41 @@ function App() {
     if (currentView === 'drafts') {
       axios.get(`${API_BASE}/api/drafts?t=${t}`).then(res => setDrafts(res.data.drafts)).catch(console.error);
     }
+    if (currentView === 'home' || currentView === 'agriculture') {
+      fetchSentWebsites();
+    }
   }, [currentView]);
+
+  // Cross-references the leads grid against every website ever actually
+  // sent to, so a lead re-scraped in a later session still shows "Already
+  // sent" instead of a bare, misleading "Generate AI Audit & Draft" button.
+  const fetchSentWebsites = () => {
+    axios.get(`${API_BASE}/api/sent-websites?t=${Date.now()}`)
+      .then(res => setSentWebsites(res.data || {}))
+      .catch(console.error);
+  };
+
+  // Jumps to the History tab and scrolls to the specific email_history row
+  // — see the useEffect below that does the actual scrolling once History's
+  // rows exist to scroll to.
+  const goToSentEmail = (id) => {
+    setExpandedEmail(id);
+    setHistoryScrollTarget(id);
+    setCurrentView('history');
+  };
+
+  useEffect(() => {
+    if (currentView !== 'history' || !historyScrollTarget || historyLogs.length === 0) return;
+    const el = document.getElementById(`history-${historyScrollTarget}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHistoryScrollTarget(null);
+  }, [currentView, historyLogs, historyScrollTarget]);
+
+  // Also fetch once on mount, independent of currentView, so a lead already
+  // in `leads` (restored from localStorage) shows its badge immediately.
+  useEffect(() => {
+    fetchSentWebsites();
+  }, []);
 
   // Globally fetch costs on mount and periodically so the total cost pill is always accurate
   useEffect(() => {
@@ -565,7 +619,9 @@ function App() {
   // and only retry if they explicitly choose to send anyway.
   const sendWithAcknowledgement = async (payload) => {
     try {
-      return await axios.post(`${API_BASE}/api/send`, payload);
+      const res = await axios.post(`${API_BASE}/api/send`, payload);
+      fetchSentWebsites(); // refresh the "Already sent" badge for this website right away
+      return res;
     } catch (err) {
       if (err.response?.status !== 409) throw err;
 
@@ -578,7 +634,9 @@ function App() {
       );
       if (!proceed) return null;
 
-      return await axios.post(`${API_BASE}/api/send`, { ...payload, acknowledge_warnings: true });
+      const res = await axios.post(`${API_BASE}/api/send`, { ...payload, acknowledge_warnings: true });
+      fetchSentWebsites();
+      return res;
     }
   };
 
@@ -769,7 +827,26 @@ function App() {
                 {lead.auditState === 'sent' && <span className="badge success"><Check size={14}/> Sent</span>}
                 {lead.auditState === 'rejected' && <span className="badge danger"><X size={14}/> Rejected</span>}
               </div>
-              
+
+              {/* Cross-referenced against email_history, not just this
+                  session's lead.auditState — catches a lead re-scraped in a
+                  later session that was already emailed before. */}
+              {lead.auditState !== 'sent' && sentWebsites[normaliseWebsiteKey(lead.Website)] && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 10px', padding: '6px 10px', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', fontSize: '12px' }}>
+                  <Check size={14} color="#10b981" />
+                  <span style={{ color: '#059669', fontWeight: 600 }}>
+                    Already sent {sentWebsites[normaliseWebsiteKey(lead.Website)].timestamp}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => goToSentEmail(sentWebsites[normaliseWebsiteKey(lead.Website)].id)}
+                    style={{ marginLeft: 'auto', background: 'none', border: '1px solid #10b981', color: '#059669', borderRadius: '6px', padding: '3px 10px', fontSize: '12px', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    View sent email
+                  </button>
+                </div>
+              )}
+
               <div className="lead-details">
                 <p><strong>URL:</strong> <a href={lead.Website} target="_blank" rel="noreferrer">{lead.Website || 'N/A'}</a></p>
                 <p><strong>Address:</strong> {lead.Address}</p>
@@ -1326,7 +1403,7 @@ function App() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {historyLogs.map(log => (
-          <div key={log.id} style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+          <div key={log.id} id={`history-${log.id}`} style={{ background: historyScrollTarget === log.id ? 'rgba(16,185,129,0.08)' : 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: historyScrollTarget === log.id ? '1px solid rgba(16,185,129,0.5)' : '1px solid rgba(255,255,255,0.1)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h4 style={{ margin: '0 0 4px 0' }}>{log.company}</h4>

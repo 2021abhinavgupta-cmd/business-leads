@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import os
 from datetime import datetime
@@ -416,6 +417,66 @@ def get_email_history():
         row["reply_at"] = reply["timestamp"] if reply else None
 
     return rows
+
+
+def _normalise_website_key(website: str) -> str:
+    """
+    Same loose matching a lead's website needs everywhere else in this
+    codebase (see app.py:_audit_cache_key) — lowercased, no trailing slash
+    — plus scheme/"www." stripped, since a lead re-scraped in a later
+    session can come back as "https://www.x.com" when the email was
+    originally sent to "http://x.com" for the same real site.
+    """
+    if not website:
+        return ""
+    key = website.strip().lower().rstrip("/")
+    key = re.sub(r"^https?://", "", key)
+    key = re.sub(r"^www\.", "", key)
+    return key
+
+
+def get_sent_websites_summary() -> dict:
+    """
+    Most-recent email_history row per normalised website, keyed for the
+    dashboard's "already sent" badge — a lead re-searched in a later
+    session is a brand-new object in the frontend's `leads` array
+    (auditState: 'none'), with nothing to connect it back to a real email
+    already sent to that same site months earlier. `email_history` is the
+    one durable record of that; this is a read-only GROUP BY over it, no
+    schema change.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, website, company, subject, timestamp FROM email_history "
+        "WHERE website IS NOT NULL AND website != '' "
+        # id DESC as the tiebreaker, not just timestamp DESC: CURRENT_TIMESTAMP
+        # is only second-resolution, so two sends to the same site in the
+        # same test/batch can tie on timestamp — id order is what's actually
+        # guaranteed to reflect insertion order.
+        "ORDER BY timestamp DESC, id DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    summary = {}
+    for row in rows:
+        key = _normalise_website_key(row["website"])
+        if not key or key in summary:
+            # Rows are newest-first, so the first hit per key is already
+            # the most recent send — a second, older row for the same
+            # site is deliberately skipped rather than overwriting it.
+            continue
+        summary[key] = {
+            "id": row["id"],
+            "company": row["company"],
+            "subject": row["subject"],
+            "timestamp": row["timestamp"],
+        }
+    return summary
+
 
 # Below this many sends, a variant's reply rate is noise — a single reply on
 # 4 sends reads as 25%, which is meaningless. Reported alongside the numbers

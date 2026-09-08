@@ -1010,6 +1010,21 @@ async def get_history(_auth: None = Depends(require_api_key), _rl: None = Depend
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/sent-websites")
+async def get_sent_websites(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
+    """
+    Every website ever actually emailed, keyed by a loose normalisation
+    (scheme/"www."/trailing-slash stripped) of the site — so the leads
+    grid can show "Already sent" on a lead re-scraped in a later search,
+    which is otherwise a brand-new object with no way to know it was
+    already contacted. See db.get_sent_websites_summary().
+    """
+    try:
+        summary = await asyncio.to_thread(db.get_sent_websites_summary)
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/drafts")
 async def get_drafts(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
