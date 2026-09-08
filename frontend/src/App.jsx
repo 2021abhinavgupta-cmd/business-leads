@@ -490,6 +490,31 @@ function App() {
     const effectiveIncludeTextile = includeTextileCredibility !== null
       ? includeTextileCredibility
       : !!lead.includeTextileCredibility;
+    // Each lead can carry up to three independently-generated drafts (plain /
+    // agriculture-credibility / textile-credibility — the two credibility
+    // flags are mutually exclusive per sector, so this covers every real
+    // combination). Reported live: switching from Agriculture to Textile and
+    // back on the same lead re-ran the whole paid audit+AI pipeline for a
+    // draft that had already been generated. `auditVariants` caches the
+    // finished draft per variant key on the lead object itself, so it rides
+    // along with the existing leads->localStorage persistence for free (a
+    // page refresh doesn't lose the cache either). Retry Audit (force=true)
+    // is the only way to bypass it, and only overwrites that one variant's
+    // cache entry.
+    const variantKey = effectiveIncludeAgri ? 'agri' : effectiveIncludeTextile ? 'textile' : 'plain';
+    const cachedVariant = lead.auditVariants?.[variantKey];
+    if (!force && cachedVariant) {
+      setLeads(prev => {
+        const newLeads = [...prev];
+        newLeads[index].auditState = 'done';
+        newLeads[index].auditProgress = null;
+        newLeads[index].auditData = cachedVariant;
+        newLeads[index].includeAgriCredibility = effectiveIncludeAgri;
+        newLeads[index].includeTextileCredibility = effectiveIncludeTextile;
+        return newLeads;
+      });
+      return;
+    }
     setLeads(prev => {
       const newLeads = [...prev];
       newLeads[index].auditState = 'auditing';
@@ -525,6 +550,13 @@ function App() {
         } else {
           updatedLeads[index].auditState = 'done';
           updatedLeads[index].auditData = payload;
+          // Cache this real draft under its variant key so re-clicking the
+          // same button (or navigating away and back) doesn't re-run the
+          // pipeline — see the cache-check above.
+          updatedLeads[index].auditVariants = {
+            ...updatedLeads[index].auditVariants,
+            [variantKey]: payload,
+          };
         }
         updatedLeads[index].auditProgress = null;
         return updatedLeads;
