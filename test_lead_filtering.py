@@ -179,8 +179,14 @@ def test_the_gate_reuses_the_one_budget_signal_it_also_returns():
 
 def test_defaults_are_the_gentle_active_setting():
     """
-    The user asked for MIN_BUDGET_TIER to be disabled by default (empty string) 
-    so it doesn't drop leads.
+    Both established-business filters default to disabled (0 / empty string)
+    so neither drops a lead unless deliberately turned on.
+
+    MIN_GOOGLE_REVIEWS was 2000 (deliberately aggressive) from 2026-08-31 to
+    2026-09-08 -- live-reported to make the fast Places API path return 0
+    leads for essentially every ordinary niche search (a wedding planner
+    practically never has 2000 Google reviews), forcing a fallback to the
+    slow free scraper on nearly every search. Reset to 0 on explicit request.
     """
     assert config.MIN_BUDGET_TIER == ""
-    assert config.MIN_GOOGLE_REVIEWS == 2000
+    assert config.MIN_GOOGLE_REVIEWS == 0

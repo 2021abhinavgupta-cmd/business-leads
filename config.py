@@ -146,7 +146,18 @@ DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 # well-established businesses clear it, so a typical local-niche search will
 # return very few leads. Lower it (or set 0 to disable) if the pipeline
 # should target ordinary neighbourhood businesses again.
-MIN_GOOGLE_REVIEWS = int(os.getenv("MIN_GOOGLE_REVIEWS", "2000"))
+#
+# Was 2000 (deliberately high) from 2026-08-31 to 2026-09-08 -- live-reported
+# to make the fast Places API path return 0 leads for essentially every
+# ordinary niche search (a wedding planner practically never has 2000 Google
+# reviews), forcing a fallback to the slow free scraper on nearly every
+# search; that fallback shares a global Playwright semaphore(1) with every
+# in-progress audit, so it could sit queued behind one for minutes with the
+# button showing nothing but a spinner. Reset to 0 (disabled) on explicit
+# request so ordinary local businesses -- this tool's actual target -- search
+# normally again. Set it back above 0 to target only large, well-established
+# businesses; an explicit Railway env var still overrides this code default.
+MIN_GOOGLE_REVIEWS = int(os.getenv("MIN_GOOGLE_REVIEWS", "0"))
 #
 # MIN_BUDGET_TIER — after the site audit, analyzer/budget_signal.py rates the
 # lead "unclear" / "growing" / "established" from every free signal already

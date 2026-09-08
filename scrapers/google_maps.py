@@ -75,13 +75,30 @@ class GoogleMapsScraper:
         self.api_key = config.GOOGLE_MAPS_API_KEY
         self.client = httpx.Client(timeout=30)
 
-    async def scrape_google_maps(self, niche: str, city: str, limit: int = 20) -> list[dict]:
+    async def scrape_google_maps(self, niche: str, city: str, limit: int = 20, on_stage=None) -> list[dict]:
         """
         Hybrid Scraper Architecture:
         1. Attempts to use the ultra-fast, reliable Google Places API (which provides a $200 free tier).
-        2. If the API fails (e.g. limit exceeded, no billing account), gracefully falls back 
+        2. If the API fails (e.g. limit exceeded, no billing account), gracefully falls back
            to the 100% free Playwright + OSINT scraper.
+
+        `on_stage`, if given, is called with a short string whenever the
+        scrape moves to a new phase — specifically so a caller can surface
+        the one moment that reads as "frozen" from the outside: falling back
+        to the free scraper, which shares the same global Playwright
+        semaphore as every in-progress audit and can sit queued behind one
+        for minutes with zero other feedback (reported live 2026-09-08, see
+        CLAUDE.md §8). Optional and defaults to None so every other caller
+        (main.py, scheduler.py, the test suite) is unaffected.
         """
+        def _stage(name: str) -> None:
+            if on_stage:
+                try:
+                    on_stage(name)
+                except Exception:
+                    pass  # progress reporting must never break the actual scrape
+
+        _stage("searching_api")
         print(f"[Maps] Attempting official API scrape for {niche} in {city}...")
         try:
             # _scrape_via_api is a plain synchronous method — a real
@@ -102,7 +119,8 @@ class GoogleMapsScraper:
                 return leads
         except Exception as e:
             print(f"[Maps] API failed or blocked: {e}")
-            
+
+        _stage("falling_back_to_scraper")
         print("[Maps] Falling back to free Playwright OSINT scraper...")
         return await self._scrape_via_playwright(niche, city, limit)
 
