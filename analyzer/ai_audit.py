@@ -82,6 +82,21 @@ _RESPONSE_JSON_SCHEMA = {
     "required": ["flaws", "overall_score", "email_subject", "opening_line"],
 }
 
+# Schema for the History tab's "Generate Follow-up" button (added
+# 2026-09-08) — a much smaller, separate task from the audit above: it
+# reads one already-sent email and drafts a follow-up in the same voice,
+# rather than analysing a site from scratch. Kept as its own schema/parser
+# rather than folded into _RESPONSE_JSON_SCHEMA/_parse_json, which
+# hardcodes the audit's four fields and would reject this shape entirely.
+_FOLLOWUP_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string"},
+        "body": {"type": "string"},
+    },
+    "required": ["subject", "body"],
+}
+
 
 class AIAuditor:
     """Run AI-powered audits on lead data with provider fallback."""
@@ -1538,3 +1553,177 @@ class AIAuditor:
             return None
 
         return data
+
+    # ------------------------------------------------------------------
+    # Follow-up generation — History tab's "Generate Follow-up" button
+    # ------------------------------------------------------------------
+
+    def generate_followup_from_original(
+        self, company: str, contact_name: str, your_name: str,
+        original_subject: str, original_body: str, stage: int = 1,
+    ) -> dict | None:
+        """
+        Draft a follow-up that actually reads the email that was already
+        sent, instead of BaseSender.generate_followup's hardcoded,
+        deliberately-vague stage copy (see that docstring — it receives
+        only a name and a stage number, with no access to the original
+        content at all, specifically because a concrete guess about WHAT
+        was found is wrong on a predictable share of sends).
+
+        Triggered manually from the History tab, one specific past send at
+        a time — not part of the automated scheduler.py sequence, which
+        still uses the plain hardcoded copy.
+
+        Grounded hard on purpose: this is a "write a short natural
+        follow-up to the email below" task, not a new audit, so the prompt
+        explicitly forbids introducing any new claim about the site beyond
+        what the original already said. Same fallback order as
+        analyze_lead (Claude Haiku, then Gemini, then GPT-4o-mini) and the
+        same "no dashes anywhere" convention as every other generated
+        email in this codebase.
+
+        Returns {"subject", "body", "ai_cost"} or None if every provider
+        fails or the response can't be parsed.
+        """
+        stage_guidance = (
+            "This is the FIRST follow-up, sent a few days after the "
+            "original with no reply yet. Tone: re-offering help, low "
+            "pressure, short."
+            if stage == 1 else
+            "This is the FINAL follow-up in a 3-email sequence. Ask "
+            "explicitly for a YES or NO answer so the thread closes "
+            "either way, still low pressure."
+        )
+        prompt = f"""You are writing a short follow-up email on behalf of {your_name}, following up on a cold email already sent to {company}.
+
+ORIGINAL EMAIL ALREADY SENT (for context only):
+Subject: {original_subject}
+Body:
+{original_body}
+
+{stage_guidance}
+
+RULES:
+- Do NOT introduce any new claim, number, or observation about the recipient's website that isn't already in the original email above. This is a follow-up nudge, not a new audit.
+- Do NOT repeat the original email's specific findings in detail — reference that you already sent something, don't re-list it.
+- Plain, natural, human tone. No corporate filler like "I hope this email finds you well" or "In today's competitive landscape".
+- NEVER use hyphens (-) or dashes (— or –) anywhere in your response.
+- Keep the body under 80 words.
+- Sign off with "{your_name}".
+- The contact's name is "{contact_name}" if it looks like a real person's name, otherwise use "there" (e.g. "Hi there,").
+
+Respond with a JSON object: {{"subject": "...", "body": "..."}}. The subject should look like a natural reply subject (e.g. starting with "Re:" or referencing the original topic briefly)."""
+
+        for call_fn in (
+            self._call_followup_anthropic,
+            self._call_followup_gemini,
+            self._call_followup_openai,
+        ):
+            result = call_fn(prompt)
+            if result is None:
+                continue
+            raw, cost = result
+            parsed = self._parse_followup_json(raw)
+            if parsed is not None:
+                parsed["ai_cost"] = cost
+                return parsed
+        print("[AIAuditor] All AI providers failed for follow-up generation.")
+        return None
+
+    def _call_followup_anthropic(self, prompt: str) -> tuple[str, float] | None:
+        if not self._anthropic_client:
+            return None
+        try:
+            message = self._anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                temperature=_AI_TEMPERATURE,
+                tools=[{
+                    "name": "submit_followup",
+                    "description": "Submit the drafted follow-up email.",
+                    "input_schema": _FOLLOWUP_RESPONSE_SCHEMA,
+                }],
+                tool_choice={"type": "tool", "name": "submit_followup"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            try:
+                inp = message.usage.input_tokens
+                out = message.usage.output_tokens
+                cost = (inp * 0.25 / 1_000_000) + (out * 1.25 / 1_000_000)
+            except Exception:
+                cost = 0.0002
+            tool_use = next((b for b in message.content if b.type == "tool_use"), None)
+            if tool_use is None:
+                return None
+            return json.dumps(tool_use.input), cost
+        except Exception as e:
+            print(f"Anthropic error (follow-up): {e}")
+            return None
+
+    def _call_followup_gemini(self, prompt: str) -> tuple[str, float] | None:
+        if not config.GEMINI_API_KEY:
+            return None
+        try:
+            model = genai.GenerativeModel(
+                "gemini-3.5-flash",
+                generation_config=genai.types.GenerationConfig(
+                    response_mime_type="application/json",
+                    response_schema=_FOLLOWUP_RESPONSE_SCHEMA,
+                    temperature=_AI_TEMPERATURE,
+                ),
+            )
+            response = model.generate_content(prompt)
+            try:
+                inp = response.usage_metadata.prompt_token_count
+                out = response.usage_metadata.candidates_token_count
+                cost = (inp * 0.075 / 1_000_000) + (out * 0.30 / 1_000_000)
+            except Exception:
+                cost = 0.0001
+            return response.text, cost
+        except Exception as e:
+            print(f"Gemini error (follow-up): {e}")
+            return None
+
+    def _call_followup_openai(self, prompt: str) -> tuple[str, float] | None:
+        if not self._openai_client:
+            return None
+        try:
+            response = self._openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=_AI_TEMPERATURE,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "followup_result",
+                        "strict": True,
+                        "schema": {**_FOLLOWUP_RESPONSE_SCHEMA, "additionalProperties": False},
+                    },
+                },
+            )
+            try:
+                inp = response.usage.prompt_tokens
+                out = response.usage.completion_tokens
+                cost = (inp * 0.150 / 1_000_000) + (out * 0.60 / 1_000_000)
+            except Exception:
+                cost = 0.0001
+            return response.choices[0].message.content, cost
+        except Exception as e:
+            print(f"OpenAI error (follow-up): {e}")
+            return None
+
+    @staticmethod
+    def _parse_followup_json(raw: str) -> dict | None:
+        """Same fence/brace-stripping as _parse_json, validated against the smaller follow-up shape instead."""
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        try:
+            data = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        if not {"subject", "body"}.issubset(data.keys()):
+            return None
+        return {"subject": data["subject"], "body": data["body"]}

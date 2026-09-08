@@ -419,6 +419,24 @@ def get_email_history():
     return rows
 
 
+def get_email_history_by_id(history_id: int) -> dict | None:
+    """
+    One specific past send, for the History tab's "Generate Follow-up"
+    button — it needs the exact original subject/body/recipient/message_id
+    that one row recorded, not a website-keyed lookup (a lead can have more
+    than one send over time, and the button is about a specific email the
+    person is looking at).
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_history WHERE id = ?", (history_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def _normalise_website_key(website: str) -> str:
     """
     Same loose matching a lead's website needs everywhere else in this
