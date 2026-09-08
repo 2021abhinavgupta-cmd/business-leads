@@ -277,6 +277,10 @@ class AuditRequest(BaseModel):
     # AI Audit & Draft" button never sets this. See
     # BaseSender.generate_email's include_agri_credibility docstring.
     include_agri_credibility: bool = False
+    # Same mechanism as include_agri_credibility above, but for the
+    # dedicated "Generate for Textile" button (sector=="textile" leads
+    # only) — adds the Alpine Texworld credibility line. Added 2026-09-08.
+    include_textile_credibility: bool = False
     # When true, /api/audit returns almost immediately ({"started": True})
     # and does the actual work in a background task instead of blocking the
     # HTTP response for the couple of minutes a real audit takes. Exists
@@ -673,6 +677,7 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             req.company, contact, analysis, YOUR_NAME,
             sector=req.sector, sector_detail=req.sector_detail,
             include_agri_credibility=req.include_agri_credibility,
+            include_textile_credibility=req.include_textile_credibility,
         )
 
         # Update Sheets in background
