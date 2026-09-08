@@ -118,6 +118,25 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [loadingSearch, setLoadingSearch] = useState(false);
+  // Real stage text for an in-flight async_mode /api/search call — see
+  // handleSearch. Without this the "Scraping..." button showed nothing else
+  // while a fallen-back-to-the-free-scraper search sat queued behind an
+  // in-progress audit's Playwright lock for minutes (live-reported
+  // 2026-09-08); this surfaces that specific wait instead of looking hung.
+  const [searchProgressNote, setSearchProgressNote] = useState('');
+  // "Search for MNCs" — a targeted lookup by company name (requested:
+  // "add an option to specifically search for mncs") rather than a niche
+  // search, since large/multinational businesses aren't found by category
+  // the way "dentist" or "salon" are. Reuses /api/search as-is (Places Text
+  // Search already accepts a free-text query, so a company name works
+  // today) with limit=1 per name — you want THE listing for that company,
+  // not 20 similar ones.
+  const [showMncSearch, setShowMncSearch] = useState(false);
+  const [mncNames, setMncNames] = useState('');
+  const [mncCity, setMncCity] = useState('');
+  const [mncSearching, setMncSearching] = useState(false);
+  const [mncProgress, setMncProgress] = useState(null);
+  const [mncLastResult, setMncLastResult] = useState('');
   const [loadingNearby, setLoadingNearby] = useState(false);
   const [nearbyRadiusKm, setNearbyRadiusKm] = useState(5);
   const [manualCompany, setManualCompany] = useState('');
@@ -268,22 +287,56 @@ function App() {
 
   const totalAllTime = costLogs.reduce((acc, log) => acc + log.cost, 0);
 
+  // Polls /api/search/progress + /api/search/result for an async_mode
+  // search started with `key`, updating searchProgressNote as it goes, until
+  // the result is ready — resolves with the leads array, or rejects with an
+  // Error carrying the server's message. Shared by the plain Dashboard
+  // search below and the MNC company-name lookup further down; both start
+  // an async_mode search and need the identical wait-for-result loop. No
+  // "seen it running yet" guard is needed the way /api/audit's poller needs
+  // one — each key is a fresh token per request, never shared with an
+  // earlier run, so there's no stale result it could race against.
+  const pollSearchResult = (key) => new Promise((resolve, reject) => {
+    const pollTimer = setInterval(async () => {
+      try {
+        const p = await axios.get(`${API_BASE}/api/search/progress`, { params: { key } });
+        if (p.data?.running) setSearchProgressNote(p.data.stage || '');
+        const r = await axios.get(`${API_BASE}/api/search/result`, { params: { key } });
+        if (r.data?.ready) {
+          clearInterval(pollTimer);
+          if (r.data.error) reject(new Error(r.data.error));
+          else resolve(r.data.leads || []);
+        }
+      } catch {
+        // Progress/result polling is best-effort, matching handleAudit's
+        // identical pattern — a failed poll just retries next tick.
+      }
+    }, 1500);
+  });
+
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoadingSearch(true);
+    setSearchProgressNote('');
     setLeads([]);
     setLeadsPage(1);
+    // A plain Home-tab search for an agri-sounding niche (e.g. typing
+    // "agriculture" directly instead of using the dedicated Agriculture
+    // tab) should still get the "Generate for Agriculture" button — tag
+    // sector the same way the Agriculture tab's own searches do. Textile
+    // (added 2026-09-08, no dedicated tab — just this tagging plus the
+    // credibility line) works the same way off the same niche text box.
+    const isAgriNiche = /agri|farm|krishi|agro/i.test(niche || '');
+    const isTextileNiche = /textile|fabric|garment|apparel|yarn|weav|cotton/i.test(niche || '');
     try {
-      const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10 });
-      // A plain Home-tab search for an agri-sounding niche (e.g. typing
-      // "agriculture" directly instead of using the dedicated Agriculture
-      // tab) should still get the "Generate for Agriculture" button — tag
-      // sector the same way the Agriculture tab's own searches do. Textile
-      // (added 2026-09-08, no dedicated tab — just this tagging plus the
-      // credibility line) works the same way off the same niche text box.
-      const isAgriNiche = /agri|farm|krishi|agro/i.test(niche || '');
-      const isTextileNiche = /textile|fabric|garment|apparel|yarn|weav|cotton/i.test(niche || '');
-      setLeads(res.data.leads.map(lead => ({
+      const res = await axios.post(`${API_BASE}/api/search`, { niche, city, limit: parseInt(limit) || 10, async_mode: true });
+      // Real work continues server-side when async_mode kicks in (see
+      // SearchRequest.async_mode's docstring) — the Google Maps free-scraper
+      // fallback shares a global Playwright semaphore with every
+      // in-progress audit and can otherwise sit queued for minutes with
+      // zero feedback, live-reported 2026-09-08.
+      const rawLeads = res.data?.started ? await pollSearchResult(res.data.key) : res.data.leads;
+      setLeads(rawLeads.map(lead => ({
         ...lead,
         auditState: 'none',
         ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: niche } : {}),
@@ -294,6 +347,50 @@ function App() {
       alert(`Error searching leads: ${err.response?.data?.detail || err.message}`);
     } finally {
       setLoadingSearch(false);
+      setSearchProgressNote('');
+    }
+  };
+
+  // One real /api/search lookup for one company name. Pulled out of
+  // handleMncSearch so it's independently testable in shape and mirrors
+  // runOneAgriSearch's role for the Agriculture tab's bulk runner.
+  const runOneMncSearch = async (companyName, cityVal) => {
+    const res = await axios.post(`${API_BASE}/api/search`, { niche: companyName, city: cityVal, limit: 1, async_mode: true });
+    const rawLeads = res.data?.started ? await pollSearchResult(res.data.key) : res.data.leads;
+    const tagged = rawLeads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'mnc-lookup', sectorDetail: companyName }));
+    setLeads(prev => [...tagged, ...prev]);
+    return tagged.length;
+  };
+
+  // Runs one lookup per company name, sequentially, 13s apart — same
+  // pacing/rationale as handleSearchAllNiches below: /api/search's rate
+  // limit is 5 requests/60s, and this loop can otherwise burst well past it
+  // for a real MNC list (a handful of well-known names is the common case,
+  // but nothing caps how many someone pastes in). One failed name doesn't
+  // stop the rest of the list.
+  const handleMncSearch = async (e) => {
+    e.preventDefault();
+    const names = mncNames.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    if (names.length === 0) { alert('Enter at least one company name.'); return; }
+    if (!mncCity.trim()) { alert('Enter a city first.'); return; }
+    setMncSearching(true);
+    setMncLastResult('');
+    let totalAdded = 0;
+    try {
+      for (let i = 0; i < names.length; i++) {
+        setMncProgress({ current: i + 1, total: names.length, label: names[i] });
+        try {
+          totalAdded += await runOneMncSearch(names[i], mncCity);
+        } catch (err) {
+          console.error(`MNC lookup failed for ${names[i]}:`, err);
+        }
+        setLeadsPage(1);
+        if (i < names.length - 1) await new Promise(r => setTimeout(r, 13000));
+      }
+    } finally {
+      setMncSearching(false);
+      setMncProgress(null);
+      setMncLastResult(`Looked up ${names.length} compan${names.length === 1 ? 'y' : 'ies'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`);
     }
   };
 
@@ -934,8 +1031,14 @@ function App() {
           <button type="button" onClick={() => setShowManualEntry(!showManualEntry)} style={{ background: showManualEntry ? '#fee2e2' : '#f8fafc', border: showManualEntry ? '1px solid #f87171' : '1px solid #cbd5e1', color: showManualEntry ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showManualEntry ? 'Cancel' : '+ Specific Lead'}
           </button>
+          <button type="button" onClick={() => setShowMncSearch(!showMncSearch)} style={{ background: showMncSearch ? '#fee2e2' : '#f8fafc', border: showMncSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMncSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            {showMncSearch ? 'Cancel' : 'Search MNCs'}
+          </button>
         </div>
       </form>
+      {loadingSearch && searchProgressNote && (
+        <p style={{ margin: '8px 0 0', fontSize: '13px', color: '#94a3b8' }}>{searchProgressNote}</p>
+      )}
 
       {/* Nearby search is deliberately outside the form above: it needs
           neither niche nor city (both `required` there), and submitting the
@@ -978,6 +1081,42 @@ function App() {
               <input type="text" value={manualWebsite} onChange={e => setManualWebsite(e.target.value)} placeholder="e.g. acme.com" />
             </div>
             <button type="submit" className="primary-btn" style={{ background: '#10b981' }}>+ Add Lead</button>
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showMncSearch && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleMncSearch}>
+            <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
+              Look up specific large/multinational companies by name — each gets its own exact Google listing pulled (limit 1), rather than a category search. One per line or comma-separated.
+            </div>
+            <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
+              <label>Company Names</label>
+              <textarea
+                rows={2}
+                value={mncNames}
+                onChange={e => setMncNames(e.target.value)}
+                placeholder={"e.g. Google India\nMicrosoft India\nTata Consultancy Services"}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontFamily: 'inherit', fontSize: '14px', resize: 'vertical' }}
+              />
+            </div>
+            <div className="input-group" style={{ maxWidth: 200 }}>
+              <label>City (or a whole state)</label>
+              <input type="text" list="city-options" value={mncCity} onChange={e => setMncCity(e.target.value)} placeholder="e.g. Bengaluru" />
+            </div>
+            <button type="submit" className="primary-btn" disabled={mncSearching} style={{ background: mncSearching ? '#94a3b8' : '#4f46e5' }}>
+              {mncSearching ? <Loader2 className="spin" /> : <Search />}
+              {mncSearching ? 'Looking up...' : 'Search MNCs'}
+            </button>
+            {mncProgress && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                {mncProgress.current}/{mncProgress.total}: {mncProgress.label}{searchProgressNote ? ` — ${searchProgressNote}` : ''}
+              </p>
+            )}
+            {!mncSearching && mncLastResult && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{mncLastResult}</p>
+            )}
           </motion.form>
         )}
       </AnimatePresence>

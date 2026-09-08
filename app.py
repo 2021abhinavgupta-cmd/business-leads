@@ -2,6 +2,7 @@ import asyncio
 import os
 import random
 import time
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import Literal
@@ -216,6 +217,16 @@ class SearchRequest(BaseModel):
     niche: str
     city: str
     limit: int = 10
+    # When true, /api/search returns almost immediately ({"started": True,
+    # "key": ...}) and does the actual scrape in a detached background task
+    # instead of blocking the response — same async_mode pattern as
+    # AuditRequest.async_mode (see its docstring). Added specifically for the
+    # Google Maps free-scraper fallback (scrapers/google_maps.py), which
+    # shares a global Playwright semaphore(1) with every in-progress audit
+    # and can sit queued behind one for minutes with the button showing
+    # nothing but a spinner — live-reported 2026-09-08. Default False so
+    # every existing programmatic/test caller of this endpoint is unaffected.
+    async_mode: bool = False
 
 class B2BDirectorySearchRequest(BaseModel):
     niche: str
@@ -340,15 +351,35 @@ def save_leads_to_sheets_bg(leads: list):
         except Exception as e:
             print(f"Error saving to sheets: {e}")
 
-@app.post("/api/search")
-async def search_leads(
-    req: SearchRequest,
-    background_tasks: BackgroundTasks,
-    _auth: None = Depends(require_api_key),
-    _rl: None = Depends(rate_limit(5, 60)),
-):
+# Live progress + async-mode result handoff for /api/search, mirroring
+# _audit_progress/_audit_async_results above (see AuditRequest.async_mode's
+# docstring for the general pattern). Keyed by a random token minted per
+# search request rather than by website/niche — unlike an audit, a search
+# has no natural stable key, and two identical searches in flight at once
+# are a real, unremarkable case (Autopilot + a manual search, say).
+_SEARCH_STAGE_LABELS = {
+    "searching_api": "Searching Google Places API",
+    "falling_back_to_scraper": "Places API returned nothing usable — falling back to the free scraper. "
+                                "This can take a few minutes and waits for any audits already running.",
+}
+_SEARCH_PROGRESS_TTL = 900
+_search_progress: dict[str, tuple[float, dict]] = {}
+_SEARCH_ASYNC_RESULT_TTL = 900
+_search_async_results: dict[str, tuple[float, dict]] = {}
+
+
+def _search_progress_set(key: str, stage_name: str) -> None:
+    now = time.monotonic()
+    for k, (ts, _) in list(_search_progress.items()):
+        if now - ts > _SEARCH_PROGRESS_TTL:
+            _search_progress.pop(k, None)
+    _search_progress[key] = (now, {"stage": _SEARCH_STAGE_LABELS.get(stage_name, stage_name)})
+
+
+async def _search_leads_impl(req: SearchRequest, background_tasks: BackgroundTasks, progress_key: str | None = None) -> dict:
     try:
-        leads = await maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
+        on_stage = (lambda name: _search_progress_set(progress_key, name)) if progress_key else None
+        leads = await maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit, on_stage=on_stage)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
 
         # Log exact Maps API cost
@@ -362,6 +393,76 @@ async def search_leads(
         return {"leads": leads}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/search")
+async def search_leads(
+    req: SearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    if req.async_mode:
+        # Fire the real work as a detached task and return immediately —
+        # same reasoning as AuditRequest.async_mode. A fresh,
+        # request-independent BackgroundTasks() is used since the one
+        # FastAPI injected here belongs to this request's lifecycle, which
+        # is about to end.
+        key = uuid.uuid4().hex
+
+        async def _run_and_store():
+            local_background_tasks = BackgroundTasks()
+            try:
+                result = await _search_leads_impl(req, local_background_tasks, progress_key=key)
+            except HTTPException as e:
+                result = {"error": e.detail}
+            except Exception as e:
+                result = {"error": str(e)}
+            await local_background_tasks()
+            now = time.monotonic()
+            for k, (ts, _) in list(_search_async_results.items()):
+                if now - ts > _SEARCH_ASYNC_RESULT_TTL:
+                    _search_async_results.pop(k, None)
+            _search_async_results[key] = (now, result)
+            _search_progress.pop(key, None)
+
+        asyncio.create_task(_run_and_store())
+        return {"started": True, "key": key}
+
+    return await _search_leads_impl(req, background_tasks)
+
+
+@app.get("/api/search/progress")
+async def search_progress(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    """Current stage of an in-flight async_mode /api/search call, keyed by
+    the token that call's {"started": True, "key": ...} response returned."""
+    entry = _search_progress.get(key)
+    if not entry:
+        return {"running": False}
+    _, data = entry
+    return {"running": True, **data}
+
+
+@app.get("/api/search/result")
+async def search_result(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    """
+    Poll target for an async_mode /api/search call. {"ready": false} until
+    the background task finishes, then the stored result (popped — one-shot
+    handoff per search, not a replay cache).
+    """
+    entry = _search_async_results.pop(key, None)
+    if not entry:
+        return {"ready": False}
+    _, result = entry
+    return {"ready": True, **result}
 
 @app.post("/api/search-b2b-directory")
 async def search_leads_b2b_directory(
