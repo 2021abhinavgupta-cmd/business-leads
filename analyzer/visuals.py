@@ -86,6 +86,25 @@ _OVERLAY_SUPPRESSION_SELECTORS = (
     "#tidio-chat", "#intercom-container", "#hubspot-messages-iframe-container",
     "#drift-widget", "#crisp-chatbox", ".zsiq_floatmain", "#launcher",
     "[id*='livechat']", "[class*='whatsapp-float']",
+    # Expanded 2026-09-08 — the original list covered the vendors verified
+    # against real leads at the time it was written, but was never claimed
+    # to be exhaustive (CLAUDE.md §8 flags "will miss consent vendors nobody
+    # has hit yet" as a known, open gap). These are other real, widely
+    # deployed CMPs (consent management platforms) and chat widgets not
+    # already covered above — added proactively rather than one at a time
+    # as each is hit live.
+    "#usercentrics-root", "[id^='usercentrics']", "#uc-banner",
+    "#truste-consent-track", ".truste_box_overlay", "#trustarc-banner-container",
+    "#consent_blackbar", ".qc-cmp2-container", "#qc-cmp2-container",
+    "[id^='sp_message_container']", "#iubenda-cs-banner", ".iubenda-cs-container",
+    "#termly-code-snippet-support", "#BorlabsCookieBox", ".BorlabsCookie",
+    ".osano-cm-window", "#osano-cm-widget", "#didomi-host", ".didomi-popup-container",
+    ".klaro", "#klaro", ".fc-consent-root", ".fc-dialog-container", "#fc-cta-consent",
+    "#ccc-notify", "#ccc", "#coiPage-1", "#CookieConsent", "#cookiefirst-root",
+    "#ketch-consent-banner", "[class*='gdpr' i]", "[id*='gdpr' i]",
+    "[class*='consent-banner' i]", "[id*='consent-banner' i]",
+    "#freshworks-container", "#olark-wrapper", "#tawkchat-container",
+    "iframe[id^='tawkchat']", "#chatra", "#chat-widget-container",
 )
 
 # A highlight that fills the screenshot reads as "the whole page is wrong"
@@ -434,29 +453,62 @@ async def _remove_highlight(page) -> None:
         pass
 
 
-async def _capture_closeup(page, selector: str) -> bytes | None:
+# How far the close up crop extends beyond the marked element's own edges,
+# and the smallest a crop is ever allowed to be. Both matter for the same
+# reason: this pipeline's own _MIN_HIGHLIGHT_PX floor allows highlighting an
+# element as small as 12x12 (a checkbox, an icon-only button) — a bare crop
+# of exactly that element would be a 12x12 pixel image, technically correct
+# and practically useless once attached to an email. Padding the crop out
+# keeps enough surrounding page (label text, sibling controls, the section
+# it sits in) for it to read as "this spot on your actual page" rather than
+# an abstract colored rectangle floating in white space.
+_CLOSEUP_PADDING_PX = 40
+_CLOSEUP_MIN_SIZE_PX = 240
+
+
+async def _capture_closeup(page, rect: dict) -> bytes | None:
     """
-    A tight crop of just the flagged element, taken while the highlight is
-    still on it — so the crop itself shows the marked border, not just bare
-    content.
+    A generously padded crop centered on the marked element, taken while the
+    highlight is still on it — so the crop itself shows the marked border in
+    context, not a bare, possibly tiny sliver of content.
 
-    Requested after a live report that the full-page image alone left room
-    for doubt about exactly what the box pointed at: at full-page scale a
-    small element's outline can be easy to miss, or mistaken for something
-    else on the page (see the comment on _HIGHLIGHT_COLOR). A second, tightly
-    cropped image next to it removes that doubt outright rather than relying
-    on the marker alone to carry it.
+    Takes the rect straight from the highlight result (_highlight_element's
+    return value) rather than re-querying the element by selector. Two
+    reasons: this crop can then never disagree with where the box itself was
+    actually drawn, since both come from the same measurement; and it
+    sidesteps re-locating an element that could, in principle, have gone
+    stale between the highlight call and this one (inside an iframe
+    _run_axe_audit's candidates don't reach, for instance).
 
-    Best-effort and non-fatal: an element inside an iframe, or one that
-    becomes unlocatable between the highlight call and this one, degrades to
-    None rather than failing the audit — the full-page highlighted screenshot
-    is still there either way.
+    Uses page.screenshot(clip=...) rather than an element handle's own
+    .screenshot() specifically to get the padding: an element screenshot
+    crops to EXACTLY that element's bounding box with no way to widen it.
+
+    Best-effort and non-fatal: degrades to None rather than failing the
+    audit — the full-page highlighted screenshot is still there either way.
     """
     try:
-        el = await page.query_selector(selector)
-        if not el:
+        viewport = page.viewport_size
+        if not viewport:
             return None
-        return await el.screenshot(animations="disabled", caret="hide")
+        vw, vh = viewport["width"], viewport["height"]
+
+        crop_w = min(max(rect["width"] + _CLOSEUP_PADDING_PX * 2, _CLOSEUP_MIN_SIZE_PX), vw)
+        crop_h = min(max(rect["height"] + _CLOSEUP_PADDING_PX * 2, _CLOSEUP_MIN_SIZE_PX), vh)
+
+        # Centered on the element, then clamped so the crop stays fully
+        # inside the captured viewport rather than being cut off at an edge
+        # (or, worse, clipped against page content that was never captured
+        # at all outside the viewport bounds).
+        cx = rect["x"] + rect["width"] / 2
+        cy = rect["y"] + rect["height"] / 2
+        x = max(0, min(cx - crop_w / 2, vw - crop_w))
+        y = max(0, min(cy - crop_h / 2, vh - crop_h))
+
+        return await page.screenshot(
+            clip={"x": x, "y": y, "width": crop_w, "height": crop_h},
+            animations="disabled", caret="hide",
+        )
     except Exception as e:
         print(f"[Visuals] Could not capture close up crop (non-critical): {e}")
         return None
@@ -505,7 +557,7 @@ async def _audit_current_page(page, context, label: str) -> dict:
     # to, and the checks below still measure the unmodified page.
     visual_flaw = await _highlight_element(page, candidates)
     screenshot_bytes = await _capture(page)
-    closeup_bytes = await _capture_closeup(page, visual_flaw["selector"]) if visual_flaw else None
+    closeup_bytes = await _capture_closeup(page, visual_flaw) if visual_flaw else None
     await _remove_highlight(page)
 
     broken_links, links_checked = await _check_broken_assets(page, context)

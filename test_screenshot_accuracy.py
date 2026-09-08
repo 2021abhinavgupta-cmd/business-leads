@@ -40,6 +40,7 @@ import os
 import re
 
 import pytest
+from playwright.async_api import async_playwright
 
 from analyzer import visuals
 from analyzer.ai_audit import AIAuditor
@@ -604,25 +605,142 @@ async def test_every_capture_disables_animations_and_hides_the_caret():
     assert captured["full_page"] is False
 
 
+@pytest.mark.asyncio
+async def test_capture_closeup_pads_a_small_element_instead_of_cropping_it_bare():
+    """
+    A checkbox-sized violation (the smallest this pipeline ever highlights,
+    per _MIN_HIGHLIGHT_PX=12) must not produce a 12x12 pixel crop — that is
+    technically a "close up" but shows nothing a recipient could recognise
+    as their own page. The crop should be padded out to at least
+    _CLOSEUP_MIN_SIZE_PX, centered on the element.
+    """
+    captured = {}
+
+    class _Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        async def screenshot(self, **kwargs):
+            captured.update(kwargs)
+            return b"bytes"
+
+    rect = {"x": 600, "y": 400, "width": 12, "height": 12}
+    result = await visuals._capture_closeup(_Page(), rect)
+
+    assert result == b"bytes"
+    clip = captured["clip"]
+    assert clip["width"] == visuals._CLOSEUP_MIN_SIZE_PX
+    assert clip["height"] == visuals._CLOSEUP_MIN_SIZE_PX
+    # Centered on the element's own center point.
+    element_cx, element_cy = 606, 406
+    assert abs((clip["x"] + clip["width"] / 2) - element_cx) < 1
+    assert abs((clip["y"] + clip["height"] / 2) - element_cy) < 1
+    assert captured["animations"] == "disabled"
+    assert captured["caret"] == "hide"
+
+
+@pytest.mark.asyncio
+async def test_capture_closeup_pads_a_large_element_by_a_fixed_margin():
+    """A big element doesn't need padding out to the floor — just the fixed margin on each side."""
+    captured = {}
+
+    class _Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        async def screenshot(self, **kwargs):
+            captured.update(kwargs)
+            return b"bytes"
+
+    rect = {"x": 100, "y": 100, "width": 300, "height": 200}
+    await visuals._capture_closeup(_Page(), rect)
+
+    clip = captured["clip"]
+    assert clip["width"] == 300 + visuals._CLOSEUP_PADDING_PX * 2
+    assert clip["height"] == 200 + visuals._CLOSEUP_PADDING_PX * 2
+
+
+@pytest.mark.asyncio
+async def test_capture_closeup_clamps_to_the_viewport_near_an_edge():
+    """
+    An element right against the top left corner would otherwise center a
+    padded crop partly off screen (negative x/y) — content that was never
+    in the captured viewport at all. The crop must stay fully inside it.
+    """
+    captured = {}
+
+    class _Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        async def screenshot(self, **kwargs):
+            captured.update(kwargs)
+            return b"bytes"
+
+    rect = {"x": 0, "y": 0, "width": 20, "height": 20}
+    await visuals._capture_closeup(_Page(), rect)
+
+    clip = captured["clip"]
+    assert clip["x"] >= 0
+    assert clip["y"] >= 0
+    assert clip["x"] + clip["width"] <= 1280
+    assert clip["y"] + clip["height"] <= 800
+
+
+@pytest.mark.asyncio
+async def test_capture_closeup_never_exceeds_the_viewport_itself():
+    """A crop wider or taller than the actual captured viewport is nonsensical."""
+    captured = {}
+
+    class _Page:
+        viewport_size = {"width": 390, "height": 200}
+
+        async def screenshot(self, **kwargs):
+            captured.update(kwargs)
+            return b"bytes"
+
+    rect = {"x": 10, "y": 10, "width": 20, "height": 20}
+    await visuals._capture_closeup(_Page(), rect)
+
+    clip = captured["clip"]
+    assert clip["width"] <= 390
+    assert clip["height"] <= 200
+
+
+@pytest.mark.asyncio
+async def test_capture_closeup_degrades_to_none_without_a_viewport():
+    """No viewport_size (an unusual page/browser state) must not raise."""
+    class _Page:
+        viewport_size = None
+
+    assert await visuals._capture_closeup(_Page(), {"x": 0, "y": 0, "width": 10, "height": 10}) is None
+
+
 def test_nothing_screenshots_the_page_without_going_through_capture():
     """
-    A second, undocumented raw page/element .screenshot() call would silently
+    A second, undocumented raw page.screenshot() call would silently
     reintroduce non-deterministic capture for whichever image it produced.
 
     Exactly two call sites are legitimate: _capture (the full page) and
-    _capture_closeup (added 2026-09-08, a tight crop of the marked element,
-    taken while it's still highlighted). Both are pinned here by name and
-    both carry the same animations/caret determinism options — a THIRD call
-    site anywhere else in the file is what this test exists to catch.
+    _capture_closeup (a padded crop around the marked element, taken while
+    it's still highlighted — rewritten 2026-09-08 to pad the crop rather
+    than screenshot the bare element, see _CLOSEUP_PADDING_PX). Both are
+    pinned here by name and both carry the same animations/caret
+    determinism options — a THIRD call site anywhere else in the file is
+    what this test exists to catch.
     """
     source = _source("analyzer/visuals.py")
+    # "await" restricts this to real invocations — a docstring merely
+    # mentioning ".screenshot(" in prose (as _capture_closeup's now does,
+    # explaining why it uses page.screenshot(clip=...) over an element
+    # handle's own) is not a call site.
     raw = [
         line for line in source.splitlines()
-        if ".screenshot(" in line and "async def screenshot" not in line
+        if ".screenshot(" in line and "await" in line and "async def screenshot" not in line
     ]
     assert len(raw) == 2, f"expected only _capture and _capture_closeup to screenshot, found: {raw}"
     assert any("full_page=False, animations=\"disabled\", caret=\"hide\"" in line for line in raw)
-    assert any('el.screenshot(animations="disabled", caret="hide")' in line for line in raw)
+    closeup_body = source.split("async def _capture_closeup")[1].split("async def ")[0]
+    assert "page.screenshot(" in closeup_body
+    assert 'clip={"x": x, "y": y, "width": crop_w, "height": crop_h}' in closeup_body
+    assert 'animations="disabled", caret="hide"' in closeup_body
 
 
 @pytest.mark.asyncio
@@ -647,6 +765,65 @@ async def test_overlay_suppression_hides_consent_and_chat_widgets():
     assert "display: none !important" in seen["content"]
     assert "#onetrust-banner-sdk" in seen["content"]
     assert "#intercom-container" in seen["content"]
+
+
+@pytest.mark.asyncio
+async def test_the_expanded_selector_list_is_valid_css_in_a_real_browser():
+    """
+    Every entry added 2026-09-08 (Usercentrics, TrustArc, Quantcast Choice,
+    Sourcepoint, Iubenda, Termly, Borlabs, Osano, Didomi, Klaro, Google
+    Funding Choices, Civic Cookie Control, Cookie Information, CookieFirst,
+    Ketch, generic gdpr/consent-banner substrings, and a handful more chat
+    widgets) has to be real, parseable CSS or add_style_tag raises and the
+    whole suppression pass — which _run_axe_audit depends on running before
+    it — degrades silently for every site, not just ones with a matching
+    vendor. A syntax slip here would be invisible without this test: it
+    can't be caught by the mocked unit tests above, which never touch a
+    real CSS parser.
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content("<html><body></body></html>")
+        await visuals._suppress_overlays(page)  # must not raise
+        await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_the_expanded_selector_list_actually_hides_the_new_vendors():
+    """A sample of the newly added selectors, checked against real matching markup."""
+    html = """
+    <html><body>
+        <div id="usercentrics-root">consent banner</div>
+        <div class="klaro">consent banner</div>
+        <div id="ccc">civic cookie control</div>
+        <div id="my-gdpr-notice">generic gdpr substring match</div>
+        <div id="chat-widget-container">chat</div>
+        <button id="real-cta">Book Now</button>
+    </body></html>
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.set_content(html)
+        await visuals._suppress_overlays(page)
+        hidden = await page.evaluate(
+            """() => ['usercentrics-root', 'ccc', 'my-gdpr-notice', 'chat-widget-container']
+                .map(id => getComputedStyle(document.getElementById(id)).display)"""
+        )
+        klaro_hidden = await page.evaluate(
+            "() => getComputedStyle(document.querySelector('.klaro')).display"
+        )
+        cta_display = await page.evaluate(
+            "() => getComputedStyle(document.getElementById('real-cta')).display"
+        )
+        await browser.close()
+
+    assert all(d == "none" for d in hidden), hidden
+    assert klaro_hidden == "none"
+    # The site's own real call to action must never be caught by a substring
+    # guess — it isn't named anything cookie/consent/gdpr-related here.
+    assert cta_display != "none"
 
 
 def test_overlays_are_hidden_before_axe_runs_not_only_before_the_capture():
