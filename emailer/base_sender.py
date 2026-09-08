@@ -226,7 +226,19 @@ class BaseSender:
         # generic name is the COMMON case (contact discovery usually can't
         # find a real person). A bare "Hi there," reads as a human writing
         # quickly; a company name in the salutation reads as a list.
-        greeting = f"Hi {contact_name}," if self._is_a_real_person_name(contact_name, company) else "Hi there,"
+        #
+        # The gate below still checks the FULL contact_name (a two-word
+        # first name doesn't collide with the "{Company} Team" check either
+        # way), but the greeting itself uses only the first token —
+        # enrichment/decision_maker.py's _find_ceo_name pulls up to a
+        # three-word name straight from a LinkedIn search result title
+        # ("Ranjita Naik"), and until this was fixed that full string went
+        # straight into the greeting as "Hi Ranjita Naik," instead of the
+        # more natural "Hi Ranjita," this function's own docstring already
+        # promised. Live-caught 2026-09-08 running a real draft through the
+        # full pipeline end to end — the existing salutation test only ever
+        # used a single-word name ("Priya"), so it never exercised this.
+        greeting = f"Hi {self._first_name(contact_name)}," if self._is_a_real_person_name(contact_name, company) else "Hi there,"
 
         body_lines = [f"{greeting}\n", f"{opening_line}\n"]
 
@@ -282,6 +294,20 @@ class BaseSender:
         if company and name.lower() == f"{company.strip().lower()} team":
             return False
         return not name.lower().endswith(" team")
+
+    @staticmethod
+    def _first_name(contact_name: str) -> str:
+        """
+        Just the first token of *contact_name*, for the greeting.
+
+        A one-word name ("Priya") passes through unchanged; a two/three-word
+        one ("Ranjita Naik", "Amit Kumar Shah" — the shape
+        enrichment/decision_maker.py's _find_ceo_name can return, straight
+        from a LinkedIn search result title) is truncated to its first word.
+        Empty/whitespace-only input returns "" rather than raising.
+        """
+        stripped = (contact_name or "").strip()
+        return stripped.split()[0] if stripped else ""
 
     def _closing_lines(self, variant: str, your_name: str) -> list[str]:
         """
@@ -339,16 +365,19 @@ class BaseSender:
         mismatches. If follow-ups ever need to reference the real findings,
         pass the original flaws in rather than reinstating a guess here.
         """
+        # Same first-name-only truncation as generate_email's greeting, for
+        # the same reason: contact_name can be a full "First Last" string.
+        first_name = self._first_name(contact_name)
         if stage == 1:
             body_lines = [
-                f"Hi {contact_name},\n",
+                f"Hi {first_name},\n",
                 "Wanted to follow up in case my earlier note got buried — still happy to help if it's useful.",
                 "I'm glad to walk through what I'd fix first, no pressure either way.\n",
                 f"Best,\n{your_name}",
             ]
         else:
             body_lines = [
-                f"Hi {contact_name},\n",
+                f"Hi {first_name},\n",
                 "Last note from me on this — just reply YES if it's worth a quick call, or NO and I'll leave it there.",
                 "Either way, thanks for reading, and wishing you a great week ahead.\n",
                 f"Cheers,\n{your_name}",

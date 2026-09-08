@@ -90,6 +90,21 @@ def test_a_real_person_name_is_used_in_the_greeting(monkeypatch):
     assert body.startswith("Hi Priya,")
 
 
+def test_a_full_name_is_truncated_to_just_the_first_name_in_the_greeting(monkeypatch):
+    """
+    Live-caught 2026-09-08 running a real draft through the full pipeline:
+    enrichment/decision_maker.py's _find_ceo_name returns up to a 3-word name
+    straight from a LinkedIn search result title ("Ranjita Naik"), and that
+    used to flow unchanged into the greeting as "Hi Ranjita Naik," instead of
+    the natural "Hi Ranjita," this function's own docstring already promised.
+    The prior test only ever used a single-word name, so it never caught this.
+    """
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "classic")
+    _, body = _sender().generate_email("Timezone", "Ranjita Naik", _ANALYSIS, "Kshitij")
+    assert body.startswith("Hi Ranjita,")
+    assert "Ranjita Naik" not in body
+
+
 def test_the_generic_company_team_fallback_is_not_used_in_the_greeting(monkeypatch):
     """
     "Hi Acme Dental Team," is a visible mail-merge tell, and this fallback is
@@ -106,6 +121,22 @@ def test_a_bare_team_fallback_is_also_caught():
     assert BaseSender._is_a_real_person_name("", "Acme") is False
     assert BaseSender._is_a_real_person_name("Acme Team", "Acme") is False
     assert BaseSender._is_a_real_person_name("Priya", "Acme") is True
+
+
+def test_first_name_helper():
+    assert BaseSender._first_name("Priya") == "Priya"
+    assert BaseSender._first_name("Ranjita Naik") == "Ranjita"
+    assert BaseSender._first_name("Amit Kumar Shah") == "Amit"
+    assert BaseSender._first_name("") == ""
+    assert BaseSender._first_name(None) == ""
+    assert BaseSender._first_name("   ") == ""
+
+
+def test_the_followup_greeting_also_truncates_a_full_name():
+    """Same source, same fix needed — generate_followup takes the identical contact_name value."""
+    body = _sender().generate_followup("Ranjita Naik", 1, "Kshitij")
+    assert body.startswith("Hi Ranjita,")
+    assert "Ranjita Naik" not in body
 
 
 # ---------------------------------------------------------------------------
