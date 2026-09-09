@@ -496,6 +496,39 @@ def get_sent_websites_summary() -> dict:
     return summary
 
 
+def get_drafted_websites_summary() -> dict:
+    """
+    Most-recent email_drafts row per normalised website, keyed the same way
+    as get_sent_websites_summary() — same problem, one step earlier: a lead
+    re-searched in a later session is a brand-new object with no way to know
+    a draft already sits in email_drafts for that same site, so it would
+    otherwise offer "Generate AI Audit & Draft" again as if nothing had run.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, website, company, timestamp FROM email_drafts "
+        "WHERE website IS NOT NULL AND website != '' "
+        "ORDER BY timestamp DESC, id DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    summary = {}
+    for row in rows:
+        key = _normalise_website_key(row["website"])
+        if not key or key in summary:
+            continue
+        summary[key] = {
+            "id": row["id"],
+            "company": row["company"],
+            "timestamp": row["timestamp"],
+        }
+    return summary
+
+
 # Below this many sends, a variant's reply rate is noise — a single reply on
 # 4 sends reads as 25%, which is meaningless. Reported alongside the numbers
 # rather than used to hide them, so the operator can see a variant is still

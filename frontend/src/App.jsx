@@ -221,9 +221,15 @@ function App() {
   // was already emailed in a past session, which the session-local
   // lead.auditState === 'sent' badge alone can't see.
   const [sentWebsites, setSentWebsites] = useState({});
+  // Same idea, one step earlier: every website with a draft already sitting
+  // in email_drafts, so a re-searched lead shows "Draft already made"
+  // instead of offering to generate one again from scratch.
+  const [draftedWebsites, setDraftedWebsites] = useState({});
   // Set by the "View sent email" button; consumed by the scroll-into-view
   // effect once the History tab's rows are actually rendered.
   const [historyScrollTarget, setHistoryScrollTarget] = useState(null);
+  // Same, for the "View draft" button and the Drafts tab.
+  const [draftScrollTarget, setDraftScrollTarget] = useState(null);
 
   const isAutopilotRef = useRef(false);
   const leadsRef = useRef([]);
@@ -270,6 +276,7 @@ function App() {
     }
     if (currentView === 'home' || currentView === 'agriculture') {
       fetchSentWebsites();
+      fetchDraftedWebsites();
     }
   }, [currentView]);
 
@@ -282,6 +289,14 @@ function App() {
       .catch(console.error);
   };
 
+  // Same, one step earlier: catches a lead re-scraped after a draft was
+  // already made for that site in an earlier session.
+  const fetchDraftedWebsites = () => {
+    axios.get(`${API_BASE}/api/drafted-websites?t=${Date.now()}`)
+      .then(res => setDraftedWebsites(res.data || {}))
+      .catch(console.error);
+  };
+
   // Jumps to the History tab and scrolls to the specific email_history row
   // — see the useEffect below that does the actual scrolling once History's
   // rows exist to scroll to.
@@ -291,6 +306,12 @@ function App() {
     setCurrentView('history');
   };
 
+  // Same, for the Drafts tab.
+  const goToDraft = (id) => {
+    setDraftScrollTarget(id);
+    setCurrentView('drafts');
+  };
+
   useEffect(() => {
     if (currentView !== 'history' || !historyScrollTarget || historyLogs.length === 0) return;
     const el = document.getElementById(`history-${historyScrollTarget}`);
@@ -298,10 +319,18 @@ function App() {
     setHistoryScrollTarget(null);
   }, [currentView, historyLogs, historyScrollTarget]);
 
+  useEffect(() => {
+    if (currentView !== 'drafts' || !draftScrollTarget || drafts.length === 0) return;
+    const el = document.getElementById(`draft-${draftScrollTarget}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setDraftScrollTarget(null);
+  }, [currentView, drafts, draftScrollTarget]);
+
   // Also fetch once on mount, independent of currentView, so a lead already
   // in `leads` (restored from localStorage) shows its badge immediately.
   useEffect(() => {
     fetchSentWebsites();
+    fetchDraftedWebsites();
   }, []);
 
   // Globally fetch costs on mount and periodically so the total cost pill is always accurate
@@ -820,6 +849,7 @@ function App() {
         updatedLeads[index].auditProgress = null;
         return updatedLeads;
       });
+      if (!payload.error) fetchDraftedWebsites(); // refresh "Draft already made" for this website right away
     };
 
     if (lead.Website) {
@@ -1115,6 +1145,7 @@ function App() {
 
       // Remove from drafts list since it was sent
       setDrafts(drafts.filter(d => d.id !== draft.id));
+      fetchDraftedWebsites();
     } catch (err) {
       console.error('Draft send failed:', err);
       alert(`Failed to send draft email: ${err.response?.data?.detail || err.message}`);
@@ -1126,6 +1157,7 @@ function App() {
     try {
       await axios.delete(`${API_BASE}/api/drafts/${draftId}`);
       setDrafts(drafts.filter(d => d.id !== draftId));
+      fetchDraftedWebsites();
     } catch (err) {
       console.error('Draft delete failed:', err);
       alert(`Failed to delete draft: ${err.response?.data?.detail || err.message}`);
@@ -1443,6 +1475,25 @@ function App() {
                     style={{ marginLeft: 'auto', background: 'none', border: '1px solid #10b981', color: '#059669', borderRadius: '6px', padding: '3px 10px', fontSize: '12px', cursor: 'pointer', fontWeight: 600 }}
                   >
                     View sent email
+                  </button>
+                </div>
+              )}
+
+              {/* Same idea, one step earlier: a draft already exists for this
+                  website (this session or an earlier one) — only shown when
+                  it isn't already covered by the "Already sent" badge above. */}
+              {lead.auditState !== 'sent' && !sentWebsites[normaliseWebsiteKey(lead.Website)] && draftedWebsites[normaliseWebsiteKey(lead.Website)] && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 10px', padding: '6px 10px', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '8px', fontSize: '12px' }}>
+                  <FileEdit size={14} color="#f59e0b" />
+                  <span style={{ color: '#b45309', fontWeight: 600 }}>
+                    Draft already made {draftedWebsites[normaliseWebsiteKey(lead.Website)].timestamp}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => goToDraft(draftedWebsites[normaliseWebsiteKey(lead.Website)].id)}
+                    style={{ marginLeft: 'auto', background: 'none', border: '1px solid #f59e0b', color: '#b45309', borderRadius: '6px', padding: '3px 10px', fontSize: '12px', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    View draft
                   </button>
                 </div>
               )}
@@ -1833,7 +1884,7 @@ function App() {
               {group.items.map((draft) => {
                 const i = drafts.findIndex(d => d.id === draft.id);
                 return (
-            <motion.div key={draft.id} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="lead-card glass">
+            <motion.div key={draft.id} id={`draft-${draft.id}`} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }} className="lead-card glass" style={draftScrollTarget === draft.id ? { boxShadow: '0 0 0 2px rgba(245,158,11,0.6)' } : undefined}>
               <div className="lead-header">
                 <h3>{draft.company}</h3>
                 <span className="badge" style={{background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.4)'}}>Draft</span>
