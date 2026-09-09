@@ -1246,6 +1246,18 @@ async def get_sent_websites(_auth: None = Depends(require_api_key), _rl: None = 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/drafted-websites")
+async def get_drafted_websites(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
+    """
+    Every website with a draft currently sitting in email_drafts, keyed the
+    same way as /api/sent-websites — see db.get_drafted_websites_summary().
+    """
+    try:
+        summary = await asyncio.to_thread(db.get_drafted_websites_summary)
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/drafts")
 async def get_drafts(_auth: None = Depends(require_api_key), _rl: None = Depends(rate_limit(120, 60))):
     try:
