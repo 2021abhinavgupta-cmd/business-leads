@@ -1641,6 +1641,19 @@ function App() {
                   {lead.auditProgress ? (
                     <>
                       <p style={{ margin: 0 }}>{lead.auditProgress.stage}</p>
+                      {/* Set only while this audit is genuinely waiting on
+                          the shared global Playwright slot (analyzer/visuals.py's
+                          semaphore, capacity 1) for another audit/search to
+                          finish — distinguishes "actually stuck queued behind
+                          someone else" from real in-progress work, which used
+                          to look identical (reported live, two leads both
+                          showing "Loading site" while only one was really
+                          running). */}
+                      {lead.auditProgress.note && (
+                        <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#b45309', fontWeight: 600 }}>
+                          {lead.auditProgress.note}
+                        </p>
+                      )}
                       <div style={{ width: '100%', maxWidth: '320px' }}>
                         <div style={{ height: '6px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden' }}>
                           <div style={{

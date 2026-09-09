@@ -690,7 +690,12 @@ def _find_duplicate_page_labels(pages_checked: list[dict], key: str) -> list[str
 _AUDIT_SCREENSHOT_RETRIES = 3
 
 
-async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
+async def generate_audit_screenshot(
+    url: str,
+    company_name: str,
+    on_queued: "Callable[[], None] | None" = None,
+    on_started: "Callable[[], None] | None" = None,
+) -> tuple[str | None, str | None, dict | None]:
     """
     Thin retry wrapper around _generate_audit_screenshot_once. A single
     failure anywhere in that function's multi-page crawl (homepage + extra
@@ -709,7 +714,7 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
     """
     last_result = (None, None, None)
     for attempt in range(_AUDIT_SCREENSHOT_RETRIES):
-        last_result = await _generate_audit_screenshot_once(url, company_name)
+        last_result = await _generate_audit_screenshot_once(url, company_name, on_queued=on_queued, on_started=on_started)
         if last_result[1] is not None:  # html_content present = success
             return last_result
         if attempt < _AUDIT_SCREENSHOT_RETRIES - 1:
@@ -718,7 +723,12 @@ async def generate_audit_screenshot(url: str, company_name: str) -> tuple[str | 
     return last_result
 
 
-async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[str | None, str | None, dict | None]:
+async def _generate_audit_screenshot_once(
+    url: str,
+    company_name: str,
+    on_queued: "Callable[[], None] | None" = None,
+    on_started: "Callable[[], None] | None" = None,
+) -> tuple[str | None, str | None, dict | None]:
     """
     Takes a desktop screenshot of the URL, runs accessibility + broken link
     audits across the homepage plus up to _MAX_EXTRA_PAGES internal pages
@@ -752,7 +762,21 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
         url = f"https://{url}"
 
     try:
+        # Only one audit/search can hold this semaphore at a time (see its
+        # own comment above) — a second caller arriving while it's held
+        # doesn't fail or hang mysteriously, it just queues silently behind
+        # whichever one got there first. That queueing used to be invisible
+        # to the operator: two leads both showed "Loading site & capturing
+        # screenshots" at once, one of them actually stuck doing nothing.
+        # `on_queued` (optional, only app.py's dashboard path passes it) lets
+        # the caller report an honest "waiting for another audit" state for
+        # as long as the wait actually lasts, rather than a progress step
+        # that silently means two different things depending on luck.
+        if on_queued is not None and _PLAYWRIGHT_SEMAPHORE.locked():
+            on_queued()
         async with _PLAYWRIGHT_SEMAPHORE:
+            if on_started is not None:
+                on_started()
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
 
