@@ -42,6 +42,7 @@ import re
 import pytest
 from playwright.async_api import async_playwright
 
+import config
 from analyzer import visuals
 from analyzer.ai_audit import AIAuditor
 from analyzer.flaws import Flaw
@@ -858,7 +859,129 @@ def test_the_capture_happens_inside_the_per_page_audit():
     signature = source.split("async def _audit_current_page(")[1].split(")")[0]
     assert "screenshot_bytes" not in signature
     body = source.split("async def _audit_current_page")[1].split("def _consolidate_by_key")[0]
-    order = [body.index(marker) for marker in (
-        "_highlight_element(page, candidates)", "_capture(page)", "_remove_highlight(page)",
-    )]
-    assert order == sorted(order)
+    # rindex (not index) for the last two markers, since 2026-09-09's
+    # vision-gated borderline-candidate fallback (see
+    # _vision_confirms_visible_defect) legitimately adds an EARLIER
+    # _remove_highlight(page) call — cleaning up a borderline highlight
+    # vision rejected, before the real capture ever happens. What still
+    # must hold, and is what this asserts: the safe-candidate highlight
+    # happens before the real page.screenshot(), which happens before the
+    # function's final, unconditional cleanup call.
+    first_highlight = body.index("_highlight_element(page, candidates)")
+    last_capture = body.rindex("_capture(page)")
+    last_remove = body.rindex("_remove_highlight(page)")
+    assert first_highlight < last_capture < last_remove
+
+
+# ---------------------------------------------------------------------------
+# Vision-gated borderline candidates (added 2026-09-09) — see
+# _vision_confirms_visible_defect's own docstring for why this is safe to
+# add on top of the 2026-08-31 "vision no longer freely critiques" fix.
+# ---------------------------------------------------------------------------
+
+def test_vision_gate_returns_false_with_no_provider_configured(monkeypatch):
+    """
+    Fails closed to the existing "no candidates" outcome, never to a raise —
+    same silent-degradation contract as every AI call in this codebase.
+    """
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("must not attempt any provider call with none configured")
+
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", _boom)
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "some flaw") is False
+
+
+def test_vision_gate_true_on_a_clean_confirmation(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", lambda p, img: '{"visible": true}')
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "low contrast text") is True
+
+
+def test_vision_gate_false_on_an_explicit_rejection(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", lambda p, img: '{"visible": false}')
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "low contrast text") is False
+
+
+def test_vision_gate_false_when_the_provider_returns_nothing(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", lambda p, img: None)
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "low contrast text") is False
+
+
+@pytest.mark.parametrize("raw", [
+    "not json at all",
+    "```json\n{not valid}\n```",
+    '{"something_else": true}',
+    "",
+])
+def test_vision_gate_false_on_unusable_responses(monkeypatch, raw):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", lambda p, img: raw)
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "low contrast text") is False
+
+
+def test_vision_gate_strips_markdown_fences_around_valid_json(monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", lambda p, img: '```json\n{"visible": true}\n```')
+    assert visuals._vision_confirms_visible_defect(b"fake-bytes", "low contrast text") is True
+
+
+def test_vision_gate_prompt_includes_the_axe_description_and_asks_a_narrow_question(monkeypatch):
+    """
+    The prompt must cite the SPECIFIC flaw axe found (so the model judges
+    that, not an open-ended "find something wrong") and must not ask the
+    model to describe or invent anything of its own.
+    """
+    captured = {}
+
+    def _capture_call(prompt, image_bytes):
+        captured["prompt"] = prompt
+        return '{"visible": true}'
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(visuals, "_call_vision_gate_raw", _capture_call)
+    visuals._vision_confirms_visible_defect(b"fake-bytes", "Elements must meet minimum color contrast ratio thresholds")
+    assert "Elements must meet minimum color contrast ratio thresholds" in captured["prompt"]
+    assert "true or false" in captured["prompt"]
+
+
+def test_vision_gate_raw_tries_gemini_then_claude_then_openai_in_order(monkeypatch):
+    """Same fixed preference order as AIAuditor._call_vision_judge."""
+    calls = []
+
+    class _FakeGeminiModel:
+        def __init__(self, *a, **k):
+            pass
+        def generate_content(self, *_a, **_k):
+            calls.append("gemini")
+            raise RuntimeError("gemini down")
+
+    class _FakeAnthropicMessage:
+        content = [type("C", (), {"text": '{"visible": true}'})()]
+
+    class _FakeAnthropicClient:
+        def __init__(self, *a, **k):
+            pass
+        class messages:
+            @staticmethod
+            def create(*_a, **_k):
+                calls.append("anthropic")
+                return _FakeAnthropicMessage()
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+
+    import google.generativeai as genai
+    monkeypatch.setattr(genai, "GenerativeModel", _FakeGeminiModel)
+    import anthropic
+    monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropicClient)
+
+    raw = visuals._call_vision_gate_raw("prompt", b"fake-bytes")
+    assert calls == ["gemini", "anthropic"]
+    assert raw == '{"visible": true}'
