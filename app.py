@@ -575,6 +575,12 @@ async def audit_progress(
 _AUDIT_ASYNC_RESULT_TTL = 900
 _audit_async_results: dict[str, tuple[float, dict]] = {}
 
+# The live asyncio.Task behind each in-flight async_mode audit, keyed the
+# same way as _audit_progress/_audit_async_results — lets /api/audit/cancel
+# find and cancel one. Entries remove themselves once the task finishes
+# (success, error, or cancellation), so this never grows unbounded.
+_audit_tasks: dict[str, asyncio.Task] = {}
+
 
 @app.post("/api/audit")
 async def audit_lead(
@@ -596,6 +602,16 @@ async def audit_lead(
             local_background_tasks = BackgroundTasks()
             try:
                 result = await _audit_lead_impl(req, local_background_tasks)
+            except asyncio.CancelledError:
+                # Cancelled via /api/audit/cancel — _audit_lead_impl's own
+                # `finally` already cleared _audit_progress for this key, so
+                # the frontend's poll loop is already seeing "not running";
+                # this just gives it a clean result to stop on instead of
+                # polling /api/audit/result forever with nothing ever
+                # written. Deliberately swallowed, not re-raised: the task
+                # is done either way, and we still want the bookkeeping
+                # below (TTL sweep, storing the result) to run.
+                result = {"cancelled": True}
             except HTTPException as e:
                 result = {"error": e.detail}
             except Exception as e:
@@ -607,7 +623,9 @@ async def audit_lead(
                     _audit_async_results.pop(k, None)
             _audit_async_results[key] = (now, result)
 
-        asyncio.create_task(_run_and_store())
+        task = asyncio.create_task(_run_and_store())
+        _audit_tasks[key] = task
+        task.add_done_callback(lambda t, k=key: _audit_tasks.pop(k, None))
         return {"started": True}
 
     return await _audit_lead_impl(req, background_tasks)
@@ -629,6 +647,34 @@ async def audit_result(
         return {"ready": False}
     _, result = entry
     return {"ready": True, **result}
+
+
+@app.post("/api/audit/cancel")
+async def cancel_audit(
+    website: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(30, 60)),
+):
+    """
+    Cancel an in-flight async_mode audit for *website*, requested as
+    "add an option of cancelling the ongoing audit". task.cancel() raises
+    CancelledError at whatever await point the audit is currently sitting
+    at; _audit_lead_impl's own `finally` clears _audit_progress either way,
+    and _run_and_store's CancelledError handler stores a clean
+    {"cancelled": True} result so the frontend's existing poll loop resolves
+    instead of waiting on a result that would otherwise never arrive.
+
+    Note: if the audit is mid-way through a Playwright call
+    (asyncio.to_thread), that one call keeps running in its worker thread to
+    completion — cancellation stops the app from waiting on/using it, it
+    doesn't kill the thread. Same limitation asyncio.to_thread cancellation
+    always has; not worth working around for a "never mind, stop" button.
+    """
+    task = _audit_tasks.get(_audit_cache_key(website))
+    if not task or task.done():
+        return {"cancelled": False}
+    task.cancel()
+    return {"cancelled": True}
 
 
 async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks) -> dict:
