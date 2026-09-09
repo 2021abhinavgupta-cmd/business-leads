@@ -1,5 +1,8 @@
+import base64
 import hashlib
+import json
 import os
+import re
 import asyncio
 import xml.etree.ElementTree as ET
 from io import BytesIO
@@ -9,6 +12,8 @@ import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image
+
+import config
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
@@ -549,7 +554,7 @@ async def _audit_current_page(page, context, label: str) -> dict:
     what allowed the image and the red box to describe different moments in
     the page's life — see _highlight_element.
     """
-    violations, candidates = await _run_axe_audit(page)
+    violations, candidates, borderline_candidates = await _run_axe_audit(page)
     # Stretched-image candidates run before the highlight so a blurry photo
     # can compete for the box alongside axe's visually-apparent violations —
     # appended after axe's, so a real accessibility issue still wins ties.
@@ -561,8 +566,40 @@ async def _audit_current_page(page, context, label: str) -> dict:
     # in between, so both images show the element axe-core actually objected
     # to, and the checks below still measure the unmodified page.
     visual_flaw = await _highlight_element(page, candidates)
+    closeup_bytes = None
+
+    # The safe allowlist produced nothing at all for this page — today's
+    # existing outcome here is simply no box. Before settling for that,
+    # give one borderline (real axe rule, real element, just not on the
+    # hardcoded "definitely visible" list) a chance: highlight it with the
+    # exact same measure-and-draw machinery above (so it's still subject to
+    # every viewport/size/visibility guard _highlight_element already
+    # enforces), then ask a vision model one narrow yes/no question about
+    # the resulting crop. A "no", an error, or no vision provider configured
+    # all fall through to the untouched original behaviour — this can only
+    # ever ADD a vision-confirmed box where there was none, never replace or
+    # downgrade an already-qualifying safe candidate. See
+    # _vision_confirms_visible_defect's docstring for why this doesn't
+    # reopen the free-form-vision-critique hallucination risk this file's
+    # own history (CLAUDE.md, 2026-08-31) already fixed once.
+    if visual_flaw is None and borderline_candidates:
+        candidate_flaw = await _highlight_element(page, borderline_candidates)
+        if candidate_flaw:
+            candidate_crop = await _capture_closeup(page, candidate_flaw)
+            confirmed = False
+            if candidate_crop:
+                confirmed = await asyncio.to_thread(
+                    _vision_confirms_visible_defect, candidate_crop, candidate_flaw["description"]
+                )
+            if confirmed:
+                visual_flaw = candidate_flaw
+                closeup_bytes = candidate_crop  # already the right crop — page hasn't changed since
+            else:
+                await _remove_highlight(page)
+
     screenshot_bytes = await _capture(page)
-    closeup_bytes = await _capture_closeup(page, visual_flaw) if visual_flaw else None
+    if visual_flaw and closeup_bytes is None:
+        closeup_bytes = await _capture_closeup(page, visual_flaw)
     await _remove_highlight(page)
 
     broken_links, links_checked = await _check_broken_assets(page, context)
@@ -1020,7 +1057,11 @@ async def _generate_audit_screenshot_once(url: str, company_name: str) -> tuple[
 
                     await _suppress_overlays(mobile_page)
 
-                    mobile_violations, mobile_candidates = await _run_axe_audit(mobile_page)
+                    # Vision-gated borderline fallback (see _audit_current_page)
+                    # is desktop-only, same reasoning as the close-up crop below
+                    # not existing for mobile — so the third return value is
+                    # discarded here rather than threaded through.
+                    mobile_violations, mobile_candidates, _mobile_borderline = await _run_axe_audit(mobile_page)
                     for v in mobile_violations:
                         v["page"] = "mobile view"
 
@@ -1236,15 +1277,146 @@ _VISUALLY_APPARENT_AXE_RULES = frozenset({
 # `violations` list (accessibility flaw text/counts) is unaffected.
 
 
-async def _run_axe_audit(page) -> tuple[list, list[dict]]:
+def _call_vision_gate_raw(prompt: str, image_bytes: bytes) -> str | None:
+    """
+    Fixed-preference-order vision call (Gemini -> Claude -> GPT-4o-mini),
+    same contract as AIAuditor._call_vision_judge in ai_audit.py — kept as
+    its own function purely so _vision_confirms_visible_defect's config-
+    gating and JSON-parsing logic can be unit-tested by monkeypatching this
+    one boundary, without mocking three different SDKs' internals. Returns
+    the first provider's raw text, or None if all configured providers
+    failed or none is configured.
+    """
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    if config.GEMINI_API_KEY:
+        try:
+            import google.generativeai as genai
+            model = genai.GenerativeModel(
+                "gemini-3.5-flash",
+                generation_config=genai.types.GenerationConfig(
+                    response_mime_type="application/json", temperature=0.0,
+                ),
+            )
+            return model.generate_content([
+                {"mime_type": "image/jpeg", "data": image_bytes},
+                prompt,
+            ]).text
+        except Exception as e:
+            print(f"[Visuals] Vision gate (Gemini) failed: {e}")
+
+    if config.ANTHROPIC_API_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=64,
+                temperature=0.0,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64_image}},
+                    {"type": "text", "text": prompt},
+                ]}],
+            )
+            return message.content[0].text
+        except Exception as e:
+            print(f"[Visuals] Vision gate (Claude) failed: {e}")
+
+    if config.OPENAI_API_KEY:
+        try:
+            import openai
+            client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                ]}],
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"[Visuals] Vision gate (GPT-4o-mini) failed: {e}")
+
+    return None
+
+
+def _vision_confirms_visible_defect(image_bytes: bytes, axe_description: str) -> bool:
+    """
+    Narrow yes/no vision gate for ONE borderline axe-core violation — a real
+    rule on a real, already-located element, just not one on the
+    _VISUALLY_APPARENT_AXE_RULES allowlist above. Only ever called from
+    _audit_current_page when that allowlist produced zero candidates at all,
+    so the choice this function makes is "no box" (today's existing
+    behaviour) vs "a vision-confirmed box" — it can never take away an
+    already-qualifying safe candidate.
+
+    Requested 2026-09-09: "cant that api of claude go on the website himself
+    and find the issue like the actual claude does live" — i.e. use AI
+    vision as the actual issue-finder, not just the fixed rule allowlist.
+    Deliberately NOT built as free-form "look at this screenshot and tell me
+    what's wrong" — this file already tried that shape once and it
+    hallucinated real, false criticisms on real live leads (see CLAUDE.md's
+    2026-08-31 "Visual claims were generated freely and judged afterwards"
+    entry, and the whole reason `_verify_visual_claims` exists). This
+    function's only degree of freedom is a boolean: the location was already
+    measured by the browser (not guessed by the model), and the description
+    that ships in the email/box label is always the CALLER's axe_description
+    — this function's own reasoning about WHY never reaches the copy. That
+    is what makes broadening past the hardcoded allowlist safe rather than a
+    regression of the fix above.
+
+    Plain synchronous function (blocking AI SDK calls, same shape as every
+    method on AIAuditor) — callers must wrap it in asyncio.to_thread, same
+    convention as every other blocking call in an async route in this
+    codebase. Same silent-degradation contract as every AI call here: never
+    raises, degrades to False (the existing "no candidates" outcome) on any
+    error or missing provider.
+    """
+    if not (config.GEMINI_API_KEY or config.ANTHROPIC_API_KEY or config.OPENAI_API_KEY):
+        return False
+
+    prompt = (
+        "An automated accessibility scanner flagged the element shown in this cropped "
+        f"screenshot for: \"{axe_description}\". Judge ONLY whether this specific element "
+        "has a problem a sighted person would actually notice just by looking at it — not "
+        "whether the underlying code/markup issue is real (assume it is), and not a matter "
+        "of taste or style. If nothing about it looks visibly wrong to an ordinary viewer, "
+        "say so.\n"
+        'Return ONLY valid JSON: {"visible": true or false}. No markdown, no explanation.'
+    )
+    raw = _call_vision_gate_raw(prompt, image_bytes)
+    if not raw:
+        return False
+    try:
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start == -1 or end == -1:
+            return False
+        result = json.loads(cleaned[start:end + 1])
+        return result.get("visible") is True
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
+async def _run_axe_audit(page) -> tuple[list, list[dict], list[dict]]:
     """
     Run the axe-core accessibility engine on the current page.
 
-    Returns (violations, highlight_candidates). The candidates are selectors
-    ranked most-severe-first, filtered to _VISUALLY_APPARENT_AXE_RULES so the
-    box only ever lands on something a sighted person can actually notice;
-    _highlight_element picks and draws one. This function no longer resolves
-    coordinates itself — see the comment on the candidate list below.
+    Returns (violations, highlight_candidates, borderline_candidates). The
+    highlight_candidates are selectors ranked most-severe-first, filtered to
+    _VISUALLY_APPARENT_AXE_RULES so the box only ever lands on something a
+    sighted person can actually notice; _highlight_element picks and draws
+    one. This function no longer resolves coordinates itself — see the
+    comment on the candidate list below.
+
+    borderline_candidates are every OTHER violation — real axe-core rules on
+    real elements, just not ones this file has hardcoded as "definitely has
+    a visible symptom". _audit_current_page only reaches for these when the
+    safe list above produced nothing at all, and only after a vision model
+    confirms the specific element actually looks wrong — see
+    _vision_confirms_visible_defect.
     """
     try:
         from axe_playwright_python.async_playwright import Axe
@@ -1277,10 +1449,12 @@ async def _run_axe_audit(page) -> tuple[list, list[dict]]:
         # away from the picture on any page with a carousel or a late-settling
         # layout — see _highlight_element's docstring.
         candidates = []
+        borderline_candidates = []
 
-        def _add_candidates(rule_list):
+        def _add_candidates(rule_list, target_list, allowlist_only):
             for v in rule_list:
-                if v["id"] not in _VISUALLY_APPARENT_AXE_RULES:
+                in_allowlist = v["id"] in _VISUALLY_APPARENT_AXE_RULES
+                if allowlist_only != in_allowlist:
                     continue
                 for node in v.get("nodes", []):
                     target_selectors = node.get("target", [])
@@ -1297,13 +1471,13 @@ async def _run_axe_audit(page) -> tuple[list, list[dict]]:
                     # <body> is the same as boxing nothing.
                     if selector.strip().lower() in ("html", "body", "head"):
                         continue
-                    candidates.append({
+                    target_list.append({
                         "selector": selector,
                         "description": v.get("help", ""),
                         "impact": v.get("impact", "minor"),
                     })
 
-        _add_candidates(violations)
+        _add_candidates(violations, candidates, allowlist_only=True)
 
         # color-contrast/-enhanced routinely lands in axe-core's "incomplete"
         # bucket instead of "violations" — live-verified here: a plain
@@ -1324,24 +1498,38 @@ async def _run_axe_audit(page) -> tuple[list, list[dict]]:
             for v in results.response.get("incomplete", [])
             if v.get("id") in ("color-contrast", "color-contrast-enhanced")
         ]
-        _add_candidates(incomplete_contrast)
+        _add_candidates(incomplete_contrast, candidates, allowlist_only=True)
+
+        # Everything else axe found — a real rule, a real element, just not
+        # one this file has hardcoded as "definitely has a visible symptom".
+        # Only ever consulted when `candidates` above comes up completely
+        # empty (see _audit_current_page), and only after a vision model
+        # confirms the specific highlighted element actually looks wrong —
+        # never used to widen what gets boxed on a page that already has a
+        # safe candidate.
+        _add_candidates(violations, borderline_candidates, allowlist_only=False)
 
         # Violations are already sorted most-severe-first above, so this list
         # inherits that order. Capped because it is serialised into a single
         # evaluate() payload and the browser stops at the first one that
         # qualifies anyway.
         candidates = candidates[:40]
+        # Only the first candidate _highlight_element manages to actually
+        # qualify (in viewport, big enough, visible) ever costs a vision
+        # call — see _audit_current_page — so this cap is generous headroom
+        # for viewport/size rejects, not a cost lever in itself.
+        borderline_candidates = borderline_candidates[:10]
 
         # Clean up nodes array to save memory
         for v in violations:
             v.pop("nodes", None)
 
         print(f"[Axe] Found {len(violations)} accessibility violations.")
-        return violations[:10], candidates
+        return violations[:10], candidates, borderline_candidates
 
     except Exception as e:
         print(f"[Axe] Accessibility audit failed (non-critical): {e}")
-        return [], []
+        return [], [], []
 
 
 async def _check_font_consistency(page) -> list:

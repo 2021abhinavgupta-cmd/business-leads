@@ -33,8 +33,10 @@ import pytest
 from PIL import Image
 from playwright.async_api import async_playwright
 
+from analyzer import visuals
 from analyzer.visuals import (
     _MIN_HIGHLIGHT_PX,
+    _audit_current_page,
     _capture,
     _check_stretched_images,
     _highlight_element,
@@ -59,7 +61,7 @@ async def _run_against_html(html: str, settle_ms: int = 0):
         if settle_ms:
             await page.wait_for_timeout(settle_ms)
         try:
-            violations, candidates = await _run_axe_audit(page)
+            violations, candidates, _borderline = await _run_axe_audit(page)
             highlight = await _highlight_element(page, candidates)
             image = await _capture(page)
             await _remove_highlight(page)
@@ -280,7 +282,7 @@ async def test_the_highlight_is_gone_after_removal():
         page = await browser.new_page(viewport=VIEWPORT)
         await page.set_content(html)
         try:
-            _violations, candidates = await _run_axe_audit(page)
+            _violations, candidates, _borderline = await _run_axe_audit(page)
             assert await _highlight_element(page, candidates) is not None
             await _remove_highlight(page)
             after = await _capture(page)
@@ -406,7 +408,7 @@ async def test_a_stretched_image_becomes_a_highlight_candidate():
         await page.set_content(html)
         try:
             await page.wait_for_timeout(200)  # let the data URI decode
-            violations, axe_candidates = await _run_axe_audit(page)
+            violations, axe_candidates, _borderline = await _run_axe_audit(page)
             _count, stretched_candidates = await _check_stretched_images(page)
             assert stretched_candidates, "expected the stretched <img> to be a candidate"
             highlight = await _highlight_element(page, axe_candidates + stretched_candidates)
@@ -417,3 +419,120 @@ async def test_a_stretched_image_becomes_a_highlight_candidate():
 
     assert highlight is not None
     assert _marker_pixels(image) is not None
+
+
+# ---------------------------------------------------------------------------
+# Vision-gated borderline candidates (added 2026-09-09) — requested:
+# "cant that api of claude go on the website himself and find the issue
+# like the actual claude does live". See _vision_confirms_visible_defect's
+# own docstring in analyzer/visuals.py for why this widens coverage past
+# _VISUALLY_APPARENT_AXE_RULES without reopening the free-form-vision
+# hallucination risk this file's own history already fixed once.
+# ---------------------------------------------------------------------------
+
+_NO_VISIBLE_SYMPTOM_HTML = """
+<html><body style="margin:0">
+    <div style="height: 100px;"></div>
+    <button style="width: 80px; height: 40px;"></button>
+</body></html>
+"""
+
+
+async def test_run_axe_audit_separates_borderline_from_allowlisted_candidates():
+    """
+    button-name (no visible symptom, see _VISUALLY_APPARENT_AXE_RULES) must
+    land in borderline_candidates, never in the safe candidates list.
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=VIEWPORT)
+        await page.set_content(_NO_VISIBLE_SYMPTOM_HTML)
+        try:
+            violations, candidates, borderline = await _run_axe_audit(page)
+        finally:
+            await browser.close()
+
+    assert any(v["id"] == "button-name" for v in violations)
+    assert candidates == [], "button-name has no visible symptom and must not be a safe candidate"
+    assert any(c["description"] for c in borderline), \
+        "expected the button-name violation to appear as a borderline candidate"
+
+
+async def test_borderline_candidate_gets_boxed_when_vision_confirms(monkeypatch):
+    """
+    End to end through _audit_current_page: with only a borderline violation
+    present and the vision gate monkeypatched to confirm it, the page ends
+    up with a real box on that exact element, described with axe's own text
+    — never anything the vision gate itself said.
+    """
+    monkeypatch.setattr(visuals, "_vision_confirms_visible_defect", lambda img, desc: True)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=VIEWPORT)
+        await page.set_content(_NO_VISIBLE_SYMPTOM_HTML)
+        try:
+            result = await _audit_current_page(page, page.context, "/")
+        finally:
+            await browser.close()
+
+    flaw = result["visual_flaw"]
+    assert flaw is not None
+    assert flaw["selector"] == "button"
+    assert flaw["description"]  # axe's own `help` text, not invented
+    assert _marker_pixels(result["screenshot_bytes"]) is not None
+    assert result["closeup_bytes"] is not None
+
+
+async def test_borderline_candidate_is_not_boxed_when_vision_rejects(monkeypatch):
+    """
+    A "no" from the vision gate must leave the page exactly as if the
+    borderline path had never run — no box, no claim, same as today's
+    existing "nothing qualified" outcome.
+    """
+    monkeypatch.setattr(visuals, "_vision_confirms_visible_defect", lambda img, desc: False)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=VIEWPORT)
+        await page.set_content(_NO_VISIBLE_SYMPTOM_HTML)
+        try:
+            result = await _audit_current_page(page, page.context, "/")
+        finally:
+            await browser.close()
+
+    assert result["visual_flaw"] is None
+    assert _marker_pixels(result["screenshot_bytes"]) is None
+    assert result["closeup_bytes"] is None
+
+
+async def test_a_safe_candidate_short_circuits_the_vision_gate_entirely(monkeypatch):
+    """
+    Cost/risk control: the vision gate must only ever be consulted when the
+    safe allowlist produced nothing at all. A page with a real, visually
+    apparent violation (color-contrast) must never trigger it, even though
+    a borderline (button-name) violation is also present on the same page.
+    """
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("vision gate must not run when a safe candidate exists")
+
+    monkeypatch.setattr(visuals, "_vision_confirms_visible_defect", _boom)
+
+    html = f"""
+    <html><body style="margin:0">
+        <div style="height: 100px;"></div>
+        <button style="width: 60px; height: 30px;"></button>
+        <button style="width: 120px; height: 60px; {_LOW_CONTRAST_STYLE}">Book Now</button>
+    </body></html>
+    """
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(viewport=VIEWPORT)
+        await page.set_content(html)
+        try:
+            result = await _audit_current_page(page, page.context, "/")
+        finally:
+            await browser.close()
+
+    assert result["visual_flaw"] is not None
+    assert result["visual_flaw"]["width"] >= 100  # the contrast button, not button-name's
