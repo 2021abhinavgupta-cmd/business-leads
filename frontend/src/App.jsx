@@ -1558,9 +1558,12 @@ function App() {
               )}
 
               {/* Same idea, one step earlier: a draft already exists for this
-                  website (this session or an earlier one) — only shown when
-                  it isn't already covered by the "Already sent" badge above. */}
-              {lead.auditState !== 'sent' && !sentWebsites[normaliseWebsiteKey(lead.Website)] && draftedWebsites[normaliseWebsiteKey(lead.Website)] && (
+                  website from a PRIOR session/run — only shown when it isn't
+                  already covered by the "Already sent" badge above, and not
+                  once this session's own audit has finished ('done'), since
+                  that's the very draft the badge would be pointing at and
+                  the full draft is already showing on this same card. */}
+              {lead.auditState !== 'sent' && lead.auditState !== 'done' && !sentWebsites[normaliseWebsiteKey(lead.Website)] && draftedWebsites[normaliseWebsiteKey(lead.Website)] && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 10px', padding: '6px 10px', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '8px', fontSize: '12px' }}>
                   <FileEdit size={14} color="#f59e0b" />
                   <span style={{ color: '#b45309', fontWeight: 600 }}>
