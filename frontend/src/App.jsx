@@ -1193,13 +1193,20 @@ function App() {
           <button type="button" onClick={() => setShowManualEntry(!showManualEntry)} style={{ background: showManualEntry ? '#fee2e2' : '#f8fafc', border: showManualEntry ? '1px solid #f87171' : '1px solid #cbd5e1', color: showManualEntry ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showManualEntry ? 'Cancel' : '+ Specific Lead'}
           </button>
-          <button type="button" onClick={() => setShowMncSearch(!showMncSearch)} style={{ background: showMncSearch ? '#fee2e2' : '#f8fafc', border: showMncSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMncSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+          {/* Opening a panel seeds its City/Niche field from whatever's
+              already typed in the main form above — live-reported
+              2026-09-09: typing a niche up top, then opening one of these
+              panels, looked like "nothing happened" because each panel has
+              its own separate fields that started empty regardless of what
+              was already typed. Only seeds an EMPTY field, never overwrites
+              something the panel itself already holds. */}
+          <button type="button" onClick={() => { if (!showMncSearch && !mncCity) setMncCity(city); setShowMncSearch(!showMncSearch); }} style={{ background: showMncSearch ? '#fee2e2' : '#f8fafc', border: showMncSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMncSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showMncSearch ? 'Cancel' : 'Search MNCs'}
           </button>
-          <button type="button" onClick={() => setShowLocalSearch(!showLocalSearch)} style={{ background: showLocalSearch ? '#fee2e2' : '#f8fafc', border: showLocalSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showLocalSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+          <button type="button" onClick={() => { if (!showLocalSearch && !localCity) setLocalCity(city); setShowLocalSearch(!showLocalSearch); }} style={{ background: showLocalSearch ? '#fee2e2' : '#f8fafc', border: showLocalSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showLocalSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showLocalSearch ? 'Cancel' : 'Search Local Businesses'}
           </button>
-          <button type="button" onClick={() => setShowMultiCitySearch(!showMultiCitySearch)} style={{ background: showMultiCitySearch ? '#fee2e2' : '#f8fafc', border: showMultiCitySearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMultiCitySearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+          <button type="button" onClick={() => { if (!showMultiCitySearch && !multiCityNiche) setMultiCityNiche(niche); setShowMultiCitySearch(!showMultiCitySearch); }} style={{ background: showMultiCitySearch ? '#fee2e2' : '#f8fafc', border: showMultiCitySearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMultiCitySearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showMultiCitySearch ? 'Cancel' : 'One Niche, Many Cities'}
           </button>
         </div>
