@@ -981,13 +981,36 @@ function App() {
     }
   };
 
-  // Requested as "add an option of cancelling the ongoing audit". Resets
-  // the lead's UI state right away rather than waiting for the poll loop's
-  // next tick — see the `control` object handleAudit registers, and
-  // /api/audit/cancel server-side.
+  // Requested as "add an option of cancelling the ongoing audit". Confirms
+  // the backend actually cancelled something BEFORE resetting the lead's
+  // UI state — reported live as "even after cancelling it's still
+  // running": this used to reset the card to 'none' unconditionally, the
+  // instant the button was clicked, regardless of what /api/audit/cancel
+  // actually reported back. If the cancel came back {"cancelled": false}
+  // (the task had already finished, or — the other half of this same
+  // fix, see app.py — a second /api/audit call for this website had
+  // orphaned the one this button meant to stop) or the request itself
+  // failed, the card still went straight back to "Generate AI Audit &
+  // Draft" as if nothing was happening, while the real audit kept running
+  // server-side and could still land a draft moments later with no
+  // warning it had. Now the poll loop (see the `control` object
+  // handleAudit registers) is only stopped once the server confirms it
+  // actually cancelled something.
   const handleCancelAudit = async (index) => {
     const lead = leadsRef.current[index];
     if (!lead.Website) return;
+    try {
+      const res = await axios.post(`${API_BASE}/api/audit/cancel`, null, { params: { website: lead.Website } });
+      if (res.data?.cancelled !== true) {
+        // Nothing was actually stopped server-side — leave this card
+        // polling as normal instead of pretending it's cancelled.
+        return;
+      }
+    } catch (err) {
+      console.error('Cancel audit failed:', err);
+      return;
+    }
+    // Only reached once the server actually confirmed it stopped something.
     const control = auditControlRef.current[lead.Website];
     if (control) control.cancelled = true;
     setLeads(prev => {
@@ -998,11 +1021,6 @@ function App() {
       }
       return updated;
     });
-    try {
-      await axios.post(`${API_BASE}/api/audit/cancel`, null, { params: { website: lead.Website } });
-    } catch (err) {
-      console.error('Cancel audit failed:', err);
-    }
   };
 
   // handleAudit's promise resolves the instant its async_mode POST replies
