@@ -705,7 +705,21 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
         html_content = None
         extra_audit_data = None
         if req.website:
-            image_path, html_content, extra_audit_data = await generate_audit_screenshot(req.website, req.company)
+            # generate_audit_screenshot fires on_queued the instant it sees the
+            # global Playwright semaphore (analyzer/visuals.py) already held by
+            # another audit/search, and on_started once it actually acquires
+            # it — so "Loading site & capturing screenshots" only ever means
+            # real work is happening, and a genuinely queued lead says so
+            # instead of looking identically, silently stuck.
+            image_path, html_content, extra_audit_data = await generate_audit_screenshot(
+                req.website,
+                req.company,
+                on_queued=lambda: _progress_set(
+                    req.website, 0,
+                    note="Queued — waiting for another audit/search to finish (only one can run at a time)",
+                ),
+                on_started=lambda: _progress_set(req.website, 0),
+            )
 
             # Playwright couldn't render the page after every retry.
             # Originally this returned an error, but we are bypassing this block
