@@ -154,6 +154,18 @@ function App() {
   const [localSearching, setLocalSearching] = useState(false);
   const [localProgress, setLocalProgress] = useState(null);
   const [localLastResult, setLocalLastResult] = useState('');
+  // "Search One Niche Across Many Cities" — requested after the two above:
+  // "i search a specific place and send the mails based on it" / "i want in
+  // the app only to make it search in more way now" — the direct fix for
+  // "only searches one place at a time." Same auto-search shape again, but
+  // the axis being swept is city, not niche/company name: one required
+  // niche, an optional city list (blank -> CITIES, searchOptions.js).
+  const [showMultiCitySearch, setShowMultiCitySearch] = useState(false);
+  const [multiCityNiche, setMultiCityNiche] = useState('');
+  const [multiCityCities, setMultiCityCities] = useState('');
+  const [multiCitySearching, setMultiCitySearching] = useState(false);
+  const [multiCityProgress, setMultiCityProgress] = useState(null);
+  const [multiCityLastResult, setMultiCityLastResult] = useState('');
   const [loadingNearby, setLoadingNearby] = useState(false);
   const [nearbyRadiusKm, setNearbyRadiusKm] = useState(5);
   const [manualCompany, setManualCompany] = useState('');
@@ -478,6 +490,60 @@ function App() {
         localStopRef.current
           ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
           : `Searched ${nichesToRun.length} niche${nichesToRun.length === 1 ? '' : 's'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
+      );
+    }
+  };
+
+  // One real /api/search lookup for one niche in one city — the same shape
+  // as runOneLocalSearch, just keyed by city in the loop instead of niche.
+  const runOneMultiCitySearch = async (nicheVal, cityVal) => {
+    const res = await axios.post(`${API_BASE}/api/search`, { niche: nicheVal, city: cityVal, limit: parseInt(limit) || 10, async_mode: true });
+    const rawLeads = res.data?.started ? await pollSearchResult(res.data.key) : res.data.leads;
+    const isAgriNiche = /agri|farm|krishi|agro/i.test(nicheVal);
+    const isTextileNiche = /textile|fabric|garment|apparel|yarn|weav|cotton/i.test(nicheVal);
+    const tagged = rawLeads.map(lead => ({
+      ...lead,
+      auditState: 'none',
+      sourceType: 'multi-city-search',
+      ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: nicheVal } : {}),
+      ...(isTextileNiche ? { sector: 'textile', sectorDetail: nicheVal } : {}),
+    }));
+    setLeads(prev => [...tagged, ...prev]);
+    return tagged.length;
+  };
+
+  // Same pacing/stop pattern as handleLocalSearch, swept over cities
+  // instead of niches. Cities box left blank -> the full CITIES list
+  // (searchOptions.js, Maharashtra-wide); typing a custom list overrides it.
+  const multiCityStopRef = useRef(false);
+  const handleMultiCitySearch = async (e) => {
+    e.preventDefault();
+    if (!multiCityNiche.trim()) { alert('Enter a niche first.'); return; }
+    const typed = multiCityCities.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    const citiesToRun = typed.length > 0 ? typed : CITIES;
+    multiCityStopRef.current = false;
+    setMultiCitySearching(true);
+    setMultiCityLastResult('');
+    let totalAdded = 0;
+    try {
+      for (let i = 0; i < citiesToRun.length; i++) {
+        if (multiCityStopRef.current) break;
+        setMultiCityProgress({ current: i + 1, total: citiesToRun.length, label: citiesToRun[i] });
+        try {
+          totalAdded += await runOneMultiCitySearch(multiCityNiche, citiesToRun[i]);
+        } catch (err) {
+          console.error(`Multi-city search failed for ${citiesToRun[i]}:`, err);
+        }
+        setLeadsPage(1);
+        if (i < citiesToRun.length - 1 && !multiCityStopRef.current) await new Promise(r => setTimeout(r, 13000));
+      }
+    } finally {
+      setMultiCitySearching(false);
+      setMultiCityProgress(null);
+      setMultiCityLastResult(
+        multiCityStopRef.current
+          ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
+          : `Searched "${multiCityNiche}" across ${citiesToRun.length} cit${citiesToRun.length === 1 ? 'y' : 'ies'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
       );
     }
   };
@@ -1125,6 +1191,9 @@ function App() {
           <button type="button" onClick={() => setShowLocalSearch(!showLocalSearch)} style={{ background: showLocalSearch ? '#fee2e2' : '#f8fafc', border: showLocalSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showLocalSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showLocalSearch ? 'Cancel' : 'Search Local Businesses'}
           </button>
+          <button type="button" onClick={() => setShowMultiCitySearch(!showMultiCitySearch)} style={{ background: showMultiCitySearch ? '#fee2e2' : '#f8fafc', border: showMultiCitySearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMultiCitySearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            {showMultiCitySearch ? 'Cancel' : 'One Niche, Many Cities'}
+          </button>
         </div>
       </form>
       {loadingSearch && searchProgressNote && (
@@ -1256,6 +1325,48 @@ function App() {
             )}
             {!localSearching && localLastResult && (
               <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{localLastResult}</p>
+            )}
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showMultiCitySearch && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleMultiCitySearch}>
+            <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
+              One search only covers one place. This runs ONE niche across MANY cities automatically — leave Cities blank to
+              sweep the built-in list of {CITIES.length} Maharashtra cities/regions, or type your own list for anywhere else.
+            </div>
+            <div className="input-group" style={{ minWidth: 200 }}>
+              <label>Business Niche</label>
+              <input type="text" list="niche-options" value={multiCityNiche} onChange={e => setMultiCityNiche(e.target.value)} placeholder="e.g. Dentist" />
+            </div>
+            <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
+              <label>Cities <span style={{ fontWeight: 400, color: '#94a3b8' }}>(optional — leave blank for the built-in list)</span></label>
+              <textarea
+                rows={2}
+                value={multiCityCities}
+                onChange={e => setMultiCityCities(e.target.value)}
+                placeholder={"Leave blank for every built-in city, or type your own:\nDelhi\nBengaluru\nChennai"}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontFamily: 'inherit', fontSize: '14px', resize: 'vertical' }}
+              />
+            </div>
+            <button type="submit" className="primary-btn" disabled={multiCitySearching} style={{ background: multiCitySearching ? '#94a3b8' : '#c026d3' }}>
+              {multiCitySearching ? <Loader2 className="spin" /> : <Search />}
+              {multiCitySearching ? 'Searching...' : 'Search Cities'}
+            </button>
+            {multiCitySearching && (
+              <button type="button" onClick={() => { multiCityStopRef.current = true; }} style={{ padding: '0 16px', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', borderRadius: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
+                Stop
+              </button>
+            )}
+            {multiCityProgress && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                {multiCityProgress.current}/{multiCityProgress.total}: {multiCityProgress.label}{searchProgressNote ? ` — ${searchProgressNote}` : ''}
+              </p>
+            )}
+            {!multiCitySearching && multiCityLastResult && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{multiCityLastResult}</p>
             )}
           </motion.form>
         )}
