@@ -598,6 +598,23 @@ async def audit_lead(
         # after the response is sent would never run.
         key = _audit_cache_key(req.website)
 
+        # If an earlier async_mode audit for this exact website is still
+        # in flight, don't silently orphan it under _audit_tasks[key] —
+        # that dict holds only one task per key, so the line below
+        # (_audit_tasks[key] = task) would otherwise overwrite the
+        # reference to the still-running old task with no way left to
+        # reach it. Reported live as "even after cancelling [an audit]
+        # it's still running": /api/audit/cancel can only ever cancel
+        # whichever task is CURRENTLY in _audit_tasks[key], so a second
+        # /api/audit call for the same website (a double-click, a retry
+        # fired while the first was still going, Autopilot racing a
+        # manual click) could leave the real first attempt uncancellable
+        # and free to finish — including saving a real draft — well
+        # after the user believed "the" audit for this lead was stopped.
+        existing_task = _audit_tasks.get(key)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
         async def _run_and_store():
             local_background_tasks = BackgroundTasks()
             try:

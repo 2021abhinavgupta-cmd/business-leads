@@ -559,6 +559,79 @@ def test_cancelling_a_website_with_no_task_returns_false_even_after_normal_compl
     assert res.json() == {"cancelled": False}
 
 
+def test_a_second_audit_for_the_same_website_cancels_the_orphaned_first_one(monkeypatch):
+    """
+    Reported live as "even after cancelling [an audit] it's still running":
+    _audit_tasks holds only one task per website key, so a second /api/audit
+    call for a website that already has one in flight used to silently
+    overwrite the dict entry — orphaning the first task with no way left to
+    reach or cancel it, free to run to completion (including saving a real
+    draft) with the user none the wiser. A second call for the same website
+    must cancel the first task before replacing the dict entry.
+    """
+    import asyncio
+    import time
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    website = "https://second-audit-orphans-first-example.com"
+
+    class _FakeWebData:
+        page_speed_score = 50
+        seo_score = 50
+        instagram_url = None
+        technologies = []
+        has_booking_widget = False
+        signal_status = {}
+
+    async def _slow_audit_website(*a, **k):
+        await asyncio.sleep(2)
+        return _FakeWebData()
+
+    monkeypatch.setattr(app_module.web_scraper, "audit_website", _slow_audit_website)
+    headers = {"X-API-Key": "test-second-audit-orphans-first"}
+    key = app_module._audit_cache_key(website)
+
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True}, headers=headers)
+
+        for _ in range(50):
+            if client.get("/api/audit/progress", params={"website": website}).json().get("running"):
+                break
+            time.sleep(0.02)
+
+        first_task = app_module._audit_tasks.get(key)
+        assert first_task is not None, "first task must be registered before the second call fires"
+
+        # Fires a second async_mode audit for the SAME website while the
+        # first is still sitting inside the slow audit_website call.
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True}, headers=headers)
+        assert app_module._audit_tasks.get(key) is not first_task, "the dict entry must now point at the second task"
+
+        # _run_and_store deliberately catches CancelledError internally
+        # rather than letting it propagate (see cancel_audit's own
+        # docstring), so the first task finishes "normally" either way —
+        # task.cancelled() is never True by this design, cancelled or not.
+        # What actually proves the first task was interrupted rather than
+        # left to run to real completion is the RESULT it stored: reading
+        # it now (well before the second task's own 2s sleep finishes)
+        # can only be the first task's write, since nothing else has had
+        # time to overwrite this key yet.
+        result = None
+        for _ in range(50):
+            r = client.get("/api/audit/result", params={"website": website}).json()
+            if r.get("ready"):
+                result = r
+                break
+            time.sleep(0.02)
+
+        assert result == {"ready": True, "cancelled": True}, (
+            "the orphaned first task must have been interrupted before saving anything, "
+            f"not left to run to a real completion — got {result!r}"
+        )
+
+
 def test_cancel_route_is_wired_and_gated_the_same_as_every_other_get(monkeypatch):
     """Source-inspection check, same convention as test_sent_websites.py's equivalent."""
     import inspect
