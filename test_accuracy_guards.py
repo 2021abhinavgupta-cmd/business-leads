@@ -449,6 +449,127 @@ def test_async_mode_result_is_popped_after_one_read(monkeypatch):
     assert second.json() == {"ready": False}, "a one-shot handoff must not replay the same result forever"
 
 
+# ---------------------------------------------------------------------------
+# /api/audit/cancel (added 2026-09-09, "add an option of cancelling the
+# ongoing audit"). task.cancel() raises CancelledError at whatever await
+# point the audit is sitting at; _run_and_store's handler stores a clean
+# {"cancelled": True} result instead of leaving /api/audit/result with
+# nothing to ever return.
+# ---------------------------------------------------------------------------
+
+def test_cancel_returns_false_when_nothing_is_running(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config, "API_KEY", None)
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+
+    res = client.post("/api/audit/cancel", params={"website": "https://nothing-running-here.com"})
+
+    assert res.status_code == 200, res.text
+    assert res.json() == {"cancelled": False}
+
+
+def test_cancel_stops_an_in_flight_audit_and_result_reports_cancelled(monkeypatch):
+    import asyncio
+    import time
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    website = "https://cancel-mid-audit-example.com"
+
+    class _FakeWebData:
+        page_speed_score = 50
+        seo_score = 50
+        instagram_url = None
+        technologies = []
+        has_booking_widget = False
+        signal_status = {}
+
+    # A real await point with enough of a window for the test to land
+    # /api/audit/cancel while the task is still sitting inside it — the
+    # other mocked pipeline steps return instantly, which would make
+    # cancellation a race the test can't reliably win.
+    async def _slow_audit_website(*a, **k):
+        await asyncio.sleep(2)
+        return _FakeWebData()
+
+    monkeypatch.setattr(app_module.web_scraper, "audit_website", _slow_audit_website)
+
+    # /api/audit's rate-limit bucket is keyed by X-API-Key and shared for the
+    # whole test process (see rate_limit()'s own docstring) — a distinct key
+    # here keeps this test's extra /api/audit call off the "anonymous" bucket
+    # other tests in this file already budget against.
+    headers = {"X-API-Key": "test-cancel-mid-audit"}
+
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True}, headers=headers)
+
+        # Wait until the audit is actually running (past stage 1, inside the
+        # slow audit_website call) before cancelling — cancelling before it
+        # starts would just be testing the "nothing running" path again.
+        for _ in range(50):
+            if client.get("/api/audit/progress", params={"website": website}).json().get("running"):
+                break
+            time.sleep(0.02)
+
+        cancel_res = client.post("/api/audit/cancel", params={"website": website})
+        assert cancel_res.json() == {"cancelled": True}
+
+        result = None
+        for _ in range(100):
+            r = client.get("/api/audit/result", params={"website": website})
+            if r.json().get("ready"):
+                result = r.json()
+                break
+            time.sleep(0.02)
+
+    assert result == {"ready": True, "cancelled": True}
+    # The `finally` in _audit_lead_impl must have cleared progress too —
+    # otherwise the frontend's poll loop would see "still running" forever
+    # despite a result already sitting in /api/audit/result.
+    assert not client.get("/api/audit/progress", params={"website": website}).json()["running"]
+
+
+def test_cancelling_a_website_with_no_task_returns_false_even_after_normal_completion(monkeypatch):
+    """
+    _audit_tasks entries remove themselves via a done-callback once the task
+    finishes — cancelling the same website again afterwards must not find a
+    stale, already-finished task and report a bogus {"cancelled": True}.
+    """
+    import time
+    from fastapi.testclient import TestClient
+    import app as app_module
+
+    _mock_audit_pipeline(monkeypatch, app_module)
+    website = "https://cancel-after-completion-example.com"
+    # See the previous test's comment — own bucket, off the shared one.
+    headers = {"X-API-Key": "test-cancel-after-completion"}
+
+    with TestClient(app_module.app, raise_server_exceptions=False) as client:
+        client.post("/api/audit", json={"company": "Acme", "website": website, "async_mode": True}, headers=headers)
+        for _ in range(50):
+            if client.get("/api/audit/result", params={"website": website}).json().get("ready"):
+                break
+            time.sleep(0.05)
+
+        res = client.post("/api/audit/cancel", params={"website": website})
+
+    assert res.json() == {"cancelled": False}
+
+
+def test_cancel_route_is_wired_and_gated_the_same_as_every_other_get(monkeypatch):
+    """Source-inspection check, same convention as test_sent_websites.py's equivalent."""
+    import inspect
+    import app as app_module
+
+    src = inspect.getsource(app_module.cancel_audit)
+    assert "require_api_key" in src
+    assert "rate_limit" in src
+    assert "_audit_tasks" in src
+
+
 def test_async_mode_with_no_website_falls_through_to_the_sync_path(monkeypatch):
     from fastapi.testclient import TestClient
     import app as app_module

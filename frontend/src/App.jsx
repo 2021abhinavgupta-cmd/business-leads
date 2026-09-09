@@ -233,6 +233,11 @@ function App() {
 
   const isAutopilotRef = useRef(false);
   const leadsRef = useRef([]);
+  // One cancel-control object per website with an audit in flight, so
+  // handleCancelAudit (fired from a button, outside handleAudit's own
+  // closure) can flag that specific poll loop to stop touching the lead —
+  // see handleAudit's pollTimer and handleCancelAudit below.
+  const auditControlRef = useRef({});
 
   // Calculate dynamic exact cost based on backend tracking for local session
   const sessionTotalCost = leads.reduce((acc, lead) => {
@@ -826,13 +831,23 @@ function App() {
     let pollTimer = null;
     let resolved = false;
     let sawRunning = false;
+    // See auditControlRef's declaration — lets handleCancelAudit reach into
+    // this specific poll loop from outside its closure.
+    const control = { cancelled: false };
+    if (lead.Website) auditControlRef.current[lead.Website] = control;
 
     const finishAudit = (payload) => {
       resolved = true;
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (lead.Website) delete auditControlRef.current[lead.Website];
       setLeads(prev => {
         const updatedLeads = [...prev];
-        if (payload.error) {
+        if (payload.cancelled) {
+          // Back to the pre-audit state, not 'failed' — cancelling isn't an
+          // error, and a stuck "Retry Audit" button would be a worse UX
+          // than just letting "Generate AI Audit & Draft" reappear.
+          updatedLeads[index].auditState = 'none';
+        } else if (payload.error) {
           updatedLeads[index].auditState = 'failed';
           updatedLeads[index].auditError = payload.error;
         } else {
@@ -849,12 +864,18 @@ function App() {
         updatedLeads[index].auditProgress = null;
         return updatedLeads;
       });
-      if (!payload.error) fetchDraftedWebsites(); // refresh "Draft already made" for this website right away
+      if (!payload.error && !payload.cancelled) fetchDraftedWebsites(); // refresh "Draft already made" for this website right away
     };
 
     if (lead.Website) {
       pollTimer = setInterval(async () => {
         if (resolved) return;
+        if (control.cancelled) {
+          // handleCancelAudit already reset the lead's UI state directly —
+          // this loop has nothing left to do but stop polling.
+          clearInterval(pollTimer);
+          return;
+        }
         try {
           const p = await axios.get(`${API_BASE}/api/audit/progress`, {
             params: { website: lead.Website }
@@ -957,6 +978,30 @@ function App() {
       } else {
         finishAudit({ error: err.response?.data?.detail || err.message });
       }
+    }
+  };
+
+  // Requested as "add an option of cancelling the ongoing audit". Resets
+  // the lead's UI state right away rather than waiting for the poll loop's
+  // next tick — see the `control` object handleAudit registers, and
+  // /api/audit/cancel server-side.
+  const handleCancelAudit = async (index) => {
+    const lead = leadsRef.current[index];
+    if (!lead.Website) return;
+    const control = auditControlRef.current[lead.Website];
+    if (control) control.cancelled = true;
+    setLeads(prev => {
+      const updated = [...prev];
+      if (updated[index]?.auditState === 'auditing') {
+        updated[index].auditState = 'none';
+        updated[index].auditProgress = null;
+      }
+      return updated;
+    });
+    try {
+      await axios.post(`${API_BASE}/api/audit/cancel`, null, { params: { website: lead.Website } });
+    } catch (err) {
+      console.error('Cancel audit failed:', err);
     }
   };
 
@@ -1578,6 +1623,13 @@ function App() {
                   ) : (
                     <p style={{ margin: 0 }}>Running analysis...</p>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => handleCancelAudit(i)}
+                    style={{ background: 'none', border: '1px solid #cbd5e1', color: '#64748b', borderRadius: '6px', padding: '4px 14px', fontSize: '12px', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    <X size={12} style={{ verticalAlign: '-1px', marginRight: '4px' }} /> Cancel Audit
+                  </button>
                 </div>
               )}
               {lead.auditState === 'failed' && (
