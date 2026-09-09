@@ -1005,13 +1005,46 @@ function App() {
     }
   };
 
+  // handleAudit's promise resolves the instant its async_mode POST replies
+  // {"started": true} (added 2026-09-07) — long before the real audit
+  // finishes. Reported live: Autopilot was firing every queued lead's audit
+  // within a couple seconds of each other, and since they all share one
+  // global _PLAYWRIGHT_SEMAPHORE(1) for their very first step (screenshot
+  // capture), most of them just piled up behind each other looking
+  // permanently frozen at "Step 1 of 6" instead of visibly one-at-a-time.
+  // This restores the one-at-a-time behaviour Autopilot always intended by
+  // waiting for the lead's own auditState to actually leave 'auditing' —
+  // same sawRunning-style "must have seen it start before treating a
+  // not-auditing read as done" guard handleAudit's own poll loop uses,
+  // needed here too since setLeads('auditing') and leadsRef's sync effect
+  // are both async relative to this loop.
+  const waitForAuditToFinish = (index, timeoutMs = 5 * 60 * 1000) => new Promise((resolve) => {
+    const start = Date.now();
+    let sawAuditing = false;
+    const check = () => {
+      const state = leadsRef.current[index]?.auditState;
+      if (state === 'auditing') sawAuditing = true;
+      if (
+        (sawAuditing && state !== 'auditing') ||
+        Date.now() - start > timeoutMs ||
+        !isAutopilotRef.current // "Stop Autopilot" shouldn't wait out this lead first
+      ) {
+        resolve();
+        return;
+      }
+      setTimeout(check, 500);
+    };
+    check();
+  });
+
   const startAutopilot = async () => {
     setIsAutopilot(true);
     for (let i = 0; i < leadsRef.current.length; i++) {
-      if (!isAutopilotRef.current) break; 
+      if (!isAutopilotRef.current) break;
       const lead = leadsRef.current[i];
       if (lead.auditState === 'none' && lead.Website) {
         await handleAudit(i);
+        await waitForAuditToFinish(i);
       }
     }
     setIsAutopilot(false);
