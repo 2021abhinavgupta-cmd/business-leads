@@ -1177,7 +1177,15 @@ function App() {
           <label>Leads</label>
           <input type="number" value={limit} onChange={e => setLimit(e.target.value)} min="1" max="100" required />
         </div>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+        {/* flexWrap is load-bearing: .search-box is itself an unwrapped flex
+            row inside a 1200px-max .app-container, and body has
+            overflow-x:hidden — with five buttons now in this group (Find
+            Leads, +Specific Lead, Search MNCs, Search Local Businesses, One
+            Niche Many Cities), an unwrapped row silently clipped the last
+            two off-screen with no scrollbar to reveal them. Live-reported
+            2026-09-09: the deploy was confirmed live and correct in Railway,
+            but two of five buttons were simply invisible. */}
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <button type="submit" className="primary-btn" disabled={loadingSearch}>
             {loadingSearch ? <Loader2 className="spin" /> : <Search />}
             {loadingSearch ? 'Scraping...' : 'Find Leads'}
