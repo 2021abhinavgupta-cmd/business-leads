@@ -207,6 +207,14 @@ function App() {
   // concern — groupByPeriod() below buckets the same array the tab
   // already fetches, no backend change.
   const [draftsGroupBy, setDraftsGroupBy] = useState('day');
+  // "Send All" bulk-send for the Drafts tab (requested: "in draft add send
+  // all option"). Only ever touches the drafts currently visible under the
+  // Day/Week/Month/All filter, and auto-acknowledges the review/staleness
+  // gate on every one (the user's explicit choice — the per-draft
+  // window.confirm in sendWithAcknowledgement doesn't scale to a batch).
+  const [sendAllRunning, setSendAllRunning] = useState(false);
+  const [sendAllProgress, setSendAllProgress] = useState({ done: 0, total: 0 });
+  const sendAllStopRef = useRef(false);
   const [historyGroupBy, setHistoryGroupBy] = useState('day');
   const [expandedEmail, setExpandedEmail] = useState(null);
   // Keyed by email_history row id -> { loading, sending, subject, body,
@@ -1249,6 +1257,74 @@ function App() {
     }
   };
 
+  // Bulk-send every draft in the current Day/Week/Month/All view, paced
+  // ~7s apart (/api/send is rate-limited to 10/min, and there's a
+  // server-side DAILY_EMAIL_LIMIT cap on top). Auto-acknowledges the
+  // review/staleness 409 gate on every draft — the user chose "send
+  // everything" over "skip flagged". Stoppable mid-run via sendAllStopRef
+  // (same ref pattern as the Dashboard bulk runners). One failed send
+  // doesn't abort the rest; a 429 stops the whole run (rate limit or the
+  // daily cap — retrying just burns more of it).
+  const handleSendAll = async (draftsInView) => {
+    const sendable = draftsInView.filter(d => d.target_email);
+    if (sendable.length === 0) {
+      alert('No drafts with a recipient address in this view.');
+      return;
+    }
+    if (!window.confirm(
+      `Send all ${sendable.length} draft${sendable.length === 1 ? '' : 's'} in this view now?\n\n` +
+      `Any flagged "Review before sending" or stale drafts are included and sent anyway.`
+    )) return;
+
+    sendAllStopRef.current = false;
+    setSendAllRunning(true);
+    setSendAllProgress({ done: 0, total: sendable.length });
+
+    let sent = 0;
+    let failed = 0;
+    let stoppedAtLimit = false;
+
+    for (let idx = 0; idx < sendable.length; idx++) {
+      if (sendAllStopRef.current) break;
+      const draft = sendable[idx];
+      try {
+        await axios.post(`${API_BASE}/api/send`, {
+          email: draft.target_email,
+          subject: draft.subject,
+          body: draft.body,
+          company: draft.company,
+          website: draft.website,
+          attach_screenshot: draft.attach_screenshot !== false,
+          acknowledge_warnings: true,
+        });
+        sent++;
+        setDrafts(prev => prev.filter(d => d.id !== draft.id));
+      } catch (err) {
+        if (err.response?.status === 429) {
+          stoppedAtLimit = true;
+          break;
+        }
+        console.error(`Send All: failed for ${draft.company}:`, err);
+        failed++;
+      }
+      setSendAllProgress({ done: idx + 1, total: sendable.length });
+      // Pace the next one — 10/min limit is 6s/send, 7s leaves margin.
+      if (idx < sendable.length - 1 && !sendAllStopRef.current) {
+        await new Promise(r => setTimeout(r, 7000));
+      }
+    }
+
+    setSendAllRunning(false);
+    fetchSentWebsites();
+    fetchDraftedWebsites();
+    alert(
+      `Send All finished.\n\nSent: ${sent}` +
+      (failed ? `\nFailed: ${failed}` : '') +
+      (stoppedAtLimit ? `\nStopped: hit the send rate limit or daily cap — run again later for the rest.` : '') +
+      (sendAllStopRef.current ? `\nStopped early by you.` : '')
+    );
+  };
+
   const handleDraftDelete = async (draftId) => {
     try {
       await axios.delete(`${API_BASE}/api/drafts/${draftId}`);
@@ -1981,6 +2057,7 @@ function App() {
 
   const renderDrafts = () => {
     const draftGroups = groupByPeriod(drafts, draftsGroupBy);
+    const draftsInView = draftGroups.flatMap(g => g.items);
     return (
     <div className="glass" style={{ padding: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
@@ -1988,7 +2065,33 @@ function App() {
           <h2 style={{ margin: 0 }}><FileEdit style={{display:'inline', marginRight: '8px', verticalAlign: 'middle'}}/> Saved Drafts</h2>
           <p style={{color: '#94a3b8', margin: '8px 0 0'}}>AI-generated audits ready for your review and approval.</p>
         </div>
-        <GroupBySelector value={draftsGroupBy} onChange={setDraftsGroupBy} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          {sendAllRunning ? (
+            <>
+              <span style={{ fontSize: '13px', color: '#64748b', fontWeight: 600 }}>
+                Sending {sendAllProgress.done}/{sendAllProgress.total}…
+              </span>
+              <button
+                type="button"
+                onClick={() => { sendAllStopRef.current = true; }}
+                style={{ padding: '8px 16px', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Stop
+              </button>
+            </>
+          ) : (
+            draftsInView.length > 0 && (
+              <button
+                type="button"
+                onClick={() => handleSendAll(draftsInView)}
+                style={{ padding: '8px 16px', background: '#10b981', border: 'none', color: '#ffffff', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Send size={16} /> Send All ({draftsInView.length})
+              </button>
+            )
+          )}
+          <GroupBySelector value={draftsGroupBy} onChange={setDraftsGroupBy} />
+        </div>
       </div>
 
       <div className="leads-grid" style={{ gridTemplateColumns: '1fr', marginTop: '20px' }}>
