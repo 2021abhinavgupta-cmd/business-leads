@@ -853,6 +853,16 @@ function App() {
     let pollTimer = null;
     let resolved = false;
     let sawRunning = false;
+    // Once we've seen the run live, a stretch of polls where progress is
+    // gone AND no result ever lands means the run died without running its
+    // own cleanup — almost always the server restarting mid-audit (a
+    // deploy). Without a bail-out here the card freezes on its last
+    // "Step N of 6" forever, and Cancel can't rescue it either: the task
+    // /api/audit/cancel looks for went with the old process. Count those
+    // polls; act after ~12s of grace (a brief between-stages gap looks the
+    // same for a tick or two).
+    let stalledTicks = 0;
+    const STALLED_TICK_LIMIT = 8;
     // See auditControlRef's declaration — lets handleCancelAudit reach into
     // this specific poll loop from outside its closure.
     const control = { cancelled: false };
@@ -904,6 +914,7 @@ function App() {
           });
           if (p.data?.running) {
             sawRunning = true;
+            stalledTicks = 0;
             setLeads(prev => {
               const updated = [...prev];
               if (updated[index]?.auditState === 'auditing') {
@@ -923,7 +934,40 @@ function App() {
             params: { website: lead.Website }
           });
           if (r.data?.ready) {
+            stalledTicks = 0;
             finishAudit(r.data);
+            return;
+          }
+          // Seen running, progress now gone, still no result after the
+          // grace window — the run is dead (server restarted mid-audit).
+          // Recover a draft if the backend managed to save one before it
+          // went, otherwise surface a real failure so the card unfreezes
+          // and Retry Audit works again.
+          stalledTicks += 1;
+          if (stalledTicks >= STALLED_TICK_LIMIT) {
+            let recovered = null;
+            try {
+              const rec = await axios.get(`${API_BASE}/api/audit/recover`, {
+                params: { website: lead.Website }
+              });
+              recovered = rec.data?.draft || null;
+            } catch {
+              // Can't tell — fall through to the failed state below.
+            }
+            if (recovered) {
+              finishAudit({
+                email: recovered.target_email,
+                subject: recovered.subject,
+                body: recovered.body,
+                image_url: recovered.image_url || null,
+                review_warnings: recovered.review_warnings || [],
+                page_speed_score: null,
+                seo_score: null,
+                recoveredAfterDroppedConnection: true,
+              });
+            } else {
+              finishAudit({ error: 'The audit stopped unexpectedly — the server may have restarted mid-run. Click Retry Audit.' });
+            }
           }
         } catch {
           // Progress/result polling is best-effort — never let a failed
@@ -1021,28 +1065,49 @@ function App() {
   const handleCancelAudit = async (index) => {
     const lead = leadsRef.current[index];
     if (!lead.Website) return;
+
+    const stopThisCard = () => {
+      const control = auditControlRef.current[lead.Website];
+      if (control) control.cancelled = true;
+      setLeads(prev => {
+        const updated = [...prev];
+        if (updated[index]?.auditState === 'auditing') {
+          updated[index].auditState = 'none';
+          updated[index].auditProgress = null;
+        }
+        return updated;
+      });
+    };
+
+    // When cancel can't confirm a stop (server had no live task — usually
+    // it restarted mid-audit and the card is now frozen on a run that no
+    // longer exists), don't leave a dead button: check whether anything is
+    // actually still running, and if not, clear the frozen card. Only a
+    // genuine {"running": true} keeps the card as-is.
+    const clearIfNothingRunning = async () => {
+      try {
+        const p = await axios.get(`${API_BASE}/api/audit/progress`, { params: { website: lead.Website } });
+        if (!p.data?.running) stopThisCard();
+      } catch {
+        // Can't reach progress either — a stuck card with a dead button is
+        // worse than an over-eager reset.
+        stopThisCard();
+      }
+    };
+
     try {
       const res = await axios.post(`${API_BASE}/api/audit/cancel`, null, { params: { website: lead.Website } });
       if (res.data?.cancelled !== true) {
-        // Nothing was actually stopped server-side — leave this card
-        // polling as normal instead of pretending it's cancelled.
+        await clearIfNothingRunning();
         return;
       }
     } catch (err) {
       console.error('Cancel audit failed:', err);
+      await clearIfNothingRunning();
       return;
     }
-    // Only reached once the server actually confirmed it stopped something.
-    const control = auditControlRef.current[lead.Website];
-    if (control) control.cancelled = true;
-    setLeads(prev => {
-      const updated = [...prev];
-      if (updated[index]?.auditState === 'auditing') {
-        updated[index].auditState = 'none';
-        updated[index].auditProgress = null;
-      }
-      return updated;
-    });
+    // Server confirmed it stopped a live task.
+    stopThisCard();
   };
 
   // handleAudit's promise resolves the instant its async_mode POST replies
