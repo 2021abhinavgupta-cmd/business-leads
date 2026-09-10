@@ -4,6 +4,7 @@ import json
 import os
 import re
 import asyncio
+import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
@@ -23,7 +24,95 @@ os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
 # Global Semaphore to limit Playwright concurrency to 1.
 # This prevents Out of Memory (OOM) crashes on Railway's 500MB instances.
-_PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(1)
+# Every Playwright caller (audits here + the Maps scraper fallback in
+# scrapers/google_maps.py) MUST go through _acquire_playwright_slot /
+# _release_playwright_slot rather than `async with` this object directly,
+# so the wedge-recovery below actually protects them.
+_PLAYWRIGHT_SEMAPHORE = asyncio.BoundedSemaphore(1)
+
+# Who currently holds the slot, and since when. Used purely to notice when
+# the semaphore has gone into a ghost-locked state and heal it — see
+# _acquire_playwright_slot.
+_playwright_holder: "asyncio.Task | None" = None
+_playwright_acquired_at = 0.0
+
+# Longer than the worst realistic Playwright run: page.goto alone caps at
+# 120s, and on top of that one run does the extra-page crawl, the mobile
+# revisit and a Lighthouse subprocess. A slot held longer than this, or
+# held by a task that has already finished, is a leak, not a real run.
+_PLAYWRIGHT_MAX_HOLD = 360
+
+
+async def _acquire_playwright_slot(on_queued=None, on_started=None):
+    """
+    Acquire the single global Playwright slot, healing it first if it has
+    wedged.
+
+    Background: a bare asyncio.Semaphore(1) can be left permanently
+    "locked" with no holder if a task that is *waiting* to acquire it is
+    cancelled — a CPython asyncio cancel-race that bites on the 3.11 build
+    Railway runs. Both the /api/audit orphan-cancel and the operator's
+    Cancel button cancel exactly such waiting tasks, and once the
+    semaphore wedged every later audit/search hung forever at "Queued".
+
+    Recovery is twofold:
+      1. Ghost-lock check up front — if the semaphore says busy but the
+         recorded holder task is gone / already done, or it has been held
+         past _PLAYWRIGHT_MAX_HOLD, rebuild the semaphore and take the
+         fresh one immediately (no waiting behind nobody).
+      2. Hard ceiling on the wait — if a genuine holder somehow never
+         releases, wait_for eventually fires, and we rebuild rather than
+         block the caller indefinitely.
+
+    Returns the semaphore object actually acquired; pass THAT same object
+    back to _release_playwright_slot (the module global may be rebuilt
+    again by a later caller).
+    """
+    global _PLAYWRIGHT_SEMAPHORE, _playwright_holder, _playwright_acquired_at
+
+    if _PLAYWRIGHT_SEMAPHORE.locked():
+        holder = _playwright_holder
+        held_for = time.monotonic() - _playwright_acquired_at
+        if holder is None or holder.done() or held_for > _PLAYWRIGHT_MAX_HOLD:
+            state = "gone" if holder is None else ("done" if holder.done() else "alive")
+            print(
+                f"[Playwright] slot looked wedged (holder={state}, held "
+                f"{held_for:.0f}s) — resetting so this run isn't stuck behind a ghost"
+            )
+            _PLAYWRIGHT_SEMAPHORE = asyncio.BoundedSemaphore(1)
+            _playwright_holder = None
+            _playwright_acquired_at = 0.0
+
+    if _PLAYWRIGHT_SEMAPHORE.locked() and on_queued is not None:
+        on_queued()
+
+    sem = _PLAYWRIGHT_SEMAPHORE
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=_PLAYWRIGHT_MAX_HOLD * 1.2)
+    except asyncio.TimeoutError:
+        print("[Playwright] slot never came free within the ceiling — forcing a fresh one")
+        _PLAYWRIGHT_SEMAPHORE = asyncio.BoundedSemaphore(1)
+        sem = _PLAYWRIGHT_SEMAPHORE
+        await sem.acquire()
+
+    _playwright_holder = asyncio.current_task()
+    _playwright_acquired_at = time.monotonic()
+    if on_started is not None:
+        on_started()
+    return sem
+
+
+def _release_playwright_slot(sem) -> None:
+    """Release a slot taken via _acquire_playwright_slot. Safe to call even
+    if the global semaphore was rebuilt in the meantime (this sem is then
+    just an orphan nobody waits on) or if it was already released."""
+    global _playwright_holder, _playwright_acquired_at
+    _playwright_holder = None
+    _playwright_acquired_at = 0.0
+    try:
+        sem.release()
+    except (ValueError, RuntimeError):
+        pass
 
 # Beyond the homepage, also crawl up to this many internal about/services/
 # contact-style pages so accessibility, broken-link, and visual checks
@@ -772,11 +861,8 @@ async def _generate_audit_screenshot_once(
         # the caller report an honest "waiting for another audit" state for
         # as long as the wait actually lasts, rather than a progress step
         # that silently means two different things depending on luck.
-        if on_queued is not None and _PLAYWRIGHT_SEMAPHORE.locked():
-            on_queued()
-        async with _PLAYWRIGHT_SEMAPHORE:
-            if on_started is not None:
-                on_started()
+        _sem = await _acquire_playwright_slot(on_queued=on_queued, on_started=on_started)
+        try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
 
@@ -1111,6 +1197,8 @@ async def _generate_audit_screenshot_once(
                             pass
 
                 await browser.close()
+        finally:
+            _release_playwright_slot(_sem)
 
         # Pick whichever audited page has the most severe visual flaw
         # (magenta-box evidence) to attach to the email — falls back to the
