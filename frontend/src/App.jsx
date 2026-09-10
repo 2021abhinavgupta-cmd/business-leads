@@ -215,6 +215,17 @@ function App() {
   const [sendAllRunning, setSendAllRunning] = useState(false);
   const [sendAllProgress, setSendAllProgress] = useState({ done: 0, total: 0 });
   const sendAllStopRef = useRef(false);
+  // Social Media page (2026-09-10) — its own search / results / drafts,
+  // parallel to the website Dashboard. See renderSocial().
+  const [socialNiche, setSocialNiche] = useState('');
+  const [socialCity, setSocialCity] = useState('');
+  const [socialLimit, setSocialLimit] = useState(10);
+  const [socialBusinesses, setSocialBusinesses] = useState([]);
+  const [socialSearching, setSocialSearching] = useState(false);
+  const [socialSearchStage, setSocialSearchStage] = useState('');
+  const [socialActiveChannel, setSocialActiveChannel] = useState({});
+  const [socialDrafts, setSocialDrafts] = useState([]);
+  const [socialDraftsGroupBy, setSocialDraftsGroupBy] = useState('day');
   const [historyGroupBy, setHistoryGroupBy] = useState('day');
   const [expandedEmail, setExpandedEmail] = useState(null);
   // Keyed by email_history row id -> { loading, sending, subject, body,
@@ -286,6 +297,9 @@ function App() {
     }
     if (currentView === 'drafts') {
       axios.get(`${API_BASE}/api/drafts?t=${t}`).then(res => setDrafts(res.data.drafts)).catch(console.error);
+    }
+    if (currentView === 'social') {
+      fetchSocialDrafts();
     }
     if (currentView === 'home' || currentView === 'agriculture') {
       fetchSentWebsites();
@@ -2055,6 +2069,344 @@ function App() {
     </>
   );
 
+  // ---------------------------------------------------------------------
+  // Social Media page
+  // ---------------------------------------------------------------------
+  const PLATFORM_META = {
+    instagram: { label: 'Instagram', color: '#d6249f' },
+    youtube: { label: 'YouTube', color: '#ff0000' },
+    facebook: { label: 'Facebook', color: '#1877f2' },
+    linkedin: { label: 'LinkedIn', color: '#0a66c2' },
+  };
+  const SEVERITY_COLOR = { high: '#ef4444', medium: '#f59e0b', low: '#64748b' };
+
+  const fetchSocialDrafts = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/social/drafts`);
+      setSocialDrafts(res.data.drafts || []);
+    } catch (err) {
+      console.error('Fetch social drafts failed:', err);
+    }
+  };
+
+  const handleSocialSearch = async (e) => {
+    if (e) e.preventDefault();
+    if (!socialNiche.trim() || !socialCity.trim()) {
+      alert('Enter a niche and a city.');
+      return;
+    }
+    setSocialSearching(true);
+    setSocialSearchStage('Starting...');
+    setSocialBusinesses([]);
+    try {
+      const start = await axios.post(`${API_BASE}/api/social/search`, {
+        niche: socialNiche.trim(), city: socialCity.trim(),
+        limit: Number(socialLimit) || 10, async_mode: true,
+      });
+      const key = start.data.key;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await new Promise(r => setTimeout(r, 2000));
+        const prog = await axios.get(`${API_BASE}/api/social/search/progress`, { params: { key } });
+        if (prog.data.running && prog.data.stage) setSocialSearchStage(prog.data.stage);
+        const res = await axios.get(`${API_BASE}/api/social/search/result`, { params: { key } });
+        if (res.data.ready) {
+          if (res.data.error) { alert(`Search failed: ${res.data.error}`); break; }
+          setSocialBusinesses((res.data.businesses || []).map(b => ({ ...b, audit: null, auditing: false })));
+          break;
+        }
+      }
+    } catch (err) {
+      console.error('Social search failed:', err);
+      alert(`Social search failed: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setSocialSearching(false);
+      setSocialSearchStage('');
+    }
+  };
+
+  const handleSocialAudit = async (index) => {
+    const biz = socialBusinesses[index];
+    const handles = Object.fromEntries(
+      Object.entries(biz.handles || {}).filter(([, v]) => !!v)
+    );
+    if (Object.keys(handles).length === 0) return;
+    setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, auditing: true } : b));
+    try {
+      const start = await axios.post(`${API_BASE}/api/social/audit`, {
+        company: biz.company, handles, async_mode: true,
+      });
+      const key = start.data.key;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await new Promise(r => setTimeout(r, 2000));
+        const res = await axios.get(`${API_BASE}/api/social/audit/result`, { params: { key } });
+        if (res.data.ready) {
+          if (res.data.error) { alert(`Social audit failed: ${res.data.error}`); break; }
+          setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, audit: res.data.results || {} } : b));
+          break;
+        }
+      }
+    } catch (err) {
+      console.error('Social audit failed:', err);
+      alert(`Social audit failed: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setSocialBusinesses(prev => prev.map((b, i) => i === index ? { ...b, auditing: false } : b));
+    }
+  };
+
+  const setSocialCopy = (index, platform, channel, field, value) => {
+    setSocialBusinesses(prev => prev.map((b, i) => {
+      if (i !== index) return b;
+      const audit = { ...b.audit };
+      const plat = { ...audit[platform] };
+      const outreach = { ...plat.outreach };
+      outreach[channel] = { ...outreach[channel], [field]: value };
+      plat.outreach = outreach;
+      audit[platform] = plat;
+      return { ...b, audit };
+    }));
+  };
+
+  const saveSocialDraft = async (biz, platform, channel) => {
+    const plat = biz.audit[platform];
+    const copy = (plat.outreach && plat.outreach[channel]) || {};
+    let target = '';
+    if (channel === 'email') target = (prompt('Recipient email address:') || '').trim();
+    else if (channel === 'whatsapp') target = biz.phone || '';
+    else target = plat.profile?.handle || '';
+    if (channel === 'email' && !target) return;
+    try {
+      await axios.post(`${API_BASE}/api/social/drafts`, {
+        company: biz.company, platform, handle: plat.profile?.handle || '',
+        profile_url: plat.profile?.url || '', channel, target,
+        subject: copy.subject || '', body: copy.body || '',
+        issues: plat.issues || [],
+      });
+      fetchSocialDrafts();
+      alert('Saved to social drafts.');
+    } catch (err) {
+      alert(`Save failed: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  const openSocialChannel = (biz, platform, channel) => {
+    const plat = biz.audit[platform];
+    const copy = (plat.outreach && plat.outreach[channel]) || {};
+    if (channel === 'email') {
+      const to = (prompt('Recipient email address:') || '').trim();
+      if (!to) return;
+      window.open(`mailto:${to}?subject=${encodeURIComponent(copy.subject || '')}&body=${encodeURIComponent(copy.body || '')}`);
+    } else if (channel === 'whatsapp') {
+      const digits = (biz.phone || '').replace(/\D/g, '');
+      if (!digits) { alert('No phone number for this business.'); return; }
+      window.open(`https://wa.me/${digits}?text=${encodeURIComponent(copy.body || '')}`);
+    } else {
+      navigator.clipboard?.writeText(copy.body || '');
+      window.open(`https://instagram.com/${plat.profile?.handle || ''}`);
+    }
+  };
+
+  const deleteSocialDraft = async (id) => {
+    try {
+      await axios.delete(`${API_BASE}/api/social/drafts/${id}`);
+      setSocialDrafts(prev => prev.filter(d => d.id !== id));
+    } catch (err) {
+      alert(`Delete failed: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  const sendSocialEmailDraft = async (d) => {
+    if (d.channel !== 'email') return;
+    if (!window.confirm(`Send this email to ${d.target}?`)) return;
+    try {
+      const res = await axios.post(`${API_BASE}/api/social/send`, {
+        company: d.company, target: d.target, subject: d.subject, body: d.body,
+      });
+      if (res.data.sent) {
+        alert('Sent.');
+        deleteSocialDraft(d.id);
+      } else {
+        alert(`Send failed: ${res.data.error || 'unknown'}`);
+      }
+    } catch (err) {
+      alert(`Send failed: ${err.response?.data?.detail || err.message}`);
+    }
+  };
+
+  const openSocialDraftChannel = (d) => {
+    if (d.channel === 'email') {
+      window.open(`mailto:${d.target}?subject=${encodeURIComponent(d.subject || '')}&body=${encodeURIComponent(d.body || '')}`);
+    } else if (d.channel === 'whatsapp') {
+      const digits = (d.target || '').replace(/\D/g, '');
+      if (digits) window.open(`https://wa.me/${digits}?text=${encodeURIComponent(d.body || '')}`);
+    } else {
+      navigator.clipboard?.writeText(d.body || '');
+      window.open(`https://instagram.com/${d.handle || ''}`);
+    }
+  };
+
+  const renderSocialAuditResult = (biz, index) => (
+    <div style={{ marginTop: '14px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '14px' }}>
+      {Object.entries(biz.audit).map(([platform, data]) => {
+        const chanKey = `${index}-${platform}`;
+        const active = socialActiveChannel[chanKey] || 'email';
+        const meta = PLATFORM_META[platform] || { label: platform, color: '#64748b' };
+        return (
+          <div key={platform} style={{ marginBottom: '18px' }}>
+            <div style={{ fontWeight: 700, color: meta.color, marginBottom: '6px' }}>{meta.label}</div>
+            {!data.profile && <p style={{ color: '#94a3b8', fontSize: '13px' }}>{data.note || 'Could not analyze this profile.'}</p>}
+            {data.profile && (
+              <>
+                <p style={{ fontSize: '13px', color: '#475569', margin: '2px 0' }}>
+                  {Number(data.profile.followers || 0).toLocaleString()} followers
+                  {data.profile.posting_frequency ? ` · ${data.profile.posting_frequency}` : ''}
+                  {data.profile.avg_engagement_rate ? ` · ${data.profile.avg_engagement_rate}% engagement` : ''}
+                </p>
+                {data.note && <p style={{ color: '#94a3b8', fontSize: '12px' }}>{data.note}</p>}
+                {(data.issues || []).length > 0 && (
+                  <ul style={{ margin: '8px 0', paddingLeft: '18px' }}>
+                    {data.issues.map((iss, k) => (
+                      <li key={k} style={{ fontSize: '13px', margin: '3px 0' }}>
+                        <span style={{ color: SEVERITY_COLOR[iss.severity], fontWeight: 700 }}>{iss.label}</span>
+                        {': '}{iss.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {data.outreach && Object.keys(data.outreach).length > 0 && (
+                  <div style={{ marginTop: '10px' }}>
+                    <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                      {['email', 'dm', 'whatsapp'].map(ch => (
+                        <button key={ch} type="button"
+                          onClick={() => setSocialActiveChannel(prev => ({ ...prev, [chanKey]: ch }))}
+                          style={{
+                            fontSize: '12px', padding: '4px 12px', borderRadius: '8px', cursor: 'pointer',
+                            border: '1px solid #cbd5e1',
+                            background: active === ch ? '#10b981' : 'transparent',
+                            color: active === ch ? '#fff' : '#64748b', fontWeight: 600,
+                          }}>{ch.toUpperCase()}</button>
+                      ))}
+                    </div>
+                    {active === 'email' && (
+                      <input
+                        value={data.outreach.email?.subject || ''}
+                        onChange={e => setSocialCopy(index, platform, 'email', 'subject', e.target.value)}
+                        placeholder="Subject"
+                        style={{ width: '100%', padding: '8px', marginBottom: '6px', fontWeight: 600 }}
+                      />
+                    )}
+                    <textarea
+                      value={data.outreach[active]?.body || ''}
+                      onChange={e => setSocialCopy(index, platform, active, 'body', e.target.value)}
+                      rows={active === 'email' ? 7 : 4}
+                      style={{ width: '100%', padding: '8px' }}
+                    />
+                    <div style={{ display: 'flex', gap: '8px', marginTop: '6px', flexWrap: 'wrap' }}>
+                      <button type="button" onClick={() => navigator.clipboard?.writeText(data.outreach[active]?.body || '')}
+                        style={{ fontSize: '12px', padding: '5px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', cursor: 'pointer' }}>Copy</button>
+                      <button type="button" onClick={() => openSocialChannel(biz, platform, active)}
+                        style={{ fontSize: '12px', padding: '5px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', cursor: 'pointer' }}>Open {active}</button>
+                      <button type="button" onClick={() => saveSocialDraft(biz, platform, active)}
+                        style={{ fontSize: '12px', padding: '5px 12px', borderRadius: '8px', border: 'none', background: '#10b981', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>Save draft</button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const renderSocial = () => (
+    <div className="glass" style={{ padding: '24px' }}>
+      <h2 style={{ margin: 0 }}>Social Media Outreach</h2>
+      <p style={{ color: '#94a3b8', margin: '8px 0 16px' }}>
+        Find a business, audit its social presence, and reach out by email, DM or WhatsApp.
+      </p>
+
+      <form onSubmit={handleSocialSearch} style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '20px' }}>
+        <input value={socialNiche} onChange={e => setSocialNiche(e.target.value)} placeholder="Business niche (e.g. candle shop)" style={{ flex: '1 1 220px', padding: '10px' }} />
+        <input value={socialCity} onChange={e => setSocialCity(e.target.value)} placeholder="City" style={{ flex: '1 1 160px', padding: '10px' }} />
+        <input type="number" min="1" max="30" value={socialLimit} onChange={e => setSocialLimit(e.target.value)} style={{ width: '80px', padding: '10px' }} />
+        <button type="submit" disabled={socialSearching} className="primary-btn" style={{ background: '#10b981', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '8px', fontWeight: 'bold' }}>
+          {socialSearching ? 'Searching...' : 'Find Businesses'}
+        </button>
+      </form>
+
+      {socialSearching && socialSearchStage && (
+        <p style={{ color: '#64748b', fontSize: '13px' }}>{socialSearchStage}</p>
+      )}
+
+      <div className="leads-grid" style={{ gridTemplateColumns: '1fr' }}>
+        {socialBusinesses.map((b, i) => (
+          <div key={`${b.company}-${i}`} className="lead-card glass">
+            <div className="lead-header"><h3>{b.company}</h3></div>
+            <div className="lead-details">
+              {b.website && <p><strong>Site:</strong> <a href={b.website} target="_blank" rel="noreferrer">{b.website}</a></p>}
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', margin: '8px 0' }}>
+                {Object.keys(PLATFORM_META).map(p => {
+                  const has = !!(b.handles && b.handles[p]);
+                  return (
+                    <span key={p} style={{
+                      fontSize: '12px', fontWeight: 600, padding: '3px 10px', borderRadius: '999px',
+                      border: `1px solid ${has ? PLATFORM_META[p].color : '#cbd5e1'}`,
+                      color: has ? PLATFORM_META[p].color : '#94a3b8',
+                      background: has ? `${PLATFORM_META[p].color}14` : 'transparent',
+                    }}>{PLATFORM_META[p].label}{has ? '' : ' (none)'}</span>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                disabled={b.auditing || !Object.values(b.handles || {}).some(Boolean)}
+                onClick={() => handleSocialAudit(i)}
+                className="send-btn"
+                style={{ marginTop: '8px' }}
+              >
+                {b.auditing ? 'Auditing socials...' : 'Audit socials'}
+              </button>
+            </div>
+            {b.audit && renderSocialAuditResult(b, i)}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: '30px', borderTop: '1px solid rgba(148,163,184,0.2)', paddingTop: '18px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+          <h3 style={{ margin: 0 }}>Social Drafts ({socialDrafts.length})</h3>
+          <GroupBySelector value={socialDraftsGroupBy} onChange={setSocialDraftsGroupBy} />
+        </div>
+        {groupByPeriod(socialDrafts, socialDraftsGroupBy).map(group => (
+          <div key={group.key}>
+            {group.label && <h4 style={{ margin: '16px 0 8px', color: '#94a3b8', fontSize: '13px' }}>{group.label} ({group.items.length})</h4>}
+            {group.items.map(d => (
+              <div key={d.id} className="lead-card glass" style={{ marginBottom: '10px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <strong>{d.company}</strong>
+                  <span style={{ fontSize: '12px', color: '#64748b' }}>{(PLATFORM_META[d.platform]?.label || d.platform)} · {String(d.channel || '').toUpperCase()}</span>
+                </div>
+                {d.subject && <p style={{ fontWeight: 600, margin: '6px 0 2px' }}>{d.subject}</p>}
+                <p style={{ whiteSpace: 'pre-wrap', fontSize: '13px', color: '#475569', margin: '4px 0' }}>{d.body}</p>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '6px' }}>
+                  <button type="button" onClick={() => navigator.clipboard?.writeText(d.body || '')} style={{ fontSize: '12px', padding: '4px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', cursor: 'pointer' }}>Copy</button>
+                  <button type="button" onClick={() => openSocialDraftChannel(d)} style={{ fontSize: '12px', padding: '4px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', cursor: 'pointer' }}>Open {d.channel}</button>
+                  {d.channel === 'email' && (
+                    <button type="button" onClick={() => sendSocialEmailDraft(d)} style={{ fontSize: '12px', padding: '4px 10px', borderRadius: '6px', border: 'none', background: '#10b981', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>Send</button>
+                  )}
+                  <button type="button" onClick={() => deleteSocialDraft(d.id)} style={{ fontSize: '12px', padding: '4px 10px', borderRadius: '6px', border: '1px solid #fca5a5', color: '#ef4444', cursor: 'pointer' }}>Delete</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+        {socialDrafts.length === 0 && <p style={{ color: '#94a3b8', fontSize: '13px' }}>No social drafts yet.</p>}
+      </div>
+    </div>
+  );
+
   const renderDrafts = () => {
     const draftGroups = groupByPeriod(drafts, draftsGroupBy);
     const draftsInView = draftGroups.flatMap(g => g.items);
@@ -2541,6 +2893,12 @@ function App() {
             <Sprout size={18} /> Agriculture
           </button>
           <button
+            onClick={() => setCurrentView('social')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'social' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'social' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'social' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <MessageCircle size={18} /> Social
+          </button>
+          <button
             onClick={() => setCurrentView('drafts')}
             style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'drafts' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'drafts' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'drafts' ? 'bold' : 'normal', transition: 'all 0.2s' }}
           >
@@ -2606,6 +2964,7 @@ function App() {
       <main className="main-content" style={{ flex: 1, padding: '40px', overflowY: 'auto' }}>
         {currentView === 'home' && renderHome()}
         {currentView === 'agriculture' && renderAgriculture()}
+        {currentView === 'social' && renderSocial()}
         {currentView === 'drafts' && renderDrafts()}
         {currentView === 'history' && renderHistory()}
         {currentView === 'cost' && renderCost()}
