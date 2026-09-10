@@ -175,6 +175,29 @@ def init_db():
         cursor.execute("ALTER TABLE email_replies ADD COLUMN sentiment TEXT DEFAULT ''")
         cursor.execute("PRAGMA user_version = 8")
 
+    # Social Media page (2026-09-10) — outreach drafts for a business's
+    # social presence, kept separate from email_drafts (website audits). One
+    # row per channel: an operator can save an email, a DM and a WhatsApp
+    # draft for the same profile. issues_json is the SocialIssue list the
+    # copy was grounded in, kept so the card can show what the message is about.
+    if schema_version < 9:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS social_drafts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+                company TEXT,
+                platform TEXT,
+                handle TEXT,
+                profile_url TEXT,
+                channel TEXT,
+                target TEXT,
+                subject TEXT,
+                body TEXT,
+                issues_json TEXT
+            )
+        """)
+        cursor.execute("PRAGMA user_version = 9")
+
     conn.commit()
     conn.close()
 
@@ -527,6 +550,60 @@ def get_drafted_websites_summary() -> dict:
             "timestamp": row["timestamp"],
         }
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Social Media page drafts (schema v9, 2026-09-10)
+# ---------------------------------------------------------------------------
+
+def log_social_draft(company, platform, handle, profile_url, channel, target, subject, body, issues):
+    """Save one social outreach draft (email / dm / whatsapp) for a profile.
+    Returns the new row id. `issues` is the SocialIssue list the copy was
+    grounded in, JSON-encoded."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO social_drafts "
+        "(company, platform, handle, profile_url, channel, target, subject, body, issues_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company, platform, handle, profile_url, channel, target, subject, body, json.dumps(issues or [])),
+    )
+    row_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return row_id
+
+
+def get_social_drafts():
+    """All social drafts, newest first. `issues_json` is decoded back to a
+    list under key `issues` (empty list on null or malformed JSON)."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM social_drafts ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        d = dict(row)
+        try:
+            parsed = json.loads(d.get("issues_json") or "[]")
+            d["issues"] = parsed if isinstance(parsed, list) else []
+        except (ValueError, TypeError):
+            d["issues"] = []
+        out.append(d)
+    return out
+
+
+def delete_social_draft(draft_id: int):
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM social_drafts WHERE id = ?", (draft_id,))
+    conn.commit()
+    conn.close()
 
 
 # Below this many sends, a variant's reply rate is noise — a single reply on

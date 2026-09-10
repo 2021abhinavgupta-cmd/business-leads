@@ -30,6 +30,13 @@ from analyzer.visuals import (
 )
 from analyzer.budget_signal import estimate_budget_fit, clears_min_tier
 from analyzer.mca_lookup import lookup_company as lookup_mca_company
+from analyzer.social_audit import audit_profile, generate_social_outreach
+from scrapers.social.discover import find_social_handles
+from scrapers.social.instagram import fetch_instagram
+from scrapers.social.youtube import fetch_youtube
+from scrapers.social.facebook import fetch_facebook
+from scrapers.social.linkedin import fetch_linkedin
+from dataclasses import asdict as _dataclass_asdict
 from storage.sheets import SheetsStorage
 from storage import db
 from security_utils import validate_public_url, UnsafeURLError
@@ -1350,6 +1357,312 @@ async def delete_draft(draft_id: int, _auth: None = Depends(require_api_key), _r
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===========================================================================
+# Social Media page (2026-09-10) — see docs/superpowers/specs/2026-09-10-
+# social-media-page-design.md. A standalone flow parallel to /api/audit:
+# find businesses by niche/city (reusing the Maps scraper), discover their
+# social handles off the homepage, audit each platform's presence, and
+# generate email / assisted-DM / WhatsApp outreach. Its own social_drafts
+# table; DM is never sent automatically.
+# ===========================================================================
+
+_SOCIAL_ADAPTERS = {
+    "instagram": fetch_instagram,
+    "youtube": fetch_youtube,
+    "facebook": fetch_facebook,
+    "linkedin": fetch_linkedin,
+}
+
+_SOCIAL_TTL = 900
+_social_search_progress: dict[str, tuple[float, dict]] = {}
+_social_search_results: dict[str, tuple[float, dict]] = {}
+_social_audit_progress: dict[str, tuple[float, dict]] = {}
+_social_audit_results: dict[str, tuple[float, dict]] = {}
+
+
+class SocialDraftIn(BaseModel):
+    company: str
+    platform: str
+    handle: str
+    profile_url: str = ""
+    channel: str            # "email" | "dm" | "whatsapp"
+    target: str
+    subject: str = ""
+    body: str
+    issues: list = []
+
+
+class SocialSendIn(BaseModel):
+    company: str
+    target: str
+    subject: str
+    body: str
+
+
+class SocialSearchIn(BaseModel):
+    niche: str
+    city: str
+    limit: int = 10
+    async_mode: bool = False
+
+
+class SocialAuditIn(BaseModel):
+    company: str
+    handles: dict            # {"instagram": url, "youtube": url, ...}
+    async_mode: bool = False
+
+
+def _social_progress_set(store: dict, key: str, stage: str) -> None:
+    now = time.monotonic()
+    for k, (ts, _) in list(store.items()):
+        if now - ts > _SOCIAL_TTL:
+            store.pop(k, None)
+    store[key] = (now, {"stage": stage})
+
+
+def _social_store_result(store: dict, key: str, result: dict) -> None:
+    now = time.monotonic()
+    for k, (ts, _) in list(store.items()):
+        if now - ts > _SOCIAL_TTL:
+            store.pop(k, None)
+    store[key] = (now, result)
+
+
+@app.get("/api/social/drafts")
+async def social_drafts_list(
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    drafts = await asyncio.to_thread(db.get_social_drafts)
+    return {"drafts": drafts}
+
+
+@app.post("/api/social/drafts")
+async def social_drafts_create(
+    req: SocialDraftIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(60, 60)),
+):
+    row_id = await asyncio.to_thread(
+        db.log_social_draft,
+        req.company, req.platform, req.handle, req.profile_url,
+        req.channel, req.target, req.subject, req.body, req.issues,
+    )
+    return {"id": row_id}
+
+
+@app.delete("/api/social/drafts/{draft_id}")
+async def social_drafts_delete(
+    draft_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(60, 60)),
+):
+    await asyncio.to_thread(db.delete_social_draft, draft_id)
+    return {"deleted": True}
+
+
+@app.post("/api/social/send")
+async def social_send(
+    req: SocialSendIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
+    """Real send for a social EMAIL draft only. Thin wrapper over the
+    configured sender: no screenshot, no review_warnings gate, no staleness
+    check (that machinery is website-draft specific)."""
+    try:
+        sender = get_sender()
+        message_id = await asyncio.to_thread(
+            sender.send_email, req.target, req.subject, req.body
+        )
+        if not message_id:
+            return {"sent": False, "error": "sender returned no message id"}
+        await asyncio.to_thread(
+            db.log_cost, "Social Outreach", 0.0001,
+            description=f"Social email to {req.company}",
+        )
+        return {"sent": True}
+    except Exception as e:  # noqa: BLE001
+        return {"sent": False, "error": str(e)}
+
+
+async def _social_search_impl(req: SocialSearchIn, progress_key: str | None = None) -> dict:
+    def _stage(s):
+        if progress_key:
+            _social_progress_set(_social_search_progress, progress_key, s)
+
+    _stage("Searching Google Maps")
+    leads = await maps_scraper.scrape_google_maps(req.niche, req.city, limit=req.limit)
+    businesses = []
+    for i, lead in enumerate(leads):
+        website = lead.get("Website") or ""
+        _stage(f"Finding social handles ({i + 1}/{len(leads)})")
+        handles = await find_social_handles(website) if website else {
+            "instagram": "", "youtube": "", "facebook": "", "linkedin": "",
+        }
+        businesses.append({
+            "company": lead.get("Company", ""),
+            "website": website,
+            "phone": lead.get("Phone", ""),
+            "handles": handles,
+        })
+    return {"businesses": businesses}
+
+
+@app.post("/api/social/search")
+async def social_search(
+    req: SocialSearchIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    if req.async_mode:
+        key = uuid.uuid4().hex
+
+        async def _run():
+            try:
+                result = await _social_search_impl(req, progress_key=key)
+            except Exception as e:  # noqa: BLE001
+                result = {"error": str(e)}
+            _social_store_result(_social_search_results, key, result)
+            _social_search_progress.pop(key, None)
+
+        asyncio.create_task(_run())
+        return {"started": True, "key": key}
+
+    return await _social_search_impl(req)
+
+
+@app.get("/api/social/search/progress")
+async def social_search_progress(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    entry = _social_search_progress.get(key)
+    if not entry:
+        return {"running": False}
+    _, data = entry
+    return {"running": True, **data}
+
+
+@app.get("/api/social/search/result")
+async def social_search_result(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    entry = _social_search_results.pop(key, None)
+    if not entry:
+        return {"ready": False}
+    _, result = entry
+    return {"ready": True, **result}
+
+
+def _handle_from_url(platform: str, url: str) -> str:
+    """Best-effort handle/slug out of a profile URL for the adapter."""
+    u = (url or "").rstrip("/")
+    if not u:
+        return ""
+    return u.split("/")[-1].lstrip("@")
+
+
+async def _social_audit_impl(req: SocialAuditIn, progress_key: str | None = None) -> dict:
+    results = {}
+    for platform, url in (req.handles or {}).items():
+        if not url or platform not in _SOCIAL_ADAPTERS:
+            continue
+        if progress_key:
+            _social_progress_set(_social_audit_progress, progress_key, f"Analyzing {platform}")
+        handle = _handle_from_url(platform, url)
+        adapter = _SOCIAL_ADAPTERS[platform]
+        try:
+            profile = await asyncio.to_thread(adapter, handle)
+        except Exception as e:  # noqa: BLE001
+            print(f"[SocialAudit] {platform} adapter raised: {e}")
+            profile = None
+
+        if profile is None:
+            results[platform] = {"profile": None, "issues": [], "outreach": {}, "note": "could not analyze this profile"}
+            continue
+        if not getattr(profile, "analyzed", True):
+            results[platform] = {
+                "profile": _dataclass_asdict(profile), "issues": [], "outreach": {},
+                "note": profile.note or "could not analyze this profile",
+            }
+            continue
+
+        issues = audit_profile(profile)
+        issue_dicts = [_dataclass_asdict(i) for i in issues]
+        outreach = {}
+        total_cost = 0.0
+        for channel in ("email", "dm", "whatsapp"):
+            if progress_key:
+                _social_progress_set(_social_audit_progress, progress_key, f"Writing {platform} {channel}")
+            copy = await asyncio.to_thread(
+                generate_social_outreach, req.company, profile, issues, channel
+            )
+            outreach[channel] = {"subject": copy["subject"], "body": copy["body"]}
+            total_cost += copy.get("cost", 0.0)
+        if total_cost > 0:
+            await asyncio.to_thread(
+                db.log_cost, "Social Outreach", total_cost,
+                description=f"Social outreach for {req.company} ({platform})",
+            )
+        results[platform] = {"profile": _dataclass_asdict(profile), "issues": issue_dicts, "outreach": outreach}
+
+    return {"results": results}
+
+
+@app.post("/api/social/audit")
+async def social_audit(
+    req: SocialAuditIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(10, 60)),
+):
+    if req.async_mode:
+        key = uuid.uuid4().hex
+
+        async def _run():
+            try:
+                result = await _social_audit_impl(req, progress_key=key)
+            except Exception as e:  # noqa: BLE001
+                result = {"error": str(e)}
+            _social_store_result(_social_audit_results, key, result)
+            _social_audit_progress.pop(key, None)
+
+        asyncio.create_task(_run())
+        return {"started": True, "key": key}
+
+    return await _social_audit_impl(req)
+
+
+@app.get("/api/social/audit/progress")
+async def social_audit_progress(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    entry = _social_audit_progress.get(key)
+    if not entry:
+        return {"running": False}
+    _, data = entry
+    return {"running": True, **data}
+
+
+@app.get("/api/social/audit/result")
+async def social_audit_result(
+    key: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(300, 60)),
+):
+    entry = _social_audit_results.pop(key, None)
+    if not entry:
+        return {"ready": False}
+    _, result = entry
+    return {"ready": True, **result}
+
 
 # Mount screenshots folder
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
