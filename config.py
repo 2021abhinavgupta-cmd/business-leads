@@ -91,6 +91,12 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 PAGESPEED_KEY = os.getenv("PAGESPEED_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 
+# YouTube Data API v3 key for the Social page's YouTube adapter. Enable
+# "YouTube Data API v3" on the same Google Cloud project as PAGESPEED_KEY.
+# Unset -> the YouTube adapter is a silent no-op (returns None), same
+# pattern as the MCA lookup being inert without its key.
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+
 # === Instagram Credentials ===
 IG_USERNAME = os.getenv("IG_USERNAME")
 IG_PASSWORD = os.getenv("IG_PASSWORD")
