@@ -175,18 +175,27 @@ class BaseSender:
     # dedicated "Generate for Agriculture" button set include_agri_credibility,
     # not on the ordinary "Generate AI Audit & Draft" button even for an
     # agriculture-tagged lead.
+    #
+    # Reworded 2026-09-10 (on request: "make it strong and impactful and
+    # better wordings"). Still says only what the comment above allows —
+    # MMGA built the site and runs the social pages — no claim of owning
+    # the brand or the business.
     _AGRI_CREDIBILITY_LINE = (
-        "Worth mentioning: we work in agriculture too. We built the "
-        "Metazyne website (metazyne.in) and manage the Agrius social "
-        "pages (instagram.com/agriusindia).\n"
+        "One more thing: agriculture is a sector we work in hands on, not "
+        "from a distance. We built the Metazyne site (metazyne.in) and run "
+        "the Agrius pages (instagram.com/agriusindia) day to day, so "
+        "everything above comes from real work in this space.\n"
     )
 
     # Real credential, textile leads only (added 2026-09-08, on request,
     # same opt-in-per-draft gating as the agriculture line above). Alpine
     # Texworld is a real client of MMGA's — the site was built by MMGA.
+    # Reworded 2026-09-10, same request as the agriculture line above.
     _TEXTILE_CREDIBILITY_LINE = (
-        "Worth mentioning: we work in textiles too. We built the Alpine "
-        "Texworld website (alpinetexworld.com).\n"
+        "One more thing: textile is a space we build in ourselves. We "
+        "designed and built the Alpine Texworld site (alpinetexworld.com) "
+        "end to end, so this comes from having done the exact job, not "
+        "from the outside.\n"
     )
 
     def generate_email(
