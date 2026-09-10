@@ -215,6 +215,11 @@ function App() {
   const [sendAllRunning, setSendAllRunning] = useState(false);
   const [sendAllProgress, setSendAllProgress] = useState({ done: 0, total: 0 });
   const sendAllStopRef = useRef(false);
+  // Which batch is currently sending: '__all__' for the header "Send All",
+  // or a day/week/month group's key for its own "Send day" button. Lets the
+  // one running batch show progress + Stop while every other send button
+  // disables (only one send loop at a time — they share the rate limit).
+  const [sendAllGroupKey, setSendAllGroupKey] = useState(null);
   // Social Media page (2026-09-10) — its own search / results / drafts,
   // parallel to the website Dashboard. See renderSocial().
   const [socialNiche, setSocialNiche] = useState('');
@@ -1344,19 +1349,23 @@ function App() {
   // (same ref pattern as the Dashboard bulk runners). One failed send
   // doesn't abort the rest; a 429 stops the whole run (rate limit or the
   // daily cap — retrying just burns more of it).
-  const handleSendAll = async (draftsInView) => {
+  const handleSendAll = async (draftsInView, groupKey = '__all__', groupLabel = '') => {
     const sendable = draftsInView.filter(d => d.target_email);
     if (sendable.length === 0) {
-      alert('No drafts with a recipient address in this view.');
+      alert('No drafts with a recipient address in this batch.');
       return;
     }
+    const scope = groupLabel ? `all ${sendable.length} draft${sendable.length === 1 ? '' : 's'} under "${groupLabel}"`
+                             : `all ${sendable.length} draft${sendable.length === 1 ? '' : 's'} in this view`;
     if (!window.confirm(
-      `Send all ${sendable.length} draft${sendable.length === 1 ? '' : 's'} in this view now?\n\n` +
+      `Send ${scope} now?\n\n` +
+      `Drafts you removed the image from are sent without the attachment. ` +
       `Any flagged "Review before sending" or stale drafts are included and sent anyway.`
     )) return;
 
     sendAllStopRef.current = false;
     setSendAllRunning(true);
+    setSendAllGroupKey(groupKey);
     setSendAllProgress({ done: 0, total: sendable.length });
 
     let sent = 0;
@@ -1394,6 +1403,7 @@ function App() {
     }
 
     setSendAllRunning(false);
+    setSendAllGroupKey(null);
     fetchSentWebsites();
     fetchDraftedWebsites();
     alert(
@@ -2483,7 +2493,7 @@ function App() {
           <p style={{color: '#94a3b8', margin: '8px 0 0'}}>AI-generated audits ready for your review and approval.</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-          {sendAllRunning ? (
+          {sendAllRunning && sendAllGroupKey === '__all__' ? (
             <>
               <span style={{ fontSize: '13px', color: '#64748b', fontWeight: 600 }}>
                 Sending {sendAllProgress.done}/{sendAllProgress.total}…
@@ -2500,8 +2510,9 @@ function App() {
             draftsInView.length > 0 && (
               <button
                 type="button"
+                disabled={sendAllRunning}
                 onClick={() => handleSendAll(draftsInView)}
-                style={{ padding: '8px 16px', background: '#10b981', border: 'none', color: '#ffffff', borderRadius: '10px', cursor: 'pointer', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                style={{ padding: '8px 16px', background: sendAllRunning ? '#6ee7b7' : '#10b981', border: 'none', color: '#ffffff', borderRadius: '10px', cursor: sendAllRunning ? 'not-allowed' : 'pointer', fontWeight: 'bold', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
               >
                 <Send size={16} /> Send All ({draftsInView.length})
               </button>
@@ -2513,11 +2524,39 @@ function App() {
 
       <div className="leads-grid" style={{ gridTemplateColumns: '1fr', marginTop: '20px' }}>
         <AnimatePresence>
-          {draftGroups.map(group => (
+          {draftGroups.map(group => {
+            const groupSendable = group.items.filter(d => d.target_email).length;
+            const groupSending = sendAllRunning && sendAllGroupKey === group.key;
+            return (
             <div key={group.key}>
               {group.label && (
-                <h4 style={{ margin: '20px 0 10px', color: '#94a3b8', fontSize: '14px', fontWeight: 600, borderBottom: '1px solid rgba(148,163,184,0.15)', paddingBottom: '6px' }}>
-                  {group.label} <span style={{ color: '#64748b', fontWeight: 400 }}>({group.items.length})</span>
+                <h4 style={{ margin: '20px 0 10px', color: '#94a3b8', fontSize: '14px', fontWeight: 600, borderBottom: '1px solid rgba(148,163,184,0.15)', paddingBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                  <span>{group.label} <span style={{ color: '#64748b', fontWeight: 400 }}>({group.items.length})</span></span>
+                  {groupSending ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+                        Sending {sendAllProgress.done}/{sendAllProgress.total}…
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => { sendAllStopRef.current = true; }}
+                        style={{ padding: '4px 12px', background: '#fee2e2', border: '1px solid #f87171', color: '#ef4444', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '12px' }}
+                      >
+                        Stop
+                      </button>
+                    </span>
+                  ) : (
+                    groupSendable > 0 && (
+                      <button
+                        type="button"
+                        disabled={sendAllRunning}
+                        onClick={() => handleSendAll(group.items, group.key, group.label)}
+                        style={{ padding: '4px 12px', background: sendAllRunning ? '#6ee7b7' : '#10b981', border: 'none', color: '#ffffff', borderRadius: '8px', cursor: sendAllRunning ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                      >
+                        <Send size={13} /> Send {group.label} ({groupSendable})
+                      </button>
+                    )
+                  )}
                 </h4>
               )}
               {group.items.map((draft) => {
@@ -2604,7 +2643,8 @@ function App() {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
         </AnimatePresence>
         {drafts.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No saved drafts.</p>}
       </div>
