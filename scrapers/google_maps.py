@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 from ddgs import DDGS
 
 import config
-from analyzer.visuals import _PLAYWRIGHT_SEMAPHORE
+from analyzer.visuals import _acquire_playwright_slot, _release_playwright_slot
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
@@ -360,7 +360,8 @@ class GoogleMapsScraper:
         url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
         
         names = []
-        async with _PLAYWRIGHT_SEMAPHORE:
+        _sem = await _acquire_playwright_slot()
+        try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=True,
@@ -391,7 +392,9 @@ class GoogleMapsScraper:
                     print(f"Playwright Maps Error: {e}")
                 finally:
                     await browser.close()
-                    
+        finally:
+            _release_playwright_slot(_sem)
+
         names = names[:limit]
         
         # Resolve domains using DDG (100% Free OSINT). Jittered delay between
