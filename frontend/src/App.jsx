@@ -220,6 +220,9 @@ function App() {
   // one running batch show progress + Stop while every other send button
   // disables (only one send loop at a time — they share the rate limit).
   const [sendAllGroupKey, setSendAllGroupKey] = useState(null);
+  // Transient status line shown next to the progress count, e.g. while
+  // waiting out the /api/send per-minute rate limiter before retrying.
+  const [sendAllNote, setSendAllNote] = useState('');
   // Social Media page (2026-09-10) — its own search / results / drafts,
   // parallel to the website Dashboard. See renderSocial().
   const [socialNiche, setSocialNiche] = useState('');
@@ -1366,11 +1369,13 @@ function App() {
     sendAllStopRef.current = false;
     setSendAllRunning(true);
     setSendAllGroupKey(groupKey);
+    setSendAllNote('');
     setSendAllProgress({ done: 0, total: sendable.length });
 
     let sent = 0;
     let failed = 0;
-    let stoppedAtLimit = false;
+    let stoppedAtDailyCap = false;
+    let rateLimitWaits = 0;
 
     for (let idx = 0; idx < sendable.length; idx++) {
       if (sendAllStopRef.current) break;
@@ -1386,11 +1391,29 @@ function App() {
           acknowledge_warnings: true,
         });
         sent++;
+        rateLimitWaits = 0;
         setDrafts(prev => prev.filter(d => d.id !== draft.id));
       } catch (err) {
-        if (err.response?.status === 429) {
-          stoppedAtLimit = true;
+        const detail = typeof err.response?.data?.detail === 'string' ? err.response.data.detail : '';
+        if (err.response?.status === 429 && /daily sending limit/i.test(detail)) {
+          // The real cap — SES warm-up ceiling. Retrying just 429s again
+          // until the rolling 24h window clears, so stop the whole run.
+          stoppedAtDailyCap = true;
           break;
+        }
+        if (err.response?.status === 429) {
+          // The /api/send per-minute rate limiter (10/min), not the daily
+          // cap. Transient — usually the bucket was already partly full
+          // from earlier clicks, which used to kill the batch on send #1.
+          // Wait it out and retry THIS same draft instead of losing the
+          // rest of the batch.
+          rateLimitWaits++;
+          if (rateLimitWaits > 6 || sendAllStopRef.current) { stoppedAtDailyCap = false; break; }
+          setSendAllNote('rate limited — waiting 60s, will continue automatically');
+          await new Promise(r => setTimeout(r, 62000));
+          setSendAllNote('');
+          idx--;            // retry the same draft on the next iteration
+          continue;         // skip the normal 7s pacing wait below
         }
         console.error(`Send All: failed for ${draft.company}:`, err);
         failed++;
@@ -1404,12 +1427,16 @@ function App() {
 
     setSendAllRunning(false);
     setSendAllGroupKey(null);
+    setSendAllNote('');
     fetchSentWebsites();
     fetchDraftedWebsites();
+    // Let React paint the cleared "Sending…" state before the blocking alert.
+    await new Promise(r => setTimeout(r, 0));
     alert(
       `Send All finished.\n\nSent: ${sent}` +
       (failed ? `\nFailed: ${failed}` : '') +
-      (stoppedAtLimit ? `\nStopped: hit the send rate limit or daily cap — run again later for the rest.` : '') +
+      (stoppedAtDailyCap ? `\nStopped: hit the daily sending cap (SES warm-up limit) — run again tomorrow for the rest.` : '') +
+      (rateLimitWaits > 6 ? `\nStopped: the send endpoint kept rate-limiting — wait a few minutes and run again for the rest.` : '') +
       (sendAllStopRef.current ? `\nStopped early by you.` : '')
     );
   };
@@ -2497,6 +2524,7 @@ function App() {
             <>
               <span style={{ fontSize: '13px', color: '#64748b', fontWeight: 600 }}>
                 Sending {sendAllProgress.done}/{sendAllProgress.total}…
+                {sendAllNote && <span style={{ color: '#b45309', fontWeight: 500 }}> · {sendAllNote}</span>}
               </span>
               <button
                 type="button"
@@ -2536,6 +2564,7 @@ function App() {
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
                       <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
                         Sending {sendAllProgress.done}/{sendAllProgress.total}…
+                        {sendAllNote && <span style={{ color: '#b45309', fontWeight: 500 }}> · {sendAllNote}</span>}
                       </span>
                       <button
                         type="button"
