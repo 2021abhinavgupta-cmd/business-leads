@@ -1202,6 +1202,7 @@ class AIAuditor:
             "CRITICAL INSTRUCTION: NEVER use spam trigger words/phrases anywhere in the subject or body — this includes but is not limited to: free, guarantee/guaranteed, click here, buy now, act now, limited time, no obligation, risk free, cash, $$$, 100% (or any percent-off claim), congratulations, winner, urgent, don't delete, dear friend. NEVER write in ALL CAPS (not even a single word) or use excessive exclamation marks (!!!). Write like a real person emailing a peer, not a marketing blast.\n"
             "If engagement_rate < 1% say exactly that and why it hurts them.\n"
             "If a flaw includes a specific number (score, ms, word count), QUOTE THE EXACT NUMBER in the email (e.g., 'your site scored a 42/100 on mobile speed').\n"
+            "CRITICAL INSTRUCTION: NUMBERS MAKE THIS LAND. People respond to numbers, not vague claims, so use one directly in the subject line itself whenever you have one, not only in the body. Every number you use must be either their own real measured number from FLAWS DETECTED above (a load time in seconds, a score out of 100, a count of broken links, a star rating, a review count), or this one real, published statistic, quoted exactly: 'Google's own research found that 53% of mobile visitors abandon a page that takes longer than 3 seconds to load.' Use that statistic only when your strongest flaw is genuinely about a slow page or slow load time, paired with their own real load time number, for example 'Your homepage takes 6.2 seconds to load on mobile. Google's own research shows over half of mobile visitors leave after 3.' Do NOT invent a count of customers, leads, calls, sales, or an amount of revenue this specific business is losing. We do not have that data for them, a made up figure is exactly the kind of claim they can disprove in one look, and it will make the rest of the email look fake too.\n"
             "If any [ACCESSIBILITY] flaws are in the list, mention the specific violation by name.\n"
             # This example previously demonstrated two things it forbids
             # elsewhere: it contained an em dash (the no-dashes rule three
@@ -1312,7 +1313,7 @@ class AIAuditor:
             "    }\n"
             "  ],\n"
             '  "overall_score": 45,\n'
-            '  "email_subject": "bold, curiosity driven subject line that hints at the problem or money being left on the table, using Title Case (e.g. Where Are Your Website Visitors Going, or The Gap In Your Website Is Costing You Leads) — not a generic \'Quick question about X\'",\n'
+            '  "email_subject": "bold, curiosity driven subject line that hints at the problem or money being left on the table, using Title Case, with a real number from FLAWS DETECTED in it whenever one fits naturally (e.g. Your Site Takes 6 Seconds To Load, Most Visitors Wont Wait, or 7 Broken Links Are Sending Your Visitors Nowhere) — not a generic \'Quick question about X\'",\n'
             '  "opening_line": "leads straight with the strongest problem stated as a business cost, personalized to what the company does, no compliment or pleasantry first, no hyphens"\n'
             "}\n"
             )
