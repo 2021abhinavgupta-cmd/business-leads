@@ -363,17 +363,23 @@ class BaseSender:
 
     def generate_followup(self, contact_name: str, stage: int, your_name: str) -> str:
         """
-        Generate a short, punchy follow-up email.
-        stage 1 = 3 days later, stage 2 = 6 days later.
+        Generate a short, casual follow-up email. stage 1 = 3 days later,
+        stage 2 = 6 days later.
 
-        Three-email sequence by design (2026-08-10, on the founder's own
-        framing): email 1 states the problem (generate_email), stage 1 here
-        re-offers help, stage 2 asks for an explicit yes/no so the thread
-        actually closes instead of trailing off unanswered. Whether this
-        ever REACHES anyone depends on scheduler.py running as its own
-        always-on service and on run_followups() skipping anyone who already
-        replied (see main.py) — a follow-up sequence that mails someone who
-        already said yes or no is worse than no sequence at all.
+        Collapsed to one casual message reused at both send points (changed
+        2026-09-11, on explicit request). The prior version had stage 1
+        re-offer help and stage 2 force an explicit yes/no so the thread
+        would close. The new framing closes the thread a different way:
+        no reply at all is treated as a real answer (no further follow-up is
+        sent after stage 2 either way — see main.py/scheduler.py), and a
+        single "no" opts the recipient out for good, rather than needing a
+        deliberate yes/no choice out of them. `stage` is kept only for the
+        caller's day-3/day-6 timing; the two sends read as the same, short,
+        low-pressure nudge. Whether this ever REACHES anyone still depends on
+        scheduler.py running as its own always-on service and on
+        run_followups() skipping anyone who already replied (see main.py) —
+        a follow-up that mails someone who already said no is worse than no
+        follow-up at all.
 
         Deliberately says nothing specific about WHAT was found. This copy is
         hardcoded and has no access to the original audit — it receives only a
@@ -382,32 +388,26 @@ class BaseSender:
         already ignored one email.
 
         Two such claims were live until 2026-08-09 and both were routinely
-        false: stage 1 asked whether they'd seen "the mobile website
+        false: stage 1 used to ask whether they'd seen "the mobile website
         screenshot I attached" when the attachment is always the DESKTOP
         screenshot (`_audit.jpg`; the mobile capture is only ever fed to the
-        AI, never attached), and stage 2 referred to "your mobile site" and
-        "these UI issues" when the original email's flaws are just as often
-        performance, SEO, security, certificate expiry, broken links or NAP
-        mismatches. If follow-ups ever need to reference the real findings,
-        pass the original flaws in rather than reinstating a guess here.
+        AI, never attached), and stage 2 used to refer to "your mobile site"
+        and "these UI issues" when the original email's flaws are just as
+        often performance, SEO, security, certificate expiry, broken links or
+        NAP mismatches. If follow-ups ever need to reference the real
+        findings, pass the original flaws in rather than reinstating a guess
+        here.
         """
         # Same first-name-only truncation as generate_email's greeting, for
         # the same reason: contact_name can be a full "First Last" string.
         first_name = self._first_name(contact_name)
-        if stage == 1:
-            body_lines = [
-                f"Hi {first_name},\n",
-                "Wanted to follow up in case my earlier note got buried — still happy to help if it's useful.",
-                "I'm glad to walk through what I'd fix first, no pressure either way.\n",
-                f"Best,\n{your_name}",
-            ]
-        else:
-            body_lines = [
-                f"Hi {first_name},\n",
-                "Last note from me on this — just reply YES if it's worth a quick call, or NO and I'll leave it there.",
-                "Either way, thanks for reading, and wishing you a great week ahead.\n",
-                f"Cheers,\n{your_name}",
-            ]
+        body_lines = [
+            f"Hi {first_name},\n",
+            "Quick one, did the last email I sent even reach you? If not, no worries, I will not keep bugging you about it.",
+            "This is not a sales thing, just wanted to help if it is useful.",
+            "If you would rather never hear from me again, just reply no and I will not email you again.\n",
+            f"{your_name}",
+        ]
 
         return "\n".join(body_lines)
 

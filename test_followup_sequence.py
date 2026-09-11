@@ -29,20 +29,18 @@ import config
 # The rewritten copy
 # ---------------------------------------------------------------------------
 
-def test_stage_one_offers_help_rather_than_just_bumping():
+def test_both_stages_are_casual_and_not_a_sales_pitch():
+    """
+    Rewritten 2026-09-11 on explicit request: the 2-stage help-then-yes/no
+    sequence collapsed into one short, casual nudge reused at both send
+    points, with a plain "reply no to opt out" instead of a forced choice.
+    """
     from emailer.base_sender import BaseSender
 
-    body = BaseSender.__new__(BaseSender).generate_followup("Priya", 1, "Kshitij").lower()
-    assert "happy to help" in body
-
-
-def test_stage_two_asks_an_explicit_yes_or_no():
-    """The founder's exact ask: the last email must let the thread close."""
-    from emailer.base_sender import BaseSender
-
-    body = BaseSender.__new__(BaseSender).generate_followup("Priya", 2, "Kshitij")
-    assert "YES" in body
-    assert "NO" in body
+    for stage in (1, 2):
+        body = BaseSender.__new__(BaseSender).generate_followup("Priya", stage, "Kshitij").lower()
+        assert "not a sales" in body
+        assert "reply no" in body
 
 
 def test_the_old_vague_last_one_promise_wording_is_gone():
