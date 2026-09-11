@@ -485,6 +485,20 @@ class AIAuditor:
         "discernible text", "contrast ratio", "aria ", "aria-", " dom ",
         "structured data", "schema markup", "canonical url", "hreflang",
         "viewport meta", "z-index", "http header", "tls handshake",
+        # Widened 2026-09-11 on explicit request ("founders dk so much") —
+        # the original list was scoped narrowly to Core Web Vitals/a11y
+        # metric names, on the theory those are the terms most likely to
+        # leak straight out of FLAWS DETECTED's own wording. Ordinary web/
+        # marketing jargon can leak just as easily and a founder is no more
+        # likely to know it.
+        "backlink", "crawl budget", "noindex", "render blocking",
+        "lazy loading", "structured markup", "meta tag",
+        "meta description", "open graph", "json ld", "robots.txt",
+        "nofollow", "domain authority", "bounce rate", "conversion rate",
+        "click through rate", " ctr ", "cdn ", "dns ", "ssl certificate",
+        "tls certificate", "server side", "client side", "api ", " api.",
+        "cache ", "caching", "redirect chain", "404 error",
+        "http status code", "third party script",
     ]
 
     @staticmethod
@@ -1181,7 +1195,7 @@ class AIAuditor:
             "TASK:\n"
             "Pick 3 or 4 of the most severe items from FLAWS DETECTED above (already ranked worst-first) and write about THOSE — don't go hunting for problems yourself, the list is already reconciled and prioritized. Prefer covering DIFFERENT categories (performance, accessibility, visual/layout/typography, broken/dead links, SEO, conversion) over picking multiple flaws from the same category, as long as the list has that variety available — a business owner needs a full picture, not five variations of one issue.\n"
             "Be direct, casual, and extremely friendly. Do not use corporate jargon. Talk like a normal human being reaching out to a peer.\n"
-            "CRITICAL INSTRUCTION: NO TECHNICAL JARGON. Never say raw metric names or acronyms like 'ARIA', 'Largest Contentful Paint', 'LCP', 'CLS', 'TBT', 'DOM', or a bare millisecond figure like '17500ms'. Translate every technical finding into plain language a non technical business owner understands. Example: instead of 'ARIA roles missing on interactive elements', say 'a few buttons on your site aren't set up correctly for screen readers'. Instead of 'LCP of 4.2s', say 'the main image on your homepage takes noticeably long to show up'. You can still mention a concrete number when it is easy to understand in context (a score out of 100, a count of broken links, a load time in plain seconds), just never the raw technical term for the metric itself.\n"
+            "CRITICAL INSTRUCTION: NO TECHNICAL JARGON, AT ALL. Write for a founder who has never worked in tech and does not know what any of these words mean: ARIA, DOM, LCP, CLS, TBT, FCP, INP, SEO, backlink, algorithm, metadata, canonical, sitemap, crawler, crawl budget, indexing, noindex, redirect, HTML, CSS, JavaScript, API, CDN, DNS, SSL, TLS, cache, caching, server, hosting, plugin, structured data, schema markup, bandwidth, bounce rate, conversion rate, render blocking, lazy loading. Never use any of them, and never use a bare millisecond figure like '17500ms' either. Translate every technical finding into plain language, the way you would explain it out loud to a friend who runs a shop and has never touched a computer beyond email. Example: instead of 'ARIA roles missing on interactive elements', say 'a few buttons on your site aren't set up correctly for screen readers'. Instead of 'LCP of 4.2s', say 'the main image on your homepage takes noticeably long to show up'. Instead of 'poor SEO due to missing structured data', say 'your site is harder for Google to understand, so fewer people find you searching'. You can still mention a concrete number when it is easy to understand in context (a score out of 100, a count of broken links, a load time in plain seconds), just never the raw technical term for the metric or system itself. If you catch yourself about to use a word a shop owner would have to look up, stop and say what it actually means for their business instead.\n"
             "CRITICAL INSTRUCTION: Every single flaw paragraph must end by stating the concrete business cost in plain terms, not just describe the technical problem. Say what it actually costs them: fewer inquiries, visitors leaving before contacting them, lower search ranking so fewer people find them at all, or people not trusting the business enough to reach out. Tie every flaw back to lost opportunities or lost customers, specifically, not a vague 'this hurts your business'.\n"
             "If FLAWS DETECTED includes any broken or dead links, you must include that as one of your picked flaws — a link that goes nowhere directly loses a visitor who was already interested enough to click, which is a very concrete, easy to explain cost.\n"
             "CRITICAL INSTRUCTION: NEVER use hyphens (-) or dashes (—) anywhere in your response, including inside ordinary compound words, not just as punctuation between clauses. This covers em dashes, en dashes, AND plain hyphens. Rewrite every hyphenated compound as two separate words or a different phrase instead. Examples: '10 minute call' not '10-minute call', 'cooperatives' not 'co-ops', 'linked to schemes' not 'scheme-linked', 'well known' not 'well-known', 'farm machinery' not 'farm-machinery'. If you catch yourself about to type a hyphen for any reason, stop and rephrase the sentence instead.\n"
