@@ -44,6 +44,26 @@ def test_get_email_history_by_id_returns_the_exact_row(monkeypatch, tmp_path):
     assert row["message_id"] == "<b@x.com>"
 
 
+def test_an_original_send_has_no_followup_of(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Acme", "acme.com", "lead@acme.com", "us@x.com", "Subject A", "Body A", message_id="<a@x.com>")
+
+    row = db.get_email_history()[0]
+    assert row["followup_of"] is None
+
+
+def test_a_followup_send_links_back_to_the_original_row(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Acme", "acme.com", "lead@acme.com", "us@x.com", "Subject A", "Body A", message_id="<a@x.com>")
+    original_id = db.get_email_history()[0]["id"]
+
+    db.log_email("Acme", "acme.com", "lead@acme.com", "us@x.com", "Re: Subject A", "Following up.", variant="followup-ai", followup_of=original_id)
+
+    history = db.get_email_history()
+    followup_row = next(row for row in history if row["variant"] == "followup-ai")
+    assert followup_row["followup_of"] == original_id
+
+
 # ---------------------------------------------------------------------------
 # AIAuditor._parse_followup_json
 # ---------------------------------------------------------------------------
@@ -245,8 +265,8 @@ def test_send_followup_success_threads_against_the_original_and_logs_the_variant
     logged_email = {}
     monkeypatch.setattr(
         app_module.db, "log_email",
-        lambda company, website, target_email, sender_email, subject, body, message_id="", variant="":
-            logged_email.update(company=company, website=website, target_email=target_email, subject=subject, body=body, variant=variant),
+        lambda company, website, target_email, sender_email, subject, body, message_id="", variant="", followup_of=None:
+            logged_email.update(company=company, website=website, target_email=target_email, subject=subject, body=body, variant=variant, followup_of=followup_of),
     )
 
     res = client.post("/api/send-followup", json={"history_id": 1, "subject": "Re: Original", "body": "Following up."})
@@ -255,6 +275,7 @@ def test_send_followup_success_threads_against_the_original_and_logs_the_variant
     assert sent["in_reply_to"] == "<original@x.com>"
     assert logged_email["variant"] == "followup-ai"
     assert logged_email["company"] == "Acme"
+    assert logged_email["followup_of"] == 1
 
 
 def test_send_followup_400s_when_the_transport_reports_failure(monkeypatch):
