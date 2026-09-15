@@ -198,6 +198,17 @@ def init_db():
         """)
         cursor.execute("PRAGMA user_version = 9")
 
+    # Links a follow-up send back to the original email_history row it
+    # replied to (2026-09-15). Before this, a follow-up logged via
+    # /api/send-followup was just another row with variant="followup-ai" —
+    # indistinguishable from a fresh send once you were looking at the list
+    # later, and there was no way to tell "has this lead already been
+    # followed up on" without re-reading every row's body. NULL means either
+    # an original send, or a follow-up logged before this column existed.
+    if schema_version < 10:
+        cursor.execute("ALTER TABLE email_history ADD COLUMN followup_of INTEGER")
+        cursor.execute("PRAGMA user_version = 10")
+
     conn.commit()
     conn.close()
 
@@ -212,22 +223,26 @@ def log_cost(category: str, cost: float, description: str = ""):
     conn.commit()
     conn.close()
 
-def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = ""):
+def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = "", followup_of: int | None = None):
     """
     Record a real send.
 
     `variant` exists so engagement can later be attributed to a copy decision
     rather than to nothing — see get_variant_performance(). The word count is
     derived here rather than passed in, so it can never disagree with the
-    body actually stored.
+    body actually stored. `followup_of` is the email_history id of the
+    original send this one follows up on — set only by /api/send-followup;
+    a first-touch send leaves it NULL. It's what lets the History tab tell
+    "already followed up" apart from "still waiting" without re-reading
+    every row's body.
     """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count, followup_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (company, website, target_email, sender_email, subject, body, message_id,
-         variant or None, len((body or "").split()))
+         variant or None, len((body or "").split()), followup_of)
     )
     conn.commit()
     conn.close()

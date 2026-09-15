@@ -1310,7 +1310,7 @@ async def send_followup_route(
     await asyncio.to_thread(
         db.log_email, original.get("company", ""), original.get("website", ""),
         to_email, config.FROM_EMAIL, req.subject, req.body,
-        variant="followup-ai",
+        variant="followup-ai", followup_of=req.history_id,
     )
     return {"status": "success"}
 

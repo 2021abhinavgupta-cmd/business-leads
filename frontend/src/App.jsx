@@ -242,6 +242,10 @@ function App() {
   // second click asks for the explicit-yes-or-no final follow-up instead
   // of re-offering help a second time.
   const [followupDrafts, setFollowupDrafts] = useState({});
+  // True while the "Opened, no reply yet" section's Generate/Send-All
+  // buttons are looping through rows — disables both buttons so a second
+  // click can't start an overlapping run against the same rows.
+  const [bulkFollowupBusy, setBulkFollowupBusy] = useState(false);
   // Keyed by normaliseWebsiteKey(website) -> { id, company, subject, timestamp }
   // of the most recent email_history row for that site — lets a freshly
   // re-searched lead (a new object in `leads`, auditState: 'none') show it
@@ -2749,8 +2753,48 @@ function App() {
     setFollowupDrafts(prev => ({ ...prev, [logId]: { nextStage: prev[logId]?.nextStage || 1 } }));
   };
 
+  // "Generate Follow-ups for All" in the Opened/no-reply section. Reuses
+  // handleGenerateFollowup per row rather than a new bulk endpoint — same AI
+  // call, same rate limit, just looped. Sequential (not Promise.all) so it
+  // naturally respects the server's 10-req/60s limit on /api/generate-followup
+  // instead of firing every request at once.
+  const handleGenerateAllFollowups = async (logs) => {
+    setBulkFollowupBusy(true);
+    for (const log of logs) {
+      await handleGenerateFollowup(log.id);
+    }
+    setBulkFollowupBusy(false);
+  };
+
+  // "Send All Drafted" — same idea, looped handleSendFollowup, but with a
+  // jittered pause between sends (same reasoning as main.py's batch runner:
+  // a burst of many emails landing in the same second is a stronger spam
+  // signal than the same emails spread out). Skips any row that was never
+  // drafted (no subject) or is mid-send already.
+  const handleSendAllFollowups = async (logs) => {
+    setBulkFollowupBusy(true);
+    for (const log of logs) {
+      const draft = followupDrafts[log.id];
+      if (draft?.subject && draft?.body && !draft.sending) {
+        await handleSendFollowup(log.id);
+        await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 2000));
+      }
+    }
+    setBulkFollowupBusy(false);
+  };
+
   const renderHistory = () => {
     const historyGroups = groupByPeriod(historyLogs, historyGroupBy);
+    // email_history rows that are themselves a follow-up (followup_of set)
+    // point back at the original row they replied to — collect those ids so
+    // an original can be told apart from "not followed up yet".
+    const followedUpIds = new Set(historyLogs.filter(l => l.followup_of != null).map(l => l.followup_of));
+    // Bulk follow-up candidates: original sends (not follow-ups themselves)
+    // that were opened, haven't replied, and don't already have a follow-up
+    // logged against them.
+    const openedAwaitingFollowup = historyLogs.filter(l =>
+      l.followup_of == null && l.open_count > 0 && !l.replied && !followedUpIds.has(l.id)
+    );
     return (
     <div className="glass" style={{ padding: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
@@ -2845,6 +2889,38 @@ function App() {
         </div>
       )}
 
+      {trackingEnabled && openedAwaitingFollowup.length > 0 && (
+        <div style={{ background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: '8px', padding: '14px 16px', marginBottom: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+            <div>
+              <div style={{ fontWeight: 600, color: '#c4b5fd' }}>
+                Opened, no reply yet ({openedAwaitingFollowup.length})
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: '12px' }}>
+                They opened it and haven't replied or gotten a follow-up. Good candidates for one.
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => handleGenerateAllFollowups(openedAwaitingFollowup)}
+                disabled={bulkFollowupBusy}
+                style={{ padding: '8px 14px', background: '#8b5cf6', border: 'none', borderRadius: '6px', color: '#fff', cursor: bulkFollowupBusy ? 'default' : 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+              >
+                {bulkFollowupBusy ? 'Working...' : `Generate Follow-ups for All (${openedAwaitingFollowup.length})`}
+              </button>
+              <button
+                onClick={() => handleSendAllFollowups(openedAwaitingFollowup)}
+                disabled={bulkFollowupBusy || !openedAwaitingFollowup.some(l => followupDrafts[l.id]?.subject)}
+                style={{ padding: '8px 14px', background: 'none', border: '1px solid rgba(139,92,246,0.5)', borderRadius: '6px', color: '#c4b5fd', cursor: (bulkFollowupBusy || !openedAwaitingFollowup.some(l => followupDrafts[l.id]?.subject)) ? 'default' : 'pointer', fontSize: '13px', fontWeight: 'bold' }}
+                title="Sends every drafted follow-up below — draft them first"
+              >
+                Send All Drafted
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
         {historyGroups.map(group => (
         <div key={group.key}>
@@ -2858,9 +2934,21 @@ function App() {
           <div key={log.id} id={`history-${log.id}`} style={{ background: historyScrollTarget === log.id ? 'rgba(16,185,129,0.08)' : 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', border: historyScrollTarget === log.id ? '1px solid rgba(16,185,129,0.5)' : '1px solid rgba(255,255,255,0.1)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <h4 style={{ margin: '0 0 4px 0' }}>{log.company}</h4>
+                <h4 style={{ margin: '0 0 4px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {log.company}
+                  {log.followup_of != null && (
+                    <span title="This was a follow-up, not the first email to this lead" style={{ fontSize: '11px', fontWeight: 'bold', color: '#c4b5fd', background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.4)', borderRadius: '999px', padding: '2px 8px' }}>
+                      Follow-up
+                    </span>
+                  )}
+                </h4>
                 <p style={{ margin: 0, fontSize: '13px', color: '#64748b' }}>To: {log.target_email} • From: {log.sender_email}</p>
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {log.followup_of == null && followedUpIds.has(log.id) && (
+                  <span title="A follow-up has already been sent for this email" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', color: '#c4b5fd', background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)', borderRadius: '999px', padding: '3px 10px' }}>
+                    <MessageSquare size={13} /> Followed up
+                  </span>
+                )}
                 {log.replied && (
                   <span title={log.reply_subject ? `Re: ${log.reply_subject}` : 'Replied'} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginTop: '8px', fontSize: '12px', fontWeight: 'bold', color: '#22c55e', background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)', borderRadius: '999px', padding: '3px 10px' }}>
                     <MessageSquare size={13} /> Replied
