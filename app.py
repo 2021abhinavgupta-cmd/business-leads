@@ -522,7 +522,10 @@ async def search_leads_apollo(
     Find decision-makers (founders/CEOs/owners/CMOs) by niche keyword via
     Apollo's People Search API (scrapers/apollo_free.py). Unlike every other
     lead source here, results already carry a real email and decision-maker
-    name — Apollo does that enrichment itself.
+    name — the scraper makes one extra Apollo enrichment call per qualifying
+    person to get the email, since Apollo's search endpoint never returns
+    one on its own. That enrichment call spends real Apollo credits (1 per
+    email actually found, 0 otherwise).
 
     Was previously only reachable via scheduler.py's automated
     LEAD_SOURCE=b2b job, never from the UI — this is the on-demand version.
