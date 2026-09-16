@@ -79,6 +79,27 @@ def test_search_hits_the_correct_api_v1_path(monkeypatch):
     assert called_urls[0] == "https://api.apollo.io/api/v1/mixed_people/api_search"
 
 
+def test_search_payload_targets_small_indian_decision_makers(monkeypatch):
+    """
+    Pins the 2026-09-16 lead-quality narrowing ("good leads i can convert
+    into clients") — regression test against silently drifting back to an
+    unfiltered global keyword search.
+    """
+    captured = {}
+
+    def _post_fn(url, headers, json):
+        if "mixed_people" in url:
+            captured.update(json)
+        return _response(200, {"people": []})
+
+    scraper = _scraper(monkeypatch, _post_fn)
+    scraper.scrape("Dentist")
+
+    assert captured["person_seniorities"] == ["owner", "founder", "c_suite"]
+    assert captured["organization_num_employees_ranges"] == ["1,10", "11,50"]
+    assert captured["organization_locations"] == ["india"]
+
+
 def test_a_lead_with_no_company_or_website_is_skipped_without_enriching(monkeypatch):
     """No point spending an enrichment credit on a lead we're discarding."""
     match_calls = []

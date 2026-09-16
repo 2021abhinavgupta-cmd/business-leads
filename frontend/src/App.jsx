@@ -1705,9 +1705,10 @@ function App() {
         {showApolloSearch && (
           <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleApolloSearch}>
             <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
-              Finds real decision-makers (founders, CEOs, owners) by job title/keyword via Apollo — no city needed, this
-              searches globally. Results include a real email and contact name where Apollo has one, each costing an
-              Apollo credit to look up. Needs <code>APOLLO_API_KEY</code> set.
+              Finds real decision-makers (owners, founders, C-suite) by job title/keyword via Apollo, narrowed to small
+              Indian businesses (1-50 employees) so results are companies that can actually act on a website-audit pitch
+              themselves. Results include a real email where Apollo has one, each costing an Apollo credit to look up.
+              Needs <code>APOLLO_API_KEY</code> set.
             </div>
             <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
               <label>Business Niche / Keyword</label>

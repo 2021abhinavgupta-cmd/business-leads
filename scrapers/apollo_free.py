@@ -77,10 +77,36 @@ class ApolloFreeScraper:
             "X-Api-Key": self.api_key
         }
         
-        # Searching for founders/CEOs in the given niche
+        # Searching for founders/CEOs in the given niche.
+        #
+        # Narrowed 2026-09-16 ("i want good leads i can convert into
+        # clients") — an unfiltered keyword search returns any company size
+        # anywhere, which meant a keyword like "Digital Marketing Agency"
+        # could just as easily surface a 2000-person multinational's CMO as
+        # a two-person local shop's owner. This whole pipeline's pitch is
+        # "here are specific problems with YOUR website" backed by a real
+        # audit — that lands with a small business owner who can act on it
+        # personally, not with an enterprise that already has a marketing
+        # department and a professionally built site. Three real Apollo
+        # filters (confirmed against docs.apollo.io/reference/people-api-search,
+        # not guessed) now bias results toward that profile:
+        #   - person_seniorities: actual decision-makers, not e.g. a junior
+        #     marketing coordinator who happens to carry a matched title.
+        #   - organization_num_employees_ranges: small businesses only —
+        #     this is who can approve a small agency's pitch on their own
+        #     say-so, and who plausibly still has real website problems.
+        #   - organization_locations: India — matches this tool's actual
+        #     market everywhere else (MCA lookup, IndiaMART/TradeIndia,
+        #     Maharashtra government data, IST-scheduled sends).
+        # These are deliberately hardcoded, not exposed as search options —
+        # if a genuinely different market/company-size is ever needed, widen
+        # this rather than silently drift back to the unfiltered version.
         payload = {
             "q_keywords": niche,
             "person_titles": ["founder", "ceo", "owner", "cmo", "marketing"],
+            "person_seniorities": ["owner", "founder", "c_suite"],
+            "organization_num_employees_ranges": ["1,10", "11,50"],
+            "organization_locations": ["india"],
             "page": 1,
             "per_page": min(limit, 100) # Apollo limit per page
         }

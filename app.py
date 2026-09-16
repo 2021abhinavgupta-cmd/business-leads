@@ -527,6 +527,12 @@ async def search_leads_apollo(
     one on its own. That enrichment call spends real Apollo credits (1 per
     email actually found, 0 otherwise).
 
+    Hardcoded to small Indian businesses (1-50 employees, owner/founder/
+    C-suite seniority only) — see scrapers/apollo_free.py's scrape() for
+    the reasoning. An unfiltered global keyword search would surface any
+    company size, and a large one is a poor fit for this tool's "here's
+    what's wrong with your website" pitch.
+
     Was previously only reachable via scheduler.py's automated
     LEAD_SOURCE=b2b job, never from the UI — this is the on-demand version.
     """
