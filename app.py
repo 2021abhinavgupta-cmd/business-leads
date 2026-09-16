@@ -16,6 +16,7 @@ import config
 from scrapers.google_maps import GoogleMapsScraper
 from scrapers.indiamart_dork import IndiaMartDorkScraper, TradeIndiaDorkScraper, ExportersIndiaDorkScraper
 from scrapers.krishi_maharashtra import KrishiMaharashtraScraper
+from scrapers.apollo_free import ApolloFreeScraper
 from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
@@ -252,6 +253,13 @@ class KrishiMaharashtraSearchRequest(BaseModel):
     city: str = ""
     limit: int = Field(default=50, ge=1, le=200)
 
+class ApolloSearchRequest(BaseModel):
+    # No city — ApolloFreeScraper.scrape() searches by job title/keywords via
+    # Apollo's People Search API, not a geo query, so there's nothing to pass
+    # a city into.
+    niche: str
+    limit: int = Field(default=25, ge=1, le=100)
+
 class NearbySearchRequest(BaseModel):
     # Bounded by Pydantic rather than checked by hand: these come straight
     # from the browser's geolocation API, and an out-of-range coordinate
@@ -338,6 +346,7 @@ b2b_directory_scrapers = {
     "exportersindia": ExportersIndiaDorkScraper(),
 }
 krishi_maharashtra_scraper = KrishiMaharashtraScraper()
+apollo_scraper = ApolloFreeScraper()
 web_scraper = WebsiteScraper()
 ig_scraper = InstagramScraper()
 auditor = AIAuditor()
@@ -495,6 +504,33 @@ async def search_leads_b2b_directory(
     try:
         scraper = b2b_directory_scrapers[req.directory]
         leads = await asyncio.to_thread(scraper.scrape, req.niche, req.city, req.limit)
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
+        return {"leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search-apollo")
+async def search_leads_apollo(
+    req: ApolloSearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    # Apollo is a real paid API (unlike the DDG dorks), so 5/60 protects the
+    # account's quota, not just politeness to a third party.
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    """
+    Find decision-makers (founders/CEOs/owners/CMOs) by niche keyword via
+    Apollo's People Search API (scrapers/apollo_free.py). Unlike every other
+    lead source here, results already carry a real email and decision-maker
+    name — Apollo does that enrichment itself.
+
+    Was previously only reachable via scheduler.py's automated
+    LEAD_SOURCE=b2b job, never from the UI — this is the on-demand version.
+    """
+    if not config.APOLLO_API_KEY:
+        raise HTTPException(status_code=400, detail="APOLLO_API_KEY is not set — add it in Railway's Variables tab first.")
+    try:
+        leads = await asyncio.to_thread(apollo_scraper.scrape, req.niche, req.limit)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
         return {"leads": leads}
     except Exception as e:

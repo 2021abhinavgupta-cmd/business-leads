@@ -154,6 +154,12 @@ function App() {
   const [localSearching, setLocalSearching] = useState(false);
   const [localProgress, setLocalProgress] = useState(null);
   const [localLastResult, setLocalLastResult] = useState('');
+  // Apollo (B2B decision-maker) search — no city, since Apollo's People
+  // Search API searches by job title/keyword globally, not geography.
+  const [showApolloSearch, setShowApolloSearch] = useState(false);
+  const [apolloNiche, setApolloNiche] = useState('');
+  const [apolloSearching, setApolloSearching] = useState(false);
+  const [apolloLastResult, setApolloLastResult] = useState('');
   // "Search One Niche Across Many Cities" — requested after the two above:
   // "i search a specific place and send the mails based on it" / "i want in
   // the app only to make it search in more way now" — the direct fix for
@@ -559,6 +565,29 @@ function App() {
           ? `Stopped early — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'} before stopping.`
           : `Searched ${nichesToRun.length} niche${nichesToRun.length === 1 ? '' : 's'} — added ${totalAdded} lead${totalAdded === 1 ? '' : 's'}.`
       );
+    }
+  };
+
+  // Apollo (B2B decision-maker) search. Unlike the other search panels, this
+  // is a single request, not a bulk/paced loop — Apollo's own free-tier
+  // credit limit is the real constraint here, not a rate limit worth
+  // spreading requests around.
+  const handleApolloSearch = async (e) => {
+    e.preventDefault();
+    if (!apolloNiche.trim()) { alert('Enter a niche first.'); return; }
+    setApolloSearching(true);
+    setApolloLastResult('');
+    try {
+      const res = await axios.post(`${API_BASE}/api/search-apollo`, { niche: apolloNiche, limit: parseInt(limit) || 25 });
+      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo' }));
+      setLeads(prev => [...tagged, ...prev]);
+      setLeadsPage(1);
+      setApolloLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo.`);
+    } catch (err) {
+      console.error('Apollo search failed:', err);
+      alert(`Error searching Apollo: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setApolloSearching(false);
     }
   };
 
@@ -1533,6 +1562,9 @@ function App() {
           <button type="button" onClick={() => { if (!showMultiCitySearch && !multiCityNiche) setMultiCityNiche(niche); setShowMultiCitySearch(!showMultiCitySearch); }} style={{ background: showMultiCitySearch ? '#fee2e2' : '#f8fafc', border: showMultiCitySearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showMultiCitySearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showMultiCitySearch ? 'Cancel' : 'One Niche, Many Cities'}
           </button>
+          <button type="button" onClick={() => { if (!showApolloSearch && !apolloNiche) setApolloNiche(niche); setShowApolloSearch(!showApolloSearch); }} style={{ background: showApolloSearch ? '#fee2e2' : '#f8fafc', border: showApolloSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showApolloSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            {showApolloSearch ? 'Cancel' : 'Search Apollo (B2B)'}
+          </button>
         </div>
       </form>
       {loadingSearch && searchProgressNote && (
@@ -1664,6 +1696,28 @@ function App() {
             )}
             {!localSearching && localLastResult && (
               <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{localLastResult}</p>
+            )}
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showApolloSearch && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleApolloSearch}>
+            <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
+              Finds real decision-makers (founders, CEOs, owners) by job title/keyword via Apollo — no city needed, this
+              searches globally. Results already include a real email and contact name. Needs <code>APOLLO_API_KEY</code> set.
+            </div>
+            <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
+              <label>Business Niche / Keyword</label>
+              <input type="text" list="niche-options" value={apolloNiche} onChange={e => setApolloNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" />
+            </div>
+            <button type="submit" className="primary-btn" disabled={apolloSearching} style={{ background: apolloSearching ? '#94a3b8' : '#0891b2' }}>
+              {apolloSearching ? <Loader2 className="spin" /> : <Search />}
+              {apolloSearching ? 'Searching...' : 'Search Apollo'}
+            </button>
+            {!apolloSearching && apolloLastResult && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{apolloLastResult}</p>
             )}
           </motion.form>
         )}
