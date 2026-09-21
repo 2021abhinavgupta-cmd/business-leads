@@ -937,6 +937,8 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             body=body,
             image_url=image_url or "",
             review_warnings=analysis.get("review_warnings") or [],
+            sector=req.sector,
+            niche=req.sector_detail,
         )
 
         result = {
@@ -1114,10 +1116,20 @@ async def send_email(
             await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
             # Record which copy variant this was, so a reply weeks from now
             # can be attributed to a decision rather than to nothing.
+            # sector/niche come from the draft row (fetched above for the
+            # review_warnings gate) rather than the request body — /api/send
+            # never receives them from the frontend, and the draft is the
+            # one place they're already known (see AuditRequest.sector and
+            # log_draft's call in _audit_lead_impl). draft is None for a
+            # send with no matching draft (e.g. a fully manual entry) —
+            # sector/niche just stay blank in that case, same as any send
+            # from before this existed.
             await asyncio.to_thread(
                 db.log_email, req.company, req.website, req.email, config.FROM_EMAIL,
                 req.subject, req.body, message_id=message_id,
                 variant=config.EMAIL_VARIANT,
+                sector=(draft.get("sector") or "") if draft else "",
+                niche=(draft.get("niche") or "") if draft else "",
             )
 
             # Remove from drafts since it's sent
@@ -1352,10 +1364,14 @@ async def send_followup_route(
     # has never logged follow-up sends to email_history at all — this is
     # additive, not a regression). A second follow-up generated from this
     # row later simply will not have anything to thread against.
+    # sector/niche inherited from the original send this is following up
+    # on — a follow-up is about the same lead, so it belongs in the same
+    # category for filtering/counting purposes.
     await asyncio.to_thread(
         db.log_email, original.get("company", ""), original.get("website", ""),
         to_email, config.FROM_EMAIL, req.subject, req.body,
         variant="followup-ai", followup_of=req.history_id,
+        sector=original.get("sector") or "", niche=original.get("niche") or "",
     )
     return {"status": "success"}
 

@@ -209,6 +209,35 @@ def init_db():
         cursor.execute("ALTER TABLE email_history ADD COLUMN followup_of INTEGER")
         cursor.execute("PRAGMA user_version = 10")
 
+    # Lets the History tab filter/count sends by what was searched for
+    # (2026-09-21, "how many mails to agriculture how many to textile").
+    # Neither the niche nor the sector bucket was ever persisted before —
+    # AuditRequest.sector/sector_detail only fed the draft-generation
+    # prompt, never the send call, so email_history had no way to answer
+    # "how many of these went to X" at all. `sector` is the coarse bucket
+    # (agriculture/textile/blank — matches AuditRequest.sector exactly);
+    # `niche` is the raw term actually searched (e.g. "Dentist", "Organic
+    # Farming Supplies"), captured for every search now, not just
+    # agriculture/textile matches. Both NULL on any row sent before this —
+    # there is no way to retroactively know what a past send was for.
+    if schema_version < 11:
+        cursor.execute("ALTER TABLE email_history ADD COLUMN sector TEXT")
+        cursor.execute("ALTER TABLE email_history ADD COLUMN niche TEXT")
+        cursor.execute("PRAGMA user_version = 11")
+
+    # Same sector/niche columns on email_drafts, one version later — this is
+    # the actual capture point. AuditRequest.sector/sector_detail are only
+    # ever known at draft-generation time; /api/send only receives
+    # subject/body/company/website from the frontend, so the single robust
+    # way to get sector/niche onto the eventual email_history row is to
+    # stash them on the draft here and have /api/send copy them across when
+    # it looks the draft up anyway (for the review_warnings gate) — no
+    # frontend send call site needs to change.
+    if schema_version < 12:
+        cursor.execute("ALTER TABLE email_drafts ADD COLUMN sector TEXT")
+        cursor.execute("ALTER TABLE email_drafts ADD COLUMN niche TEXT")
+        cursor.execute("PRAGMA user_version = 12")
+
     conn.commit()
     conn.close()
 
@@ -223,7 +252,7 @@ def log_cost(category: str, cost: float, description: str = ""):
     conn.commit()
     conn.close()
 
-def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = "", followup_of: int | None = None):
+def log_email(company: str, website: str, target_email: str, sender_email: str, subject: str, body: str, message_id: str = "", variant: str = "", followup_of: int | None = None, sector: str = "", niche: str = ""):
     """
     Record a real send.
 
@@ -234,15 +263,18 @@ def log_email(company: str, website: str, target_email: str, sender_email: str, 
     original send this one follows up on — set only by /api/send-followup;
     a first-touch send leaves it NULL. It's what lets the History tab tell
     "already followed up" apart from "still waiting" without re-reading
-    every row's body.
+    every row's body. `sector`/`niche` are what the lead was searched under
+    (see AuditRequest.sector's docstring) — empty for sources with no niche
+    concept (nearby search, Krishi Maharashtra's fixed dataset, an MNC
+    lookup by name) and for anything sent before this existed.
     """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count, followup_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO email_history (company, website, target_email, sender_email, subject, body, message_id, variant, body_word_count, followup_of, sector, niche) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (company, website, target_email, sender_email, subject, body, message_id,
-         variant or None, len((body or "").split()), followup_of)
+         variant or None, len((body or "").split()), followup_of, sector or None, niche or None)
     )
     conn.commit()
     conn.close()
@@ -686,13 +718,13 @@ def get_variant_performance() -> list[dict]:
     results.sort(key=lambda r: (r["enough_data"], r["reply_rate"], r["sent"]), reverse=True)
     return results
 
-def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None):
+def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None, sector: str = "", niche: str = ""):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None)
+        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings, sector, niche) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None, sector or None, niche or None)
     )
     conn.commit()
     conn.close()
