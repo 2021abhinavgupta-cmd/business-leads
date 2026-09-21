@@ -251,6 +251,7 @@ def test_send_followup_success_threads_against_the_original_and_logs_the_variant
     monkeypatch.setattr(app_module.db, "count_emails_sent_today", lambda: 0)
     monkeypatch.setattr(app_module.db, "get_email_history_by_id", lambda history_id: {
         "company": "Acme", "website": "acme.com", "target_email": "lead@acme.com", "message_id": "<original@x.com>",
+        "sector": "agriculture", "niche": "Organic Farming Supplies",
     })
 
     sent = {}
@@ -265,8 +266,8 @@ def test_send_followup_success_threads_against_the_original_and_logs_the_variant
     logged_email = {}
     monkeypatch.setattr(
         app_module.db, "log_email",
-        lambda company, website, target_email, sender_email, subject, body, message_id="", variant="", followup_of=None:
-            logged_email.update(company=company, website=website, target_email=target_email, subject=subject, body=body, variant=variant, followup_of=followup_of),
+        lambda company, website, target_email, sender_email, subject, body, message_id="", variant="", followup_of=None, sector="", niche="":
+            logged_email.update(company=company, website=website, target_email=target_email, subject=subject, body=body, variant=variant, followup_of=followup_of, sector=sector, niche=niche),
     )
 
     res = client.post("/api/send-followup", json={"history_id": 1, "subject": "Re: Original", "body": "Following up."})
@@ -276,6 +277,11 @@ def test_send_followup_success_threads_against_the_original_and_logs_the_variant
     assert logged_email["variant"] == "followup-ai"
     assert logged_email["company"] == "Acme"
     assert logged_email["followup_of"] == 1
+    # A follow-up is about the same lead as the original it's replying to,
+    # so it inherits that lead's category for History-tab filtering rather
+    # than coming back Uncategorized.
+    assert logged_email["sector"] == "agriculture"
+    assert logged_email["niche"] == "Organic Farming Supplies"
 
 
 def test_send_followup_400s_when_the_transport_reports_failure(monkeypatch):

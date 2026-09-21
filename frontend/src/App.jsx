@@ -241,6 +241,13 @@ function App() {
   const [socialDrafts, setSocialDrafts] = useState([]);
   const [socialDraftsGroupBy, setSocialDraftsGroupBy] = useState('day');
   const [historyGroupBy, setHistoryGroupBy] = useState('day');
+  // History tab filter bar (2026-09-21) — 'all' means unfiltered for each.
+  // historyNicheFilter holds a category LABEL string (e.g. "Agriculture",
+  // "Dentist", "Uncategorized"), computed fresh from historyLogs each
+  // render rather than a fixed enum, since niches are open-ended.
+  const [historyNicheFilter, setHistoryNicheFilter] = useState('all');
+  const [historyOpenedFilter, setHistoryOpenedFilter] = useState('all'); // all | opened | not_opened
+  const [historyFollowupFilter, setHistoryFollowupFilter] = useState('all'); // all | followed_up | not_followed_up
   const [expandedEmail, setExpandedEmail] = useState(null);
   // Keyed by email_history row id -> { loading, sending, subject, body,
   // to_email, nextStage }. nextStage starts at 1 (first follow-up) and
@@ -442,8 +449,13 @@ function App() {
       setLeads(rawLeads.map(lead => ({
         ...lead,
         auditState: 'none',
-        ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: niche } : {}),
-        ...(isTextileNiche ? { sector: 'textile', sectorDetail: niche } : {}),
+        // sectorDetail always carries what was searched, whether or not it
+        // matches agri/textile — that's the History tab's per-niche filter
+        // ("how many mails to Dentist, how many to Salon"), independent of
+        // the sector coarse-bucket which only fires for agri/textile.
+        sectorDetail: niche,
+        ...(isAgriNiche ? { sector: 'agriculture' } : {}),
+        ...(isTextileNiche ? { sector: 'textile' } : {}),
       })));
     } catch (err) {
       console.error('Search failed:', err);
@@ -524,8 +536,9 @@ function App() {
       ...lead,
       auditState: 'none',
       sourceType: 'local-search',
-      ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: nicheChoice } : {}),
-      ...(isTextileNiche ? { sector: 'textile', sectorDetail: nicheChoice } : {}),
+      sectorDetail: nicheChoice,
+      ...(isAgriNiche ? { sector: 'agriculture' } : {}),
+      ...(isTextileNiche ? { sector: 'textile' } : {}),
     }));
     setLeads(prev => [...tagged, ...prev]);
     return tagged.length;
@@ -579,7 +592,7 @@ function App() {
     setApolloLastResult('');
     try {
       const res = await axios.post(`${API_BASE}/api/search-apollo`, { niche: apolloNiche, limit: parseInt(limit) || 25 });
-      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo' }));
+      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo', sectorDetail: apolloNiche }));
       setLeads(prev => [...tagged, ...prev]);
       setLeadsPage(1);
       setApolloLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo.`);
@@ -602,8 +615,9 @@ function App() {
       ...lead,
       auditState: 'none',
       sourceType: 'multi-city-search',
-      ...(isAgriNiche ? { sector: 'agriculture', sectorDetail: nicheVal } : {}),
-      ...(isTextileNiche ? { sector: 'textile', sectorDetail: nicheVal } : {}),
+      sectorDetail: nicheVal,
+      ...(isAgriNiche ? { sector: 'agriculture' } : {}),
+      ...(isTextileNiche ? { sector: 'textile' } : {}),
     }));
     setLeads(prev => [...tagged, ...prev]);
     return tagged.length;
@@ -2839,16 +2853,57 @@ function App() {
     setBulkFollowupBusy(false);
   };
 
+  // sector is the coarse bucket (only ever 'agriculture'/'textile'/blank —
+  // see AuditRequest.sector), niche is the raw searched term captured for
+  // every search. A row with neither (sent before 2026-09-21, or from a
+  // niche-less source like Krishi Maharashtra's fixed dataset routed
+  // through the Agriculture bucket already, or an MNC-name lookup) falls
+  // back to "Uncategorized" rather than being silently dropped from every
+  // filter view.
+  const historyCategoryLabel = (log) => {
+    if (log.sector === 'agriculture') return 'Agriculture';
+    if (log.sector === 'textile') return 'Textile';
+    if (log.niche) return log.niche;
+    return 'Uncategorized';
+  };
+
   const renderHistory = () => {
-    const historyGroups = groupByPeriod(historyLogs, historyGroupBy);
     // email_history rows that are themselves a follow-up (followup_of set)
     // point back at the original row they replied to — collect those ids so
     // an original can be told apart from "not followed up yet".
     const followedUpIds = new Set(historyLogs.filter(l => l.followup_of != null).map(l => l.followup_of));
-    // Bulk follow-up candidates: original sends (not follow-ups themselves)
-    // that were opened, haven't replied, and don't already have a follow-up
-    // logged against them.
-    const openedAwaitingFollowup = historyLogs.filter(l =>
+
+    const historyCategoryCounts = {};
+    historyLogs.forEach(log => {
+      const label = historyCategoryLabel(log);
+      historyCategoryCounts[label] = (historyCategoryCounts[label] || 0) + 1;
+    });
+    // Biggest bucket first — that's what "how many went to agriculture,
+    // how many to textile" wants to see up top, not alphabetical.
+    const historyCategoryOptions = Object.keys(historyCategoryCounts).sort(
+      (a, b) => historyCategoryCounts[b] - historyCategoryCounts[a]
+    );
+
+    const filteredHistoryLogs = historyLogs.filter(log => {
+      if (historyNicheFilter !== 'all' && historyCategoryLabel(log) !== historyNicheFilter) return false;
+      if (historyOpenedFilter === 'opened' && !(log.open_count > 0)) return false;
+      if (historyOpenedFilter === 'not_opened' && log.open_count > 0) return false;
+      // A row counts as "followed up" whether it's itself the follow-up
+      // that was sent (followup_of set) or the original that one was sent
+      // against (in followedUpIds) — both mean "this lead has a follow-up
+      // in the picture", which is what the filter is really asking.
+      const isFollowUpRelated = log.followup_of != null || followedUpIds.has(log.id);
+      if (historyFollowupFilter === 'followed_up' && !isFollowUpRelated) return false;
+      if (historyFollowupFilter === 'not_followed_up' && isFollowUpRelated) return false;
+      return true;
+    });
+    const historyFiltersActive = historyNicheFilter !== 'all' || historyOpenedFilter !== 'all' || historyFollowupFilter !== 'all';
+
+    const historyGroups = groupByPeriod(filteredHistoryLogs, historyGroupBy);
+    // Bulk follow-up candidates, scoped to whatever's currently filtered in:
+    // original sends (not follow-ups themselves) that were opened, haven't
+    // replied, and don't already have a follow-up logged against them.
+    const openedAwaitingFollowup = filteredHistoryLogs.filter(l =>
       l.followup_of == null && l.open_count > 0 && !l.replied && !followedUpIds.has(l.id)
     );
     return (
@@ -2870,6 +2925,60 @@ function App() {
         </div>
       </div>
       <p style={{color: '#94a3b8', marginBottom: '16px', marginTop: '8px'}}>Persistent log of all outbound emails dispatched.</p>
+
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '16px', padding: '12px 16px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <label style={{ fontSize: '11px', color: '#64748b' }}>Niche</label>
+          <select
+            value={historyNicheFilter}
+            onChange={e => setHistoryNicheFilter(e.target.value)}
+            style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.2)', color: '#e2e8f0', fontSize: '13px', minWidth: '160px' }}
+          >
+            <option value="all">All niches ({historyLogs.length})</option>
+            {historyCategoryOptions.map(label => (
+              <option key={label} value={label}>{label} ({historyCategoryCounts[label]})</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <label style={{ fontSize: '11px', color: '#64748b' }}>Opened</label>
+          <select
+            value={historyOpenedFilter}
+            onChange={e => setHistoryOpenedFilter(e.target.value)}
+            style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.2)', color: '#e2e8f0', fontSize: '13px' }}
+          >
+            <option value="all">All</option>
+            <option value="opened">Opened only</option>
+            <option value="not_opened">Not opened</option>
+          </select>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <label style={{ fontSize: '11px', color: '#64748b' }}>Follow-up</label>
+          <select
+            value={historyFollowupFilter}
+            onChange={e => setHistoryFollowupFilter(e.target.value)}
+            style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.2)', color: '#e2e8f0', fontSize: '13px' }}
+          >
+            <option value="all">All</option>
+            <option value="followed_up">Followed up</option>
+            <option value="not_followed_up">Not followed up yet</option>
+          </select>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span style={{ fontSize: '13px', color: '#94a3b8' }}>
+            Showing {filteredHistoryLogs.length} of {historyLogs.length}
+          </span>
+          {historyFiltersActive && (
+            <button
+              type="button"
+              onClick={() => { setHistoryNicheFilter('all'); setHistoryOpenedFilter('all'); setHistoryFollowupFilter('all'); }}
+              style={{ background: 'none', border: '1px solid rgba(255,255,255,0.2)', color: '#94a3b8', borderRadius: '6px', padding: '6px 10px', fontSize: '12px', cursor: 'pointer' }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      </div>
 
       {variantPerf.length > 0 && (
         <div style={{ background: 'rgba(148,163,184,0.08)', border: '1px solid rgba(148,163,184,0.25)', borderRadius: '8px', padding: '14px 16px', marginBottom: '16px' }}>
@@ -2919,11 +3028,11 @@ function App() {
       {replyCheckEnabled && (
         <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', fontSize: '13px', color: '#94a3b8' }}>
           <strong style={{ color: '#22c55e' }}>
-            {historyLogs.filter(l => l.replied).length} replies
+            {filteredHistoryLogs.filter(l => l.replied).length} replies
           </strong>
-          {' '}from {historyLogs.length} emails sent
-          {historyLogs.filter(l => l.bounced).length > 0 && (
-            <span style={{ color: '#ef4444' }}> · {historyLogs.filter(l => l.bounced).length} bounced</span>
+          {' '}from {filteredHistoryLogs.length} emails sent
+          {filteredHistoryLogs.filter(l => l.bounced).length > 0 && (
+            <span style={{ color: '#ef4444' }}> · {filteredHistoryLogs.filter(l => l.bounced).length} bounced</span>
           )}
           . Replies are exact — unlike opens, nothing inflates or hides them.
         </div>
@@ -2932,7 +3041,7 @@ function App() {
       {trackingEnabled ? (
         <div style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px 16px', marginBottom: '24px', fontSize: '13px', color: '#94a3b8' }}>
           <strong style={{ color: '#10b981' }}>
-            {historyLogs.filter(l => l.open_count > 0).length} of {historyLogs.length} opened
+            {filteredHistoryLogs.filter(l => l.open_count > 0).length} of {filteredHistoryLogs.length} opened
           </strong>
           {' '}— counts are approximate. Apple Mail loads images automatically, so some
           &ldquo;opens&rdquo; are nobody; a reader with images off shows as never opened.
@@ -3100,7 +3209,11 @@ function App() {
           </div>
         </div>
         ))}
-        {historyLogs.length === 0 && <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>No emails sent yet.</p>}
+        {filteredHistoryLogs.length === 0 && (
+          <p style={{textAlign: 'center', color: '#64748b', padding: '40px 0'}}>
+            {historyLogs.length === 0 ? 'No emails sent yet.' : 'No emails match the current filters.'}
+          </p>
+        )}
       </div>
     </div>
     );
