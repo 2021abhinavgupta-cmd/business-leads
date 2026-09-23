@@ -15,6 +15,7 @@ from enrichment.decision_maker import DecisionMaker
 from scrapers.instagram import InstagramScraper
 from scrapers.website import WebsiteScraper
 from storage.sheets import SheetsStorage
+from storage import db
 from analyzer.visuals import generate_audit_screenshot
 
 # ==============================================================================
@@ -256,12 +257,13 @@ async def run_batch():
 async def run_followups():
     """Run follow-up drip campaigns."""
     print("--- Starting Follow-up Batch ---")
-    
+
     leads = sheets.get_leads_for_followup(max_stage=2)
     print(f"Leads ready for follow-up: {len(leads)}")
-    
+
     for lead in leads:
         company = lead.get("Company", "")
+        website = lead.get("Website", "")
         contact = lead.get("Contact Name", "")
         email = lead.get("Email", "")
         subject = lead.get("Email Subject", "")
@@ -276,10 +278,34 @@ async def run_followups():
 
         body = ses.generate_followup(contact, new_stage, YOUR_NAME)
         success = ses.send_followup(email, subject, body, in_reply_to=original_message_id)
-        
+
         if success and "row_number" in lead:
             sheets.increment_followup(lead["row_number"], new_stage)
-            
+
+        if success:
+            # Previously never logged at all — this whole automated path
+            # only bumped the Sheets stage counter, so a follow-up sent
+            # this way was invisible in the History tab and its content
+            # unrecoverable (live-reported 2026-09-25: "i wasnt able to
+            # see the follow ups mail that i sent"). Now matches what
+            # /api/send-followup already does for a manually-sent
+            # follow-up: log the real send, and where the original is
+            # findable by its Message-ID, link followup_of and inherit
+            # sector/niche so it lands in the right History category too.
+            # send_followup() swallows its own message_id and doesn't
+            # return it (see its docstring), so this row's message_id
+            # stays blank — a second follow-up off THIS one won't have
+            # anything to thread against, same limitation the manual path
+            # already has.
+            original = await asyncio.to_thread(db.get_email_history_by_message_id, original_message_id)
+            await asyncio.to_thread(
+                db.log_email, company, website, email, config.FROM_EMAIL, subject, body,
+                variant="followup-auto",
+                followup_of=(original.get("id") if original else None),
+                sector=(original.get("sector") or "") if original else "",
+                niche=(original.get("niche") or "") if original else "",
+            )
+
     print("--- Follow-up Batch Complete ---")
 
 
