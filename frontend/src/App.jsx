@@ -2880,6 +2880,12 @@ function App() {
     });
     // Biggest bucket first — that's what "how many went to agriculture,
     // how many to textile" wants to see up top, not alphabetical.
+    // Agriculture/Textile are always offered, even at 0 — they're this
+    // tool's two named sectors (dedicated tab, credibility buttons), so
+    // the filter shouldn't hide them just because nothing's landed there
+    // yet today.
+    if (!('Agriculture' in historyCategoryCounts)) historyCategoryCounts['Agriculture'] = 0;
+    if (!('Textile' in historyCategoryCounts)) historyCategoryCounts['Textile'] = 0;
     const historyCategoryOptions = Object.keys(historyCategoryCounts).sort(
       (a, b) => historyCategoryCounts[b] - historyCategoryCounts[a]
     );
