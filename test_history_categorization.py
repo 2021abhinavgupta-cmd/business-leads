@@ -53,6 +53,77 @@ def test_an_email_history_row_round_trips_its_sector_and_niche(monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
+# db._guess_category / get_email_history's guessed_category (added
+# 2026-09-23, "can you go through the whole sent data and fix that") — a
+# best-effort label for rows sent before sector/niche existed at all, kept
+# strictly separate from real data: it must never appear when a real
+# sector/niche is already recorded, and never overwrite that column.
+# ---------------------------------------------------------------------------
+
+def test_a_row_with_a_farm_like_company_name_is_guessed_agriculture(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Acme Farms", "acmefarms.com", "lead@acmefarms.com", "us@x.com", "S", "B")
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] == "agriculture"
+    # The guess must never leak into the real columns.
+    assert row["sector"] is None
+    assert row["niche"] is None
+
+
+def test_a_row_with_a_textile_like_website_is_guessed_textile(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("XYZ Enterprises", "xyztextiles.com", "lead@xyztextiles.com", "us@x.com", "S", "B")
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] == "textile"
+
+
+def test_a_row_with_no_matching_keywords_is_not_guessed_at_all(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Sunrise Dental Clinic", "sunrisedental.com", "lead@sunrisedental.com", "us@x.com", "S", "B")
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] is None
+
+
+def test_a_row_with_a_real_niche_already_recorded_is_never_guessed_over(monkeypatch, tmp_path):
+    """A row that already has real data (even a non-agri/textile niche) is
+    fully categorized — guessing on top of it would be pointless at best
+    and could only ever add noise, never information."""
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Acme Farms Dental", "acmefarms-dental.com", "lead@x.com", "us@x.com", "S", "B", niche="Dentist")
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] is None
+    assert row["niche"] == "Dentist"
+
+
+def test_a_row_with_a_real_sector_already_recorded_is_never_guessed_over(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email("Acme", "acme.com", "lead@x.com", "us@x.com", "S", "B", sector="textile")
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] is None
+    assert row["sector"] == "textile"
+
+
+def test_the_guess_never_looks_at_subject_or_body_text(monkeypatch, tmp_path):
+    """Narrower on purpose — a company's own name/domain is usually a
+    direct giveaway, while cold-email prose is long and generic enough
+    that a stray word could false-positive."""
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email(
+        "Sunrise Dental Clinic", "sunrisedental.com", "lead@x.com", "us@x.com",
+        "We help you grow like a farm of new patients",
+        "Ever seen a cotton field? Neither have your patients, but here's a metaphor about weaving trust.",
+    )
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] is None
+
+
+# ---------------------------------------------------------------------------
 # app.py wiring: /api/send copies the draft's sector/niche onto the send
 # ---------------------------------------------------------------------------
 

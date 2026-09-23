@@ -449,6 +449,38 @@ def get_reply_summary() -> tuple[dict, dict]:
     return by_thread, by_address
 
 
+_AGRI_GUESS_PATTERN = re.compile(r"agri|farm|krishi|agro", re.IGNORECASE)
+_TEXTILE_GUESS_PATTERN = re.compile(r"textile|fabric|garment|apparel|yarn|weav|cotton", re.IGNORECASE)
+
+
+def _guess_category(row: dict) -> str | None:
+    """
+    Best-effort guess for a row with no recorded sector/niche at all — rows
+    sent before 2026-09-23, when neither was ever captured (see
+    log_email's sector/niche params). Never a substitute for the real
+    thing: only called when both sector and niche are genuinely blank, and
+    the caller (get_email_history) surfaces it as a separate
+    "guessed_category" field rather than backfilling sector/niche
+    themselves, so a wrong guess can never be mistaken for confirmed data
+    or silently overwrite it later.
+
+    Deliberately checks company/website only, not subject/body — the
+    business's own name or domain is usually a direct giveaway ("XYZ
+    Textiles", "sunfarms.com"), while a lot of prose in cold-email copy is
+    long and generic enough that "farm" or "weav-" could turn up in an
+    unrelated sentence. Narrower on purpose, at the cost of missing some
+    real matches, since the whole feature exists to avoid confidently
+    mislabeling something that was never actually recorded as agriculture
+    or textile.
+    """
+    haystack = f"{row.get('company') or ''} {row.get('website') or ''}"
+    if _AGRI_GUESS_PATTERN.search(haystack):
+        return "agriculture"
+    if _TEXTILE_GUESS_PATTERN.search(haystack):
+        return "textile"
+    return None
+
+
 def get_email_history():
     """
     Send log, newest first, with open data merged in.
@@ -485,6 +517,12 @@ def get_email_history():
         row["bounced"] = bool(reply and reply["is_bounce"])
         row["reply_subject"] = reply["subject"] if reply else None
         row["reply_at"] = reply["timestamp"] if reply else None
+
+        # Only guess when there is genuinely nothing recorded — a row with
+        # a real niche (even a non-agri/textile one, e.g. "Dentist") is
+        # already correctly categorized and must never be overridden by a
+        # guess.
+        row["guessed_category"] = _guess_category(row) if not row.get("sector") and not row.get("niche") else None
 
     return rows
 

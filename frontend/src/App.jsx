@@ -2858,12 +2858,19 @@ function App() {
   // every search. A row with neither (sent before 2026-09-21, or from a
   // niche-less source like Krishi Maharashtra's fixed dataset routed
   // through the Agriculture bucket already, or an MNC-name lookup) falls
-  // back to "Uncategorized" rather than being silently dropped from every
-  // filter view.
+  // back to a best-effort guess off company/website (db.py's
+  // _guess_category — added 2026-09-23 on explicit request after
+  // confirming with the user that a clearly-labeled guess was wanted for
+  // old data rather than leaving it Uncategorized), or "Uncategorized" if
+  // even that finds nothing. "(guessed)" is a deliberately different
+  // label from the real "Agriculture"/"Textile" buckets so a guess can
+  // never be mistaken for, or silently merged into, confirmed data.
   const historyCategoryLabel = (log) => {
     if (log.sector === 'agriculture') return 'Agriculture';
     if (log.sector === 'textile') return 'Textile';
     if (log.niche) return log.niche;
+    if (log.guessed_category === 'agriculture') return 'Agriculture (guessed)';
+    if (log.guessed_category === 'textile') return 'Textile (guessed)';
     return 'Uncategorized';
   };
 
