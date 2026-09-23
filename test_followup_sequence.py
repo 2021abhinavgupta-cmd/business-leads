@@ -446,6 +446,93 @@ def test_an_unsubscribe_reply_suppresses_rather_than_just_marking_replied(imap, 
     assert replied_calls == []
 
 
+def test_run_followups_logs_the_send_and_links_to_the_original(temp_db, monkeypatch):
+    """
+    main.py:run_followups() (the automated scheduler path) previously only
+    bumped the Sheets stage counter on a successful send — it never called
+    db.log_email at all, so a follow-up sent this way was invisible in the
+    History tab and its content unrecoverable (live-reported 2026-09-25:
+    "i wasnt able to see the follow ups mail that i sent"). Now matches
+    what /api/send-followup already does for a manual follow-up.
+    """
+    import asyncio
+    import main as main_module
+
+    original_id = None
+
+    def _seed_original():
+        nonlocal original_id
+        temp_db.log_email(
+            "Acme", "acme.com", "priya@acme.com", "me@x.com", "Your site is slow",
+            "Original body", message_id="<orig@x.com>", sector="agriculture", niche="Organic Farming Supplies",
+        )
+        return temp_db.get_email_history()[0]["id"]
+
+    original_id = _seed_original()
+
+    monkeypatch.setattr(main_module.sheets, "get_leads_for_followup", lambda max_stage=2: [{
+        "Company": "Acme", "Website": "acme.com", "Contact Name": "Priya", "Email": "priya@acme.com",
+        "Email Subject": "Your site is slow", "Follow-up Stage": 0, "Message ID": "<orig@x.com>", "row_number": 5,
+    }])
+    monkeypatch.setattr(main_module.ses, "generate_followup", lambda contact, stage, name: "Follow-up body")
+    monkeypatch.setattr(main_module.ses, "send_followup", lambda *a, **k: True)
+    incremented = []
+    monkeypatch.setattr(main_module.sheets, "increment_followup", lambda row, stage: incremented.append((row, stage)))
+
+    asyncio.run(main_module.run_followups())
+
+    history = temp_db.get_email_history()
+    assert len(history) == 2
+    followup_row = next(row for row in history if row["variant"] == "followup-auto")
+    assert followup_row["followup_of"] == original_id
+    assert followup_row["sector"] == "agriculture"
+    assert followup_row["niche"] == "Organic Farming Supplies"
+    assert followup_row["body"] == "Follow-up body"
+    assert incremented == [(5, 1)]
+
+
+def test_run_followups_does_not_log_a_failed_send(temp_db, monkeypatch):
+    import asyncio
+    import main as main_module
+
+    monkeypatch.setattr(main_module.sheets, "get_leads_for_followup", lambda max_stage=2: [{
+        "Company": "Acme", "Website": "acme.com", "Contact Name": "Priya", "Email": "priya@acme.com",
+        "Email Subject": "Your site is slow", "Follow-up Stage": 0, "Message ID": "<orig@x.com>", "row_number": 5,
+    }])
+    monkeypatch.setattr(main_module.ses, "generate_followup", lambda contact, stage, name: "Follow-up body")
+    monkeypatch.setattr(main_module.ses, "send_followup", lambda *a, **k: False)
+    monkeypatch.setattr(main_module.sheets, "increment_followup", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not mark a failed send as followed up")))
+
+    asyncio.run(main_module.run_followups())
+
+    assert temp_db.get_email_history() == []
+
+
+def test_run_followups_with_no_findable_original_logs_blank_category(temp_db, monkeypatch):
+    """The original send might not be in email_history at all (sent before
+    2026-09-16, or via a path that never logged it) — a follow-up should
+    still get logged, just without a link or a category, rather than
+    crashing the whole batch."""
+    import asyncio
+    import main as main_module
+
+    monkeypatch.setattr(main_module.sheets, "get_leads_for_followup", lambda max_stage=2: [{
+        "Company": "Acme", "Website": "acme.com", "Contact Name": "Priya", "Email": "priya@acme.com",
+        "Email Subject": "Your site is slow", "Follow-up Stage": 0, "Message ID": "<no-such-message-id@x.com>", "row_number": 5,
+    }])
+    monkeypatch.setattr(main_module.ses, "generate_followup", lambda contact, stage, name: "Follow-up body")
+    monkeypatch.setattr(main_module.ses, "send_followup", lambda *a, **k: True)
+    monkeypatch.setattr(main_module.sheets, "increment_followup", lambda *a, **k: None)
+
+    asyncio.run(main_module.run_followups())
+
+    history = temp_db.get_email_history()
+    assert len(history) == 1
+    assert history[0]["followup_of"] is None
+    assert history[0]["sector"] is None
+    assert history[0]["niche"] is None
+
+
 def test_sentiment_is_persisted_on_the_reply_row(imap, temp_db):
     import emailer.reply_checker as checker
 

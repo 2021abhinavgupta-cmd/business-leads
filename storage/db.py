@@ -569,6 +569,28 @@ def get_email_history_by_id(history_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def get_email_history_by_message_id(message_id: str) -> dict | None:
+    """
+    Looks up the original send by its RFC Message-ID — what
+    main.py:run_followups() has on hand (Sheets stores it as "Message ID"
+    on the lead row after /api/send sets it), unlike the History tab's
+    Generate Follow-up button which already has the row's own id. Lets the
+    automated follow-up job link followup_of and inherit sector/niche the
+    same way the manual /api/send-followup path does, rather than logging
+    an orphaned row with no category and no link back to what it replied to.
+    """
+    if not message_id:
+        return None
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM email_history WHERE message_id = ? ORDER BY timestamp DESC LIMIT 1", (message_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def _normalise_website_key(website: str) -> str:
     """
     Same loose matching a lead's website needs everywhere else in this
