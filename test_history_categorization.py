@@ -66,6 +66,7 @@ def test_a_row_with_a_farm_like_company_name_is_guessed_agriculture(monkeypatch,
 
     row = db.get_email_history()[0]
     assert row["guessed_category"] == "agriculture"
+    assert row["guessed_high_confidence"] is False
     # The guess must never leak into the real columns.
     assert row["sector"] is None
     assert row["niche"] is None
@@ -77,6 +78,36 @@ def test_a_row_with_a_textile_like_website_is_guessed_textile(monkeypatch, tmp_p
 
     row = db.get_email_history()[0]
     assert row["guessed_category"] == "textile"
+    assert row["guessed_high_confidence"] is False
+
+
+def test_a_row_whose_body_has_the_agri_credibility_line_is_detected_high_confidence(monkeypatch, tmp_path):
+    """BaseSender._AGRI_CREDIBILITY_LINE is a fixed phrase this codebase
+    itself writes verbatim (metazyne.in/agriusindia) — never user-typed,
+    never a coincidental word — so finding it is a real detection, not a
+    loose guess. The company name here deliberately gives no hint at all,
+    proving this path doesn't depend on the company/website heuristic."""
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email(
+        "Sunrise Dental Clinic", "sunrisedental.com", "lead@x.com", "us@x.com", "S",
+        "One more thing: agriculture is a sector we work in hands on. We built the Metazyne site (metazyne.in) and run the Agrius pages (instagram.com/agriusindia).",
+    )
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] == "agriculture"
+    assert row["guessed_high_confidence"] is True
+
+
+def test_a_row_whose_body_has_the_textile_credibility_line_is_detected_high_confidence(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_email(
+        "Sunrise Dental Clinic", "sunrisedental.com", "lead@x.com", "us@x.com", "S",
+        "We designed and built the Alpine Texworld site (alpinetexworld.com) end to end.",
+    )
+
+    row = db.get_email_history()[0]
+    assert row["guessed_category"] == "textile"
+    assert row["guessed_high_confidence"] is True
 
 
 def test_a_row_with_no_matching_keywords_is_not_guessed_at_all(monkeypatch, tmp_path):
@@ -108,10 +139,14 @@ def test_a_row_with_a_real_sector_already_recorded_is_never_guessed_over(monkeyp
     assert row["sector"] == "textile"
 
 
-def test_the_guess_never_looks_at_subject_or_body_text(monkeypatch, tmp_path):
-    """Narrower on purpose — a company's own name/domain is usually a
-    direct giveaway, while cold-email prose is long and generic enough
-    that a stray word could false-positive."""
+def test_the_loose_keyword_guess_never_scans_generic_subject_or_body_prose(monkeypatch, tmp_path):
+    """The loose company/website keyword guess is narrower on purpose — a
+    company's own name/domain is usually a direct giveaway, while generic
+    cold-email prose is long enough that a stray word could false-positive.
+    (The specific credibility-line markers ARE checked in the body, by
+    design — see the high-confidence tests above; this test is about the
+    loose keyword patterns only, on subject/body text that isn't one of
+    those fixed phrases.)"""
     _use_temp_db(monkeypatch, tmp_path)
     db.log_email(
         "Sunrise Dental Clinic", "sunrisedental.com", "lead@x.com", "us@x.com",

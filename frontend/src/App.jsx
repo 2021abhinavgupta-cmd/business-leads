@@ -2858,19 +2858,22 @@ function App() {
   // every search. A row with neither (sent before 2026-09-21, or from a
   // niche-less source like Krishi Maharashtra's fixed dataset routed
   // through the Agriculture bucket already, or an MNC-name lookup) falls
-  // back to a best-effort guess off company/website (db.py's
-  // _guess_category — added 2026-09-23 on explicit request after
-  // confirming with the user that a clearly-labeled guess was wanted for
-  // old data rather than leaving it Uncategorized), or "Uncategorized" if
-  // even that finds nothing. "(guessed)" is a deliberately different
-  // label from the real "Agriculture"/"Textile" buckets so a guess can
-  // never be mistaken for, or silently merged into, confirmed data.
+  // back to db.py's _guess_category, which comes in two confidence tiers:
+  // guessed_high_confidence true means the body literally contains the
+  // fixed agri/textile credibility-line marker (metazyne.in/agriusindia,
+  // alpinetexworld.com) — a real detection, not a guess, since that phrase
+  // is only ever written by this codebase itself. false means the looser
+  // company/website keyword match. Both stay clearly separate from the
+  // real "Agriculture"/"Textile" buckets so neither can be mistaken for,
+  // or silently merged into, confirmed data — and the two tiers are
+  // worded differently from each other too, since "from email content" is
+  // a much stronger claim than "guessed".
   const historyCategoryLabel = (log) => {
     if (log.sector === 'agriculture') return 'Agriculture';
     if (log.sector === 'textile') return 'Textile';
     if (log.niche) return log.niche;
-    if (log.guessed_category === 'agriculture') return 'Agriculture (guessed)';
-    if (log.guessed_category === 'textile') return 'Textile (guessed)';
+    if (log.guessed_category === 'agriculture') return log.guessed_high_confidence ? 'Agriculture (from email content)' : 'Agriculture (guessed)';
+    if (log.guessed_category === 'textile') return log.guessed_high_confidence ? 'Textile (from email content)' : 'Textile (guessed)';
     return 'Uncategorized';
   };
 

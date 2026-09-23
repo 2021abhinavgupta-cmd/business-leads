@@ -452,33 +452,54 @@ def get_reply_summary() -> tuple[dict, dict]:
 _AGRI_GUESS_PATTERN = re.compile(r"agri|farm|krishi|agro", re.IGNORECASE)
 _TEXTILE_GUESS_PATTERN = re.compile(r"textile|fabric|garment|apparel|yarn|weav|cotton", re.IGNORECASE)
 
+# BaseSender._AGRI_CREDIBILITY_LINE/_TEXTILE_CREDIBILITY_LINE are fixed
+# phrases this codebase itself writes verbatim into the body — never
+# user-typed, never a coincidental word in generic prose — so finding one
+# in an old, uncategorized row's body is effectively a confirmed detection
+# of that sector, not a guess (2026-09-23, "i have added extra line for
+# both agriculture and textile" — the user pointed out this signal exists).
+# Only fires when the credibility line was actually opted into per draft,
+# so it has low recall (misses agri/textile sends without it) but very
+# high precision on the ones it does catch — a useful complement to the
+# company/website guess below, which is the opposite tradeoff.
+_AGRI_CREDIBILITY_MARKERS = ("metazyne.in", "agriusindia")
+_TEXTILE_CREDIBILITY_MARKER = "alpinetexworld.com"
 
-def _guess_category(row: dict) -> str | None:
+
+def _guess_category(row: dict) -> tuple[str | None, bool]:
     """
-    Best-effort guess for a row with no recorded sector/niche at all — rows
-    sent before 2026-09-23, when neither was ever captured (see
+    Best-effort category for a row with no recorded sector/niche at all —
+    rows sent before 2026-09-23, when neither was ever captured (see
     log_email's sector/niche params). Never a substitute for the real
     thing: only called when both sector and niche are genuinely blank, and
-    the caller (get_email_history) surfaces it as a separate
-    "guessed_category" field rather than backfilling sector/niche
-    themselves, so a wrong guess can never be mistaken for confirmed data
-    or silently overwrite it later.
+    the caller (get_email_history) surfaces the result as a separate
+    "guessed_category"/"guessed_high_confidence" pair rather than
+    backfilling sector/niche themselves, so this can never be mistaken for
+    confirmed data or silently overwrite it later.
 
-    Deliberately checks company/website only, not subject/body — the
-    business's own name or domain is usually a direct giveaway ("XYZ
-    Textiles", "sunfarms.com"), while a lot of prose in cold-email copy is
-    long and generic enough that "farm" or "weav-" could turn up in an
-    unrelated sentence. Narrower on purpose, at the cost of missing some
-    real matches, since the whole feature exists to avoid confidently
-    mislabeling something that was never actually recorded as agriculture
-    or textile.
+    Returns (category, high_confidence). Checks the credibility-line
+    markers first (near-certain when present — see above), then falls back
+    to a looser company/website keyword match (a business's own name or
+    domain is usually a direct giveaway — "XYZ Textiles", "sunfarms.com" —
+    though this one is a real guess, not a detection, so it's flagged
+    high_confidence=False). Deliberately never scans the rest of the body
+    for the loose keyword patterns — cold-email prose is long and generic
+    enough that "farm" or "weav-" could turn up in an unrelated sentence,
+    and the whole feature exists to avoid confidently mislabeling
+    something that was never actually recorded.
     """
+    body = row.get("body") or ""
+    if any(marker in body for marker in _AGRI_CREDIBILITY_MARKERS):
+        return "agriculture", True
+    if _TEXTILE_CREDIBILITY_MARKER in body:
+        return "textile", True
+
     haystack = f"{row.get('company') or ''} {row.get('website') or ''}"
     if _AGRI_GUESS_PATTERN.search(haystack):
-        return "agriculture"
+        return "agriculture", False
     if _TEXTILE_GUESS_PATTERN.search(haystack):
-        return "textile"
-    return None
+        return "textile", False
+    return None, False
 
 
 def get_email_history():
@@ -522,7 +543,10 @@ def get_email_history():
         # a real niche (even a non-agri/textile one, e.g. "Dentist") is
         # already correctly categorized and must never be overridden by a
         # guess.
-        row["guessed_category"] = _guess_category(row) if not row.get("sector") and not row.get("niche") else None
+        if not row.get("sector") and not row.get("niche"):
+            row["guessed_category"], row["guessed_high_confidence"] = _guess_category(row)
+        else:
+            row["guessed_category"], row["guessed_high_confidence"] = None, False
 
     return rows
 
