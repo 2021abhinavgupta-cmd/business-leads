@@ -183,3 +183,45 @@ def test_a_match_with_no_email_on_file_returns_blank_not_an_error(monkeypatch):
     leads = scraper.scrape("Dentist")
 
     assert leads[0]["Email"] == ""
+
+
+# ---------------------------------------------------------------
+# City narrowing (added 2026-09-25)
+# ---------------------------------------------------------------
+
+def test_scrape_defaults_to_searching_all_of_india(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5)
+
+    assert captured["organization_locations"] == ["india"]
+
+
+def test_scrape_narrows_to_a_given_city(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5, city="Mumbai")
+
+    # Lowercased to match the example values in Apollo's own docs
+    # ("texas", "tokyo", "spain").
+    assert captured["organization_locations"] == ["mumbai"]
+
+
+def test_scrape_treats_a_whitespace_only_city_as_no_city(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5, city="   ")
+
+    assert captured["organization_locations"] == ["india"]

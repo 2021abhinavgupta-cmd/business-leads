@@ -254,10 +254,23 @@ class KrishiMaharashtraSearchRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
 
 class ApolloSearchRequest(BaseModel):
-    # No city — ApolloFreeScraper.scrape() searches by job title/keywords via
-    # Apollo's People Search API, not a geo query, so there's nothing to pass
-    # a city into.
     niche: str
+    limit: int = Field(default=25, ge=1, le=100)
+    # Apollo's organization_locations filter accepts a city, so this narrows
+    # a search to one city's businesses instead of all of India (which is
+    # what every Apollo search did until 2026-09-25). Neighbourhood-level
+    # targeting is NOT possible here — Apollo takes cities, US states and
+    # countries only — so an area like BKC has to go through
+    # /api/search-area instead. Optional: blank keeps the country-wide
+    # behaviour.
+    city: str = ""
+
+
+class AreaSearchRequest(BaseModel):
+    # A named place, not coordinates: "BKC", "Andheri East, Mumbai",
+    # "Koramangala Bangalore". Resolved to a search box via the Geocoding
+    # API, so anything Google Maps can find by name works.
+    area: str
     limit: int = Field(default=25, ge=1, le=100)
 
 class NearbySearchRequest(BaseModel):
@@ -527,11 +540,17 @@ async def search_leads_apollo(
     one on its own. That enrichment call spends real Apollo credits (1 per
     email actually found, 0 otherwise).
 
-    Hardcoded to small Indian businesses (1-50 employees, owner/founder/
-    C-suite seniority only) — see scrapers/apollo_free.py's scrape() for
-    the reasoning. An unfiltered global keyword search would surface any
+    Hardcoded to small businesses (1-50 employees, owner/founder/C-suite
+    seniority only) — see scrapers/apollo_free.py's scrape() for the
+    reasoning. An unfiltered global keyword search would surface any
     company size, and a large one is a poor fit for this tool's "here's
     what's wrong with your website" pitch.
+
+    `city` narrows results to companies headquartered there; leaving it
+    blank searches all of India, which is what this endpoint always did
+    before 2026-09-25. Apollo cannot be narrowed below city level, so a
+    business district (BKC, Koramangala) has to be searched through
+    /api/search-area instead.
 
     Was previously only reachable via scheduler.py's automated
     LEAD_SOURCE=b2b job, never from the UI — this is the on-demand version.
@@ -539,9 +558,64 @@ async def search_leads_apollo(
     if not config.APOLLO_API_KEY:
         raise HTTPException(status_code=400, detail="APOLLO_API_KEY is not set — add it in Railway's Variables tab first.")
     try:
-        leads = await asyncio.to_thread(apollo_scraper.scrape, req.niche, req.limit)
+        leads = await asyncio.to_thread(apollo_scraper.scrape, req.niche, req.limit, req.city)
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
         return {"leads": leads}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/search-area")
+async def search_leads_by_area(
+    req: AreaSearchRequest,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_api_key),
+    # Same 5/min as /api/search-nearby, and for the same reason: one call
+    # here fans out into a Geocoding lookup plus one billable Places call
+    # per business type.
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    """
+    Find businesses of any type inside a named area — a business district,
+    a suburb, a neighbourhood — without needing to know its niche first.
+
+    This is the "I know BKC is full of businesses but not what kind"
+    search. Results carry a Category per lead, so the caller can see which
+    niches the area is actually made of and then aim a niche-based search
+    (including Apollo, at city level) at what it found.
+
+    Distinct from /api/search-nearby, which boxes by the caller's own
+    device GPS and so can only ever search where they physically are.
+    """
+    if not config.GOOGLE_MAPS_API_KEY:
+        raise HTTPException(status_code=400, detail="GOOGLE_MAPS_API_KEY is not set — add it in Railway's Variables tab first.")
+    try:
+        area = await asyncio.to_thread(maps_scraper.resolve_area, req.area)
+        if not area:
+            # 404 rather than 500: a name Google cannot place is a bad
+            # request, not a broken server. Also the shape a typo takes, and
+            # what the user sees if the Geocoding API was never enabled on
+            # the key (the scraper logs the real REQUEST_DENIED status).
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not find an area called '{req.area}'. Try adding the city, e.g. 'BKC, Mumbai'.",
+            )
+
+        leads = await maps_scraper.scrape_area(area, limit=req.limit)
+        background_tasks.add_task(save_leads_to_sheets_bg, leads)
+
+        total_search_cost = sum(lead.get("search_cost", 0) for lead in leads)
+        if total_search_cost > 0:
+            await asyncio.to_thread(
+                db.log_cost, "Google Maps API", total_search_cost,
+                description=f"Area search: {area['name']} ({len(leads)} leads)"
+            )
+
+        # The city travels back with the leads so the frontend can hand it
+        # to Apollo — Apollo cannot take the area itself.
+        return {"leads": leads, "area": {"name": area["name"], "city": area["city"]}}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

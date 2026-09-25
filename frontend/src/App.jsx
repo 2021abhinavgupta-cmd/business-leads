@@ -154,12 +154,25 @@ function App() {
   const [localSearching, setLocalSearching] = useState(false);
   const [localProgress, setLocalProgress] = useState(null);
   const [localLastResult, setLocalLastResult] = useState('');
-  // Apollo (B2B decision-maker) search — no city, since Apollo's People
-  // Search API searches by job title/keyword globally, not geography.
+  // Apollo (B2B decision-maker) search. City is optional and is as tight as
+  // Apollo can be aimed — its location filter takes cities, states and
+  // countries but not neighbourhoods. Blank searches all of India, which is
+  // what this did for every search before the city field existed.
   const [showApolloSearch, setShowApolloSearch] = useState(false);
   const [apolloNiche, setApolloNiche] = useState('');
+  const [apolloCity, setApolloCity] = useState('');
   const [apolloSearching, setApolloSearching] = useState(false);
   const [apolloLastResult, setApolloLastResult] = useState('');
+  // Area search — "show me what businesses are in BKC" when the niche is
+  // unknown. Unlike the nearby search below it takes a typed place name
+  // rather than device GPS, so any business district can be prospected
+  // without being there. areaResult holds the resolved place and its city;
+  // the city is what gets handed to Apollo afterwards.
+  const [showAreaSearch, setShowAreaSearch] = useState(false);
+  const [areaQuery, setAreaQuery] = useState('');
+  const [areaSearching, setAreaSearching] = useState(false);
+  const [areaResult, setAreaResult] = useState(null);
+  const [areaNicheCounts, setAreaNicheCounts] = useState([]);
   // "Search One Niche Across Many Cities" — requested after the two above:
   // "i search a specific place and send the mails based on it" / "i want in
   // the app only to make it search in more way now" — the direct fix for
@@ -591,17 +604,71 @@ function App() {
     setApolloSearching(true);
     setApolloLastResult('');
     try {
-      const res = await axios.post(`${API_BASE}/api/search-apollo`, { niche: apolloNiche, limit: parseInt(limit) || 25 });
+      const res = await axios.post(`${API_BASE}/api/search-apollo`, { niche: apolloNiche, city: apolloCity, limit: parseInt(limit) || 25 });
       const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo', sectorDetail: apolloNiche }));
       setLeads(prev => [...tagged, ...prev]);
       setLeadsPage(1);
-      setApolloLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo.`);
+      setApolloLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo${apolloCity.trim() ? ` in ${apolloCity.trim()}` : ' across India'}.`);
     } catch (err) {
       console.error('Apollo search failed:', err);
       alert(`Error searching Apollo: ${err.response?.data?.detail || err.message}`);
     } finally {
       setApolloSearching(false);
     }
+  };
+
+  // Area search: type a business district, get back whatever is in it.
+  //
+  // The point of this one is the niche breakdown it produces, not just the
+  // leads. Every Google lead carries a Category, so counting them tells you
+  // what an unfamiliar area is actually made of — which is the missing
+  // first step when you know a place has businesses but not which kind.
+  // Clicking one of those counts aims Apollo at that niche in the resolved
+  // city (Apollo cannot be aimed at the area itself).
+  const handleAreaSearch = async (e) => {
+    e.preventDefault();
+    if (!areaQuery.trim()) { alert('Enter an area first, e.g. "BKC, Mumbai".'); return; }
+    setAreaSearching(true);
+    setAreaResult(null);
+    setAreaNicheCounts([]);
+    try {
+      const res = await axios.post(`${API_BASE}/api/search-area`, { area: areaQuery, limit: parseInt(limit) || 25 });
+      const tagged = res.data.leads.map(lead => ({
+        ...lead,
+        auditState: 'none',
+        sourceType: 'area',
+        // The Google category IS the niche here — there was nothing typed
+        // to tag these with, which is the whole reason for this search.
+        sectorDetail: lead.Category || '',
+      }));
+      setLeads(prev => [...tagged, ...prev]);
+      setLeadsPage(1);
+      setAreaResult(res.data.area);
+
+      const counts = {};
+      tagged.forEach(lead => {
+        const label = (lead.Category || '').trim() || 'Uncategorized';
+        counts[label] = (counts[label] || 0) + 1;
+      });
+      setAreaNicheCounts(Object.entries(counts).sort((a, b) => b[1] - a[1]));
+
+      if (tagged.length === 0) {
+        alert(`Found ${res.data.area?.name || areaQuery}, but no businesses with a website inside it. Try a wider area name, e.g. the suburb instead of the complex.`);
+      }
+    } catch (err) {
+      console.error('Area search failed:', err);
+      alert(`Error searching that area: ${err.response?.data?.detail || err.message}`);
+    } finally {
+      setAreaSearching(false);
+    }
+  };
+
+  // Hand one discovered niche to Apollo, pre-filled with the city the area
+  // resolved to, and open that panel so the next click is just "Search".
+  const handleUseNicheInApollo = (nicheLabel) => {
+    setApolloNiche(nicheLabel);
+    setApolloCity(areaResult?.city || '');
+    setShowApolloSearch(true);
   };
 
   // One real /api/search lookup for one niche in one city — the same shape
@@ -1579,6 +1646,9 @@ function App() {
           <button type="button" onClick={() => { if (!showApolloSearch && !apolloNiche) setApolloNiche(niche); setShowApolloSearch(!showApolloSearch); }} style={{ background: showApolloSearch ? '#fee2e2' : '#f8fafc', border: showApolloSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showApolloSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
             {showApolloSearch ? 'Cancel' : 'Search Apollo (B2B)'}
           </button>
+          <button type="button" onClick={() => { if (!showAreaSearch && !areaQuery) setAreaQuery(city); setShowAreaSearch(!showAreaSearch); }} style={{ background: showAreaSearch ? '#fee2e2' : '#f8fafc', border: showAreaSearch ? '1px solid #f87171' : '1px solid #cbd5e1', color: showAreaSearch ? '#ef4444' : '#334155', padding: '0 20px', borderRadius: '12px', cursor: 'pointer', height: '48px', fontSize: '15px', fontWeight: 'bold', transition: 'all 0.2s', whiteSpace: 'nowrap', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+            {showAreaSearch ? 'Cancel' : 'Search an Area'}
+          </button>
         </div>
       </form>
       {loadingSearch && searchProgressNote && (
@@ -1728,12 +1798,70 @@ function App() {
               <label>Business Niche / Keyword</label>
               <input type="text" list="niche-options" value={apolloNiche} onChange={e => setApolloNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" />
             </div>
+            <div className="input-group" style={{ flex: 1, minWidth: 180 }}>
+              <label>City (optional)</label>
+              <input type="text" list="city-options" value={apolloCity} onChange={e => setApolloCity(e.target.value)} placeholder="Blank = all of India" />
+            </div>
+            <div style={{ width: '100%', fontSize: 12, color: '#94a3b8', marginTop: -4 }}>
+              Apollo can be narrowed to a city, but not to a specific area or business district — for that, use Search an Area above.
+            </div>
             <button type="submit" className="primary-btn" disabled={apolloSearching} style={{ background: apolloSearching ? '#94a3b8' : '#0891b2' }}>
               {apolloSearching ? <Loader2 className="spin" /> : <Search />}
               {apolloSearching ? 'Searching...' : 'Search Apollo'}
             </button>
             {!apolloSearching && apolloLastResult && (
               <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#10b981' }}>{apolloLastResult}</p>
+            )}
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showAreaSearch && (
+          <motion.form initial={{ opacity: 0, height: 0, marginTop: 0 }} animate={{ opacity: 1, height: 'auto', marginTop: 16 }} exit={{ opacity: 0, height: 0, marginTop: 0 }} className="search-box glass" style={{ overflow: 'hidden', flexWrap: 'wrap' }} onSubmit={handleAreaSearch}>
+            <div style={{ width: '100%', fontSize: 13, color: '#64748b', marginBottom: 4 }}>
+              For when you know an area is full of businesses but not what kind. Type a business district, suburb or
+              neighbourhood and this searches every industry inside its real map boundary, no niche needed. You get the
+              leads plus a count of which niches the area actually contains, and you can send any of those straight to Apollo.
+            </div>
+            <div className="input-group" style={{ flex: 2, minWidth: 240 }}>
+              <label>Area / Business District</label>
+              <input type="text" value={areaQuery} onChange={e => setAreaQuery(e.target.value)} placeholder="e.g. BKC, Mumbai" />
+            </div>
+            <button type="submit" className="primary-btn" disabled={areaSearching} style={{ background: areaSearching ? '#94a3b8' : '#7c3aed' }}>
+              {areaSearching ? <Loader2 className="spin" /> : <MapPin />}
+              {areaSearching ? 'Searching...' : 'Search This Area'}
+            </button>
+            {areaSearching && (
+              <p style={{ width: '100%', margin: '4px 0 0', fontSize: 13, color: '#94a3b8' }}>
+                Searching one industry at a time across the area. This takes a minute.
+              </p>
+            )}
+            {!areaSearching && areaResult && (
+              <div style={{ width: '100%', marginTop: 8 }}>
+                <p style={{ margin: '0 0 8px', fontSize: 13, color: '#10b981' }}>
+                  Searched {areaResult.name}{areaResult.city ? ` — city: ${areaResult.city}` : ''}.
+                </p>
+                {areaNicheCounts.length > 0 && (
+                  <>
+                    <p style={{ margin: '0 0 6px', fontSize: 13, color: '#334155', fontWeight: 600 }}>
+                      Niches found here — click one to search it across {areaResult.city || 'India'} on Apollo:
+                    </p>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                      {areaNicheCounts.map(([label, count]) => (
+                        <button
+                          key={label}
+                          type="button"
+                          onClick={() => handleUseNicheInApollo(label)}
+                          style={{ background: '#ede9fe', border: '1px solid #c4b5fd', color: '#5b21b6', padding: '6px 12px', borderRadius: 999, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+                        >
+                          {label} ({count})
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
           </motion.form>
         )}
