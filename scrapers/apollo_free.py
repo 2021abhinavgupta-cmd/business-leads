@@ -60,15 +60,24 @@ class ApolloFreeScraper:
             print(f"Apollo enrichment failed for {first_name} {last_name}: {e}")
             return ""
 
-    def scrape(self, niche: str, limit: int = 50) -> list[dict]:
+    def scrape(self, niche: str, limit: int = 50, city: str = "") -> list[dict]:
         """
         Search Apollo for decision makers in a specific niche.
+
+        *city*, when given, narrows the search to companies headquartered
+        there instead of anywhere in India. Apollo's organization_locations
+        filter accepts cities, US states and countries but NOT
+        neighbourhoods or postal codes (confirmed against
+        docs.apollo.io/reference/people-api-search), so this is as tight as
+        Apollo can be aimed — "mumbai", never "bandra kurla complex". An
+        area-level search belongs to the Google Places path
+        (GoogleMapsScraper.scrape_area), which is boxed by real coordinates.
         """
         if not self.api_key:
             print("APOLLO_API_KEY is not set in .env. Skipping Apollo scraper.")
             return []
             
-        print(f"Scraping Apollo (Free API) for: {niche}...")
+        print(f"Scraping Apollo (Free API) for: {niche} in {city or 'india (country-wide)'}...")
         leads = []
         
         headers = {
@@ -95,18 +104,28 @@ class ApolloFreeScraper:
         #   - organization_num_employees_ranges: small businesses only —
         #     this is who can approve a small agency's pitch on their own
         #     say-so, and who plausibly still has real website problems.
-        #   - organization_locations: India — matches this tool's actual
-        #     market everywhere else (MCA lookup, IndiaMART/TradeIndia,
-        #     Maharashtra government data, IST-scheduled sends).
-        # These are deliberately hardcoded, not exposed as search options —
-        # if a genuinely different market/company-size is ever needed, widen
-        # this rather than silently drift back to the unfiltered version.
+        #   - organization_locations: India by default — matches this tool's
+        #     actual market everywhere else (MCA lookup, IndiaMART/
+        #     TradeIndia, Maharashtra government data, IST-scheduled sends).
+        # The seniority and company-size filters are deliberately hardcoded,
+        # not exposed as search options — if a genuinely different
+        # market/company-size is ever needed, widen this rather than
+        # silently drift back to the unfiltered version.
+        #
+        # Location is the one that IS caller-controlled, added 2026-09-25.
+        # Until then it was always ["india"], which meant every Apollo
+        # search swept the entire country: asking for "Digital Marketing
+        # Agency" returned owners in Kochi and Guwahati with equal weight to
+        # the city actually being prospected. A city narrows it; blank keeps
+        # the old country-wide behaviour so every existing caller
+        # (scheduler.py's b2b job, the tests) is unaffected.
+        locations = [city.strip().lower()] if city and city.strip() else ["india"]
         payload = {
             "q_keywords": niche,
             "person_titles": ["founder", "ceo", "owner", "cmo", "marketing"],
             "person_seniorities": ["owner", "founder", "c_suite"],
             "organization_num_employees_ranges": ["1,10", "11,50"],
-            "organization_locations": ["india"],
+            "organization_locations": locations,
             "page": 1,
             "per_page": min(limit, 100) # Apollo limit per page
         }

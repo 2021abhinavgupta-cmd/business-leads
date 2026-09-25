@@ -11,7 +11,21 @@ from analyzer.visuals import _acquire_playwright_slot, _release_playwright_slot
 
 TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
+# Geocoding is a SEPARATE Google API from Places — it shares
+# GOOGLE_MAPS_API_KEY but has to be enabled on its own in the Cloud console,
+# and a key restricted to Places alone will get REQUEST_DENIED here. That
+# failure is handled (resolve_area returns None) rather than raised, so the
+# rest of the app keeps working if it was never switched on.
+GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 _REQUEST_DELAY = 2  # seconds
+
+# Half-height/width of the fallback search box, in degrees, used only when
+# Geocoding returns a place with no viewport of its own. Roughly 2.2km at
+# India's latitudes — a sane "neighbourhood" default. A real viewport is
+# always preferred because it is sized to the actual area: Bandra Kurla
+# Complex is about 1.5km across while Andheri East is nearer 5km, and one
+# fixed radius would under-search the second and over-search the first.
+_DEFAULT_AREA_BOX_DEGREES = 0.02
 
 # Place types that are returned by a no-keyword nearby search but are never
 # a sellable lead — infrastructure, transit, civic amenities and the like.
@@ -348,6 +362,206 @@ class GoogleMapsScraper:
             f"[Maps Nearby] {len(places)} place(s) within {radius_m}m -> {len(deduped)} lead(s) "
             f"({skipped_non_business} skipped as non-business, {dropped_thin} below "
             f"MIN_GOOGLE_REVIEWS={config.MIN_GOOGLE_REVIEWS}, rest had no website or a duplicate domain)."
+        )
+        return deduped
+
+    # ---------------------------------------------------------
+    # Area search — "everything inside this named place", no niche
+    # ---------------------------------------------------------
+    @staticmethod
+    def _city_from_components(components: list[dict]) -> str:
+        """
+        The tightest real city name in a Geocoding result's address
+        components, or "" if there isn't one.
+
+        Exists so an area search can hand a city to Apollo. Apollo's
+        organization_locations filter accepts cities, US states and
+        countries but NOT neighbourhoods (confirmed against
+        docs.apollo.io/reference/people-api-search), so "Bandra Kurla
+        Complex" is not something Apollo can be pointed at — "Mumbai" is.
+        Falling back through the administrative levels keeps this working
+        for an area whose Geocoding result has no `locality` at all.
+        """
+        for wanted in ("locality", "administrative_area_level_2", "administrative_area_level_1"):
+            for component in components:
+                if wanted in (component.get("types") or []):
+                    return component.get("long_name", "")
+        return ""
+
+    def resolve_area(self, area_name: str) -> dict | None:
+        """
+        Turn a typed place name ("BKC", "Andheri East, Mumbai") into the
+        box to search inside, or None if it can't be resolved.
+
+        Returns None rather than raising on every failure path — no API key,
+        no such place, Geocoding not enabled on the key, network error — so
+        the caller's only job is to tell the user the area wasn't found.
+        """
+        if not self.api_key:
+            print("[Maps Area] No GOOGLE_MAPS_API_KEY set — cannot resolve an area name.")
+            return None
+        if not area_name or not area_name.strip():
+            return None
+
+        try:
+            response = self.client.get(
+                GEOCODE_URL, params={"address": area_name.strip(), "key": self.api_key}
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            print(f"[Maps Area] Geocoding request failed for {area_name!r}: {e}")
+            return None
+
+        status = data.get("status")
+        results = data.get("results") or []
+        if status != "OK" or not results:
+            # ZERO_RESULTS for a typo, REQUEST_DENIED if the Geocoding API
+            # was never enabled on this key — both are "we have no box to
+            # search", and both print the real status so the difference is
+            # visible in the logs.
+            print(f"[Maps Area] Geocoding returned {status or 'no status'} for {area_name!r}.")
+            return None
+
+        top = results[0]
+        geometry = top.get("geometry") or {}
+        location = geometry.get("location") or {}
+        latitude, longitude = location.get("lat"), location.get("lng")
+        if latitude is None or longitude is None:
+            print(f"[Maps Area] Geocoding result for {area_name!r} had no coordinates.")
+            return None
+
+        viewport = geometry.get("viewport") or {}
+        northeast = viewport.get("northeast") or {}
+        southwest = viewport.get("southwest") or {}
+        north = northeast.get("lat", latitude + _DEFAULT_AREA_BOX_DEGREES)
+        east = northeast.get("lng", longitude + _DEFAULT_AREA_BOX_DEGREES)
+        south = southwest.get("lat", latitude - _DEFAULT_AREA_BOX_DEGREES)
+        west = southwest.get("lng", longitude - _DEFAULT_AREA_BOX_DEGREES)
+
+        area = {
+            "name": top.get("formatted_address") or area_name.strip(),
+            "query": area_name.strip(),
+            "latitude": latitude,
+            "longitude": longitude,
+            "city": self._city_from_components(top.get("address_components") or []),
+            # Places API (New) names the corners low (southwest) and high
+            # (northeast); Geocoding names them southwest/northeast. Mapped
+            # here so nothing downstream has to know both vocabularies.
+            "rectangle": {
+                "low": {"latitude": south, "longitude": west},
+                "high": {"latitude": north, "longitude": east},
+            },
+        }
+        print(f"[Maps Area] Resolved {area_name!r} -> {area['name']} (city: {area['city'] or 'unknown'}).")
+        return area
+
+    async def scrape_area(self, area: dict, limit: int = 25) -> list[dict]:
+        """
+        Find businesses of every type inside a resolved *area*'s box.
+
+        Same "no niche needed" job as scrape_nearby, but boxed by a named
+        place instead of the caller's own GPS position, which is the whole
+        point: you cannot stand in every business district you want to
+        prospect.
+
+        Uses searchText with a rectangle locationRestriction rather than
+        searchNearby with a circle. A rectangle is a hard restriction — a
+        place outside it is dropped, not merely ranked lower — and it is
+        shaped like the area actually is, where a circle around a centroid
+        either misses one end or spills into the next suburb.
+
+        Like scrape_nearby, it queries one business type at a time. That is
+        what produces both volume (each type gets its own result budget) and
+        the category spread this search exists for: the returned leads carry
+        a Category, so the caller can see which niches an unfamiliar area is
+        actually full of.
+        """
+        rectangle = (area or {}).get("rectangle")
+        if not rectangle:
+            return []
+
+        collected: dict[str, dict] = {}
+        for place_type in _NEARBY_TYPE_ROTATION:
+            # The type tokens are API enum values ("beauty_salon"); searchText
+            # wants human text, and reads "beauty salon" correctly.
+            batch = await self._text_search_in_box(place_type.replace("_", " "), rectangle)
+            for lead in batch:
+                # Keyed by domain so a business matching two types, or a
+                # chain with several branches in the area, counts once.
+                collected.setdefault(self._extract_domain(lead["Website"]), lead)
+
+            if len(collected) >= limit:
+                break
+            # Same jittered pacing as the rest of this scraper.
+            await asyncio.sleep(random.uniform(0.3, 0.9))
+
+        leads = list(collected.values())[:limit]
+        print(f"[Maps Area] Returning {len(leads)} lead(s) inside {area.get('name', 'the area')}.")
+        return leads
+
+    async def _text_search_in_box(self, text_query: str, rectangle: dict) -> list[dict]:
+        """One searchText call restricted to a lat/lng rectangle."""
+        headers = {
+            "X-Goog-Api-Key": self.api_key,
+            "X-Goog-FieldMask": (
+                "places.displayName,places.websiteUri,places.nationalPhoneNumber,"
+                "places.formattedAddress,places.rating,places.userRatingCount,"
+                "places.primaryTypeDisplayName,places.types"
+            ),
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "textQuery": text_query,
+            "locationRestriction": {"rectangle": rectangle},
+            "pageSize": 20,
+        }
+
+        try:
+            response = await asyncio.to_thread(
+                self.client.post, TEXT_SEARCH_URL, headers=headers, json=payload
+            )
+            response.raise_for_status()
+            places = response.json().get("places", [])
+        except Exception as e:
+            print(f"[Maps Area] Search for {text_query!r} failed: {e}")
+            return []
+
+        leads = []
+        skipped_non_business = 0
+        for place in places:
+            name = place.get("displayName", {}).get("text", "")
+            website = place.get("websiteUri", "")
+            if not name or not website:
+                continue
+
+            if set(place.get("types", [])) & _NON_BUSINESS_TYPES:
+                skipped_non_business += 1
+                continue
+
+            leads.append({
+                "Company": name,
+                "Website": website,
+                "Phone": place.get("nationalPhoneNumber", ""),
+                "Address": place.get("formattedAddress", ""),
+                "Rating": str(place.get("rating", "")),
+                "Reviews Count": place.get("userRatingCount", 0),
+                "Category": (place.get("primaryTypeDisplayName") or {}).get("text", ""),
+                "Email": "",
+                "Instagram Handle": "",
+                "Decision Maker Name": "",
+                "Source": "Google Maps (Area)",
+            })
+
+        before_review_filter = len(leads)
+        leads = [lead for lead in leads if _passes_review_floor(lead)]
+        dropped_thin = before_review_filter - len(leads)
+
+        deduped = self._deduplicate(leads)
+        print(
+            f"[Maps Area] {text_query!r}: {len(places)} place(s) -> {len(deduped)} lead(s) "
+            f"({skipped_non_business} skipped as non-business, {dropped_thin} below "
+            f"MIN_GOOGLE_REVIEWS={config.MIN_GOOGLE_REVIEWS})."
         )
         return deduped
 
