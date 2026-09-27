@@ -1575,12 +1575,37 @@ function App() {
   const sortedLeadIndices = useMemo(() => {
     const indices = leads.map((_, i) => i);
     const scoreFn = LEAD_SORT_COMPARATORS[leadSortKey];
-    if (!scoreFn) return indices; // 'default' — as returned by the search
-    // Stable-ish: ties keep their original relative order since Array#sort
-    // in modern engines is a stable sort and neither score nor original
-    // index is ever equal-but-reordered here.
-    return indices.sort((a, b) => scoreFn(leads[b]) - scoreFn(leads[a]));
-  }, [leads, leadSortKey]);
+    if (scoreFn) {
+      // Stable-ish: ties keep their original relative order since Array#sort
+      // in modern engines is a stable sort and neither score nor original
+      // index is ever equal-but-reordered here.
+      indices.sort((a, b) => scoreFn(leads[b]) - scoreFn(leads[a]));
+    }
+    // Outreach state always outranks the chosen sort key, on request
+    // 2026-09-27 ("it shows the already sent emails in that list, those
+    // should be at the last, the 1st should be to whom i have not sent").
+    // A repeat search for a niche you have already worked returns the same
+    // businesses it always did, so without this the top of page 1 is full
+    // of people you have already emailed and the ones actually worth your
+    // time are buried pages down.
+    //
+    // Three tiers rather than two: a drafted-but-unsent lead is half-done
+    // work, so it belongs below untouched leads (which need the most
+    // attention) but above sent ones (which need none).
+    //
+    // Applied as a SECOND pass on top of the sort above, not folded into
+    // it, because Array#sort is stable — so within each tier the leads stay
+    // in whatever order 'Most reviews'/'Highest rating'/'as found' put them.
+    const outreachRank = (lead) => {
+      const key = normaliseWebsiteKey(lead.Website);
+      // auditState covers a send made in THIS session, before the
+      // sentWebsites map has been refetched.
+      if (lead.auditState === 'sent' || sentWebsites[key]) return 2;
+      if (draftedWebsites[key]) return 1;
+      return 0;
+    };
+    return indices.sort((a, b) => outreachRank(leads[a]) - outreachRank(leads[b]));
+  }, [leads, leadSortKey, sentWebsites, draftedWebsites]);
 
   const renderHome = () => (
     <>
@@ -1925,7 +1950,7 @@ function App() {
               id="lead-sort"
               value={leadSortKey}
               onChange={e => { setLeadSortKey(e.target.value); setLeadsPage(1); }}
-              title="'Most reviews' and 'Highest rating' work on any fresh search. 'Highest capital' and 'Budget tier' need a lead to be audited first — unaudited leads sort last on those two, not as confirmed small."
+              title="Whatever you pick here, leads you have already emailed always sink to the bottom and drafted-but-unsent ones sit just above them, so the top of the list is always people you have not contacted yet. 'Most reviews' and 'Highest rating' work on any fresh search. 'Highest capital' and 'Budget tier' need a lead to be audited first — unaudited leads sort last on those two, not as confirmed small."
               style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', background: '#fff', fontSize: '14px' }}
             >
               <option value="default">Default (as found)</option>

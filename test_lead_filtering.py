@@ -190,3 +190,102 @@ def test_defaults_are_the_gentle_active_setting():
     """
     assert config.MIN_BUDGET_TIER == ""
     assert config.MIN_GOOGLE_REVIEWS == 0
+
+
+# ---------------------------------------------------------------------------
+# Education filtering on keyword searches (added 2026-09-27)
+#
+# Live-reported: searching the niche "agriculture" came back full of
+# agriculture colleges, which match the text query on name alone and are not
+# the buyer this tool pitches. Filtered on a keyword search ONLY when the
+# keyword itself isn't asking for education — unlike the area/nearby
+# searches, a text search returns the thing the user literally typed, so a
+# blanket type filter there would be wrong.
+# ---------------------------------------------------------------------------
+
+def _maps_scraper_returning(monkeypatch, places):
+    from scrapers.google_maps import GoogleMapsScraper
+
+    monkeypatch.setattr(config, "MIN_GOOGLE_REVIEWS", 0)
+    scraper = GoogleMapsScraper()
+    scraper.api_key = "x"
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"places": places}
+
+    monkeypatch.setattr(scraper.client, "post", lambda *a, **k: _Resp())
+    monkeypatch.setattr("scrapers.google_maps.time.sleep", lambda *_a: None)
+    return scraper
+
+
+_AGRI_PLACES = [
+    {"displayName": {"text": "College of Agriculture Pune"}, "websiteUri": "https://coapune.example",
+     "userRatingCount": 400, "types": ["university", "point_of_interest"]},
+    {"displayName": {"text": "Green Valley Agri Tools"}, "websiteUri": "https://greenvalley.example",
+     "userRatingCount": 40, "types": ["hardware_store", "store"]},
+    {"displayName": {"text": "Agri Public School"}, "websiteUri": "https://agrischool.example",
+     "userRatingCount": 120, "types": ["school"]},
+]
+
+
+def test_an_agriculture_search_drops_colleges_and_schools(monkeypatch):
+    scraper = _maps_scraper_returning(monkeypatch, _AGRI_PLACES)
+
+    names = {lead["Company"] for lead in scraper._scrape_via_api("agriculture", "Pune", limit=10)}
+
+    assert names == {"Green Valley Agri Tools"}
+
+
+def test_an_education_search_still_returns_education(monkeypatch):
+    # The escape hatch: someone deliberately prospecting colleges must not
+    # get an empty list back.
+    scraper = _maps_scraper_returning(monkeypatch, _AGRI_PLACES)
+
+    names = {lead["Company"] for lead in scraper._scrape_via_api("agriculture college", "Pune", limit=10)}
+
+    assert "College of Agriculture Pune" in names
+    assert "Agri Public School" in names
+
+
+def test_the_education_escape_hatch_matches_several_wordings(monkeypatch):
+    from scrapers.google_maps import _EDUCATION_NICHE_PATTERN
+
+    for niche in ["School", "engineering college", "University", "coaching classes",
+                  "IIT institute", "dance academy", "education consultant", "tuition centre"]:
+        assert _EDUCATION_NICHE_PATTERN.search(niche), niche
+    for niche in ["agriculture", "textile", "dentist", "gym", "car repair"]:
+        assert not _EDUCATION_NICHE_PATTERN.search(niche), niche
+
+
+def test_a_non_education_business_is_never_dropped_for_its_other_types(monkeypatch):
+    # Only the education types trigger the filter here — unlike the area
+    # search, a keyword search must not quietly drop hospitals, banks or
+    # parks, because the user may well have typed exactly that.
+    places = [
+        {"displayName": {"text": "City Care Hospital"}, "websiteUri": "https://citycare.example",
+         "userRatingCount": 900, "types": ["hospital"]},
+        {"displayName": {"text": "Metro Bank"}, "websiteUri": "https://metrobank.example",
+         "userRatingCount": 300, "types": ["bank"]},
+    ]
+    scraper = _maps_scraper_returning(monkeypatch, places)
+
+    names = {lead["Company"] for lead in scraper._scrape_via_api("hospital", "Pune", limit=10)}
+
+    assert names == {"City Care Hospital", "Metro Bank"}
+
+
+def test_a_listing_with_no_type_data_is_kept(monkeypatch):
+    # Older/sparse listings can come back without a types array at all.
+    # Missing data is "unknown", not "school" — same principle as the
+    # review floor treating a missing count as unknown rather than small.
+    places = [
+        {"displayName": {"text": "Mystery Agri Co"}, "websiteUri": "https://mystery.example",
+         "userRatingCount": 10},
+    ]
+    scraper = _maps_scraper_returning(monkeypatch, places)
+
+    names = {lead["Company"] for lead in scraper._scrape_via_api("agriculture", "Pune", limit=10)}
+
+    assert names == {"Mystery Agri Co"}

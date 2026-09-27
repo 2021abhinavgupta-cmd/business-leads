@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 import time
 from urllib.parse import urlparse
 import httpx
@@ -42,6 +43,32 @@ _NON_BUSINESS_TYPES = {
     "school", "primary_school", "secondary_school", "university",
     "hospital", "atm", "bank",
 }
+
+# Education places, dropped from a keyword search unless the keyword itself
+# is asking for one. Live-reported 2026-09-27: searching the niche
+# "agriculture" came back full of agriculture colleges, because a college
+# whose name contains the word matches the text query as readily as a real
+# agri business does. Schools are not the buyer this tool pitches — there is
+# no owner who can act on a website audit on their own say-so.
+#
+# Narrower than _NON_BUSINESS_TYPES below on purpose. That set is safe for
+# searchNearby/searchText-by-area, where nothing was asked for by name and
+# anything unsellable is noise. A keyword search is different: the user
+# typed the thing they want, so dropping hospitals from a search for
+# "hospital" would be wrong. Only education is filtered here, and only when
+# the niche itself isn't educational — see _EDUCATION_NICHE_PATTERN.
+_EDUCATION_TYPES = {
+    "school", "primary_school", "secondary_school", "preschool",
+    "university", "college",
+}
+
+# Escape hatch for the filter above: a niche that IS about education keeps
+# its education results. Someone deliberately searching "coaching classes"
+# or "engineering college" must not get an empty list.
+_EDUCATION_NICHE_PATTERN = re.compile(
+    r"school|college|universit|institute|academy|coaching|education|tuition|kindergarten",
+    re.IGNORECASE,
+)
 
 # Place types queried one-per-request by scrape_nearby. Each gets its own
 # 20-result budget from the API, which is the only way to get volume out of
@@ -157,13 +184,20 @@ class GoogleMapsScraper:
             # and page 2+ fetch correctly. This capped every search at one
             # 20-result page, which after the has-a-website filter and
             # domain dedupe below is why asking for 10 leads returned ~5.
-            "X-Goog-FieldMask": "places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount,nextPageToken",
+            # places.types was added 2026-09-27 for the education filter
+            # below — without it the response carries no type information at
+            # all and a college is indistinguishable from a business.
+            "X-Goog-FieldMask": "places.displayName,places.websiteUri,places.nationalPhoneNumber,places.formattedAddress,places.rating,places.userRatingCount,places.types,nextPageToken",
             "Content-Type": "application/json"
         }
         payload = {
             "textQuery": f"{niche} in {city}",
             "pageSize": 20
         }
+
+        # Only filter education out when the caller did not ask for it.
+        drop_education = not _EDUCATION_NICHE_PATTERN.search(niche or "")
+        skipped_education = 0
         
         # Now that pagination actually works (see the field-mask note above),
         # this loop needs a hard page bound: `len(leads) < limit` alone can
@@ -191,7 +225,11 @@ class GoogleMapsScraper:
                 
                 if not name or not website:
                     continue
-                    
+
+                if drop_education and set(place.get("types", [])) & _EDUCATION_TYPES:
+                    skipped_education += 1
+                    continue
+
                 leads.append({
                     "Company": name,
                     "Website": website,
@@ -215,6 +253,8 @@ class GoogleMapsScraper:
         dropped_thin = before_review_filter - len(leads)
         if dropped_thin:
             print(f"[Maps API] Dropped {dropped_thin} lead(s) with a Google review count below MIN_GOOGLE_REVIEWS={config.MIN_GOOGLE_REVIEWS}. Listings with no review data at all are kept.")
+        if skipped_education:
+            print(f"[Maps API] Skipped {skipped_education} school/college/university listing(s) — '{niche}' is not an education niche, so these matched on name only.")
 
         deduped = self._deduplicate(leads)[:limit]
         # Two filters legitimately shrink the result set below `limit`:
