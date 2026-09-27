@@ -40,42 +40,110 @@ class ApolloFreeScraper:
         # no email is dead weight for a tool whose whole job is sending cold
         # emails.
         self.match_url = "https://api.apollo.io/api/v1/people/match"
+        # Bulk enrichment: same data and same credit cost per record as
+        # match_url, but 10 people per request instead of 1. Added
+        # 2026-09-28 — a 25 lead search was making 25 separate calls, which
+        # is pure rate-limit exposure for no benefit.
+        self.bulk_match_url = "https://api.apollo.io/api/v1/people/bulk_match"
 
-    def _enrich_email(self, person: dict, org_name: str) -> str:
-        """
-        One enrichment call for one person. Returns "" on any failure
-        (not found, missing name, HTTP error) rather than raising — a lead
-        with no email just falls back to "no email, contact via phone/
-        LinkedIn instead", same as any other source's no-email lead; it must
-        never take down the rest of the batch.
-        """
-        first_name = person.get("first_name", "")
-        last_name = person.get("last_name", "")
-        if not (first_name and last_name):
-            return ""
+    # Apollo's own label for how much it trusts an address. Only "verified"
+    # is safe to actually send to: Apollo returns pattern-based GUESSES when
+    # it cannot confirm an inbox, and published bounce rates on Apollo lists
+    # run 3-9%. That matters more here than for most tools, because this
+    # project sends through SES under a warm-up cap (config.DAILY_EMAIL_LIMIT)
+    # where bounces damage sender reputation for EVERY send, not just the
+    # Apollo ones. A guessed address is therefore kept and shown, but never
+    # placed in the field the send path reads.
+    _SENDABLE_EMAIL_STATUS = "verified"
 
-        params = {
-            "first_name": first_name,
-            "last_name": last_name,
-            "reveal_personal_emails": True,
-        }
-        if org_name:
-            params["organization_name"] = org_name
+    # Apollo's bulk endpoint takes at most 10 people per request.
+    _BULK_ENRICH_BATCH = 10
+
+    def _enrich_emails(self, people: list[dict]) -> list[dict]:
+        """
+        Emails for *people*, in the same order, via Apollo's bulk endpoint.
+
+        Returns one dict per input person: {"email": str, "status": str}.
+        A person Apollo could not match, or a whole batch that failed, comes
+        back as {"email": "", "status": ""} — never an exception. A lead
+        with no email just falls back to "contact via phone instead", same
+        as any other source's no-email lead, and one bad batch must never
+        take down the rest of the search.
+
+        Uses /people/bulk_match (10 per call) rather than /people/match (1
+        per call), added 2026-09-28. Same credit cost per record either way,
+        so this is purely about call volume: a 25 lead search was 25 requests
+        and is now 3, which matters because Apollo rate limits per minute.
+        The bulk response also reports credits_consumed directly, so the
+        credit figure logged below is Apollo's own number instead of this
+        code inferring it from how many emails came back.
+        """
+        results = [{"email": "", "status": ""} for _ in people]
+        if not people or not self.api_key:
+            return results
 
         headers = {
             "Cache-Control": "no-cache",
             "Content-Type": "application/json",
             "X-Api-Key": self.api_key,
         }
-        try:
-            with httpx.Client(timeout=15) as client:
-                response = client.post(self.match_url, headers=headers, json=params)
-                response.raise_for_status()
-                matched = response.json().get("person") or {}
-                return matched.get("email") or ""
-        except Exception as e:
-            print(f"Apollo enrichment failed for {first_name} {last_name}: {e}")
-            return ""
+
+        # Apollo cannot match a nameless person, so those are dropped from
+        # the batches entirely rather than occupying one of the ten slots.
+        # Their result stays blank, which is what the caller expects.
+        enrichable = [
+            (index, person)
+            for index, person in enumerate(people)
+            if person.get("first_name") and person.get("last_name")
+        ]
+
+        for start in range(0, len(enrichable), self._BULK_ENRICH_BATCH):
+            batch = enrichable[start:start + self._BULK_ENRICH_BATCH]
+            details = []
+            for _, person in batch:
+                detail = {
+                    "first_name": person.get("first_name", ""),
+                    "last_name": person.get("last_name", ""),
+                }
+                org_name = (person.get("organization") or {}).get("name", "")
+                if org_name:
+                    detail["organization_name"] = org_name
+                details.append(detail)
+
+            try:
+                with httpx.Client(timeout=30) as client:
+                    response = client.post(
+                        self.bulk_match_url,
+                        headers=headers,
+                        json={"details": details, "reveal_personal_emails": True},
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except Exception as e:
+                print(f"Apollo bulk enrichment failed for a batch of {len(batch)}: {e}")
+                continue
+
+            # Apollo returns `matches` positionally against `details`, with a
+            # null entry where it could not match someone.
+            matches = data.get("matches") or []
+            consumed = data.get("credits_consumed")
+            if consumed is not None:
+                print(f"Apollo bulk enrichment: {consumed} credit(s) consumed for {len(batch)} person(s).")
+
+            for (original_index, _), matched in zip(batch, matches):
+                if not matched:
+                    continue
+                # match_confidence is "high" or "none"; a "none" match is
+                # Apollo saying it guessed at WHO this is, so the address
+                # cannot be trusted no matter what status it carries.
+                if (matched.get("match_confidence") or "").lower() == "none":
+                    continue
+                results[original_index] = {
+                    "email": matched.get("email") or "",
+                    "status": (matched.get("email_status") or "").lower(),
+                }
+
+        return results
 
     @staticmethod
     def _explain_http_error(status: int, body: str) -> str:
@@ -231,6 +299,13 @@ class ApolloFreeScraper:
             "per_page": min(limit, 100) # Apollo limit per page
         }
 
+        # contact_email_status is applied on BOTH branches below (added
+        # 2026-09-28). Apollo hands back people it holds no confirmed
+        # address for unless told otherwise, and each of those costs a
+        # wasted enrichment attempt and yields a lead this pipeline cannot
+        # use, since its entire job is sending cold email. Asking for
+        # verified only at search time deliberately narrows the result count
+        # in exchange for results that can actually be mailed.
         if domains:
             # Targeting named companies, so the geography and keyword filters
             # are not just unnecessary, they are actively harmful: the caller
@@ -257,6 +332,7 @@ class ApolloFreeScraper:
             payload["person_seniorities"] = [
                 "owner", "founder", "c_suite", "partner", "director",
             ]
+            payload["contact_email_status"] = ["verified"]
             if niche and niche.strip():
                 payload["q_keywords"] = niche.strip()
         else:
@@ -267,6 +343,7 @@ class ApolloFreeScraper:
             payload["organization_locations"] = (
                 [city.strip().lower()] if city and city.strip() else ["india"]
             )
+            payload["contact_email_status"] = ["verified"]
 
         for attempt in range(3):
             try:
@@ -299,37 +376,64 @@ class ApolloFreeScraper:
             )
 
 
-        people = data.get("people", [])
-        credits_used = 0
-        for person in people:
-            org = person.get("organization", {})
-
-            company_name = org.get("name", "")
-            website = org.get("website_url", "")
-            first_name = person.get("first_name", "")
-            last_name = person.get("last_name", "")
-
-            if not company_name or not website:
-                # Skip enrichment too — this lead is being discarded either
-                # way, no point spending a credit on it.
+        # Two passes rather than enriching inside the loop: the bulk
+        # endpoint takes 10 people at a time, so the keepers have to be
+        # collected before any enrichment can happen.
+        keepers = []
+        skipped_no_company = 0
+        skipped_no_email_on_file = 0
+        for person in data.get("people", []):
+            org = person.get("organization") or {}
+            if not org.get("name") or not org.get("website_url"):
+                # Discarded either way, so it must not reach enrichment.
+                skipped_no_company += 1
                 continue
+            # has_email is Apollo telling us, for free in the search
+            # response, whether it holds a verified address for this person.
+            # Explicitly False means enrichment cannot return one, so the
+            # call is pure latency and rate-limit budget. Absent/None is
+            # "unknown" and still gets tried, the same way a missing review
+            # count is treated as unknown rather than zero elsewhere.
+            if person.get("has_email") is False:
+                skipped_no_email_on_file += 1
+                continue
+            keepers.append(person)
 
-            email = self._enrich_email(person, company_name)
-            if email:
-                credits_used += 1
+        enrichments = self._enrich_emails(keepers)
+
+        unverified = 0
+        for person, enriched in zip(keepers, enrichments):
+            org = person.get("organization") or {}
+            email = enriched["email"]
+            status = enriched["status"]
+            # Only a verified address goes in "Email", because that is the
+            # field the send path reads. A guessed one is still surfaced so
+            # the lead is not silently poorer than it is, but it sits in a
+            # field nothing can auto-send to.
+            sendable = email if status == self._SENDABLE_EMAIL_STATUS else ""
+            if email and not sendable:
+                unverified += 1
 
             leads.append({
-                "Company": company_name,
-                "Website": website,
-                "Phone": org.get("primary_phone", {}).get("number", ""),
+                "Company": org.get("name", ""),
+                "Website": org.get("website_url", ""),
+                "Phone": (org.get("primary_phone") or {}).get("number", ""),
                 "Address": org.get("city", ""),
                 "Rating": "Apollo B2B",
                 "Reviews Count": org.get("estimated_num_employees", 0),
-                "Email": email,
+                "Email": sendable,
+                "Unverified Email": "" if sendable else email,
+                "Email Status": status,
                 "Instagram Handle": "",
-                "Decision Maker Name": f"{first_name} {last_name}".strip(),
+                "Decision Maker Name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
                 "Source": "Apollo Free API"
             })
 
-        print(f"Apollo: {len(leads)} leads, {credits_used} enrichment credit(s) spent finding an email.")
+        print(
+            f"Apollo: {len(leads)} lead(s), "
+            f"{sum(1 for lead in leads if lead['Email'])} with a verified email, "
+            f"{unverified} with an unverified one held back from sending "
+            f"({skipped_no_company} skipped with no company/website, "
+            f"{skipped_no_email_on_file} skipped because Apollo holds no email for them)."
+        )
         return leads

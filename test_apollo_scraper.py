@@ -123,12 +123,13 @@ def test_a_qualifying_lead_gets_enriched_with_a_real_email(monkeypatch):
     def _post_fn(url, headers, json):
         if "mixed_people" in url:
             return _response(200, {"people": [_search_person()]})
-        assert url == "https://api.apollo.io/api/v1/people/match"
-        assert json["first_name"] == "Jane"
-        assert json["last_name"] == "Doe"
-        assert json["organization_name"] == "Acme"
+        # Bulk endpoint since 2026-09-28: 10 people per call instead of 1.
+        assert url == "https://api.apollo.io/api/v1/people/bulk_match"
         assert json["reveal_personal_emails"] is True
-        return _response(200, {"person": {"email": "jane@acme.com"}})
+        assert json["details"] == [
+            {"first_name": "Jane", "last_name": "Doe", "organization_name": "Acme"}
+        ]
+        return _response(200, {"matches": [{"email": "jane@acme.com", "email_status": "verified"}]})
 
     scraper = _scraper(monkeypatch, _post_fn)
     leads = scraper.scrape("Dentist")
@@ -143,35 +144,34 @@ def test_a_failed_enrichment_call_leaves_email_blank_without_crashing_the_batch(
     def _post_fn(url, headers, json):
         if "mixed_people" in url:
             return _response(200, {"people": [_search_person(), _search_person(first_name="Bob", last_name="Lee")]})
-        # Second person's enrichment call fails; the first (Jane) is fine.
-        if json["first_name"] == "Bob":
-            raise httpx.ConnectError("boom")
-        return _response(200, {"person": {"email": "jane@acme.com"}})
+        raise httpx.ConnectError("boom")
 
     scraper = _scraper(monkeypatch, _post_fn)
     leads = scraper.scrape("Dentist")
 
+    # Both people still come back as leads, just without an email — a
+    # failed enrichment must never cost the search its results.
     assert len(leads) == 2
-    assert leads[0]["Email"] == "jane@acme.com"
-    assert leads[1]["Email"] == ""
+    assert [lead["Email"] for lead in leads] == ["", ""]
 
 
 def test_enrichment_not_attempted_when_the_person_has_no_full_name(monkeypatch):
-    match_calls = []
+    bulk_calls = []
 
     def _post_fn(url, headers, json):
         if "mixed_people" in url:
             return _response(200, {"people": [_search_person(first_name="", last_name="")]})
-        match_calls.append(url)
-        return _response(200, {"person": {"email": "should-not-be-used@x.com"}})
+        bulk_calls.append(url)
+        return _response(200, {"matches": [{"email": "should-not-be-used@x.com", "email_status": "verified"}]})
 
     scraper = _scraper(monkeypatch, _post_fn)
     leads = scraper.scrape("Dentist")
 
     assert len(leads) == 1
     assert leads[0]["Email"] == ""
-    assert match_calls == []
-
+    # Apollo cannot match a nameless person, so they must not occupy one of
+    # the ten slots in a batch, let alone trigger a call of their own.
+    assert bulk_calls == []
 
 def test_a_match_with_no_email_on_file_returns_blank_not_an_error(monkeypatch):
     def _post_fn(url, headers, json):
@@ -514,3 +514,193 @@ def test_the_coverage_probe_answers_nothing_without_a_key_or_domains(monkeypatch
 
     monkeypatch.setattr(config, "APOLLO_API_KEY", "")
     assert ApolloFreeScraper().count_people_at_domains(["acme.com"]) is None
+
+
+# ---------------------------------------------------------------------------
+# Verified emails only, and bulk enrichment (added 2026-09-28)
+#
+# Apollo returns pattern-based guesses when it cannot confirm an inbox, and
+# published bounce rates on Apollo lists run 3-9%. This project sends through
+# SES under a warm-up cap, where a bounce damages sender reputation for every
+# send rather than just the one — so a guessed address is surfaced but never
+# placed in the field the send path reads.
+# ---------------------------------------------------------------------------
+
+def _search_then_bulk(monkeypatch, people, matches, capture=None):
+    def _post_fn(url, headers, json):
+        if "mixed_people" in url:
+            return _response(200, {"people": people})
+        if capture is not None:
+            capture.append(json)
+        return _response(200, {"matches": matches})
+
+    return _scraper(monkeypatch, _post_fn)
+
+
+def test_a_verified_email_is_sendable(monkeypatch):
+    scraper = _search_then_bulk(
+        monkeypatch, [_search_person()],
+        [{"email": "jane@acme.com", "email_status": "verified"}],
+    )
+    lead = scraper.scrape("Dentist")[0]
+
+    assert lead["Email"] == "jane@acme.com"
+    assert lead["Unverified Email"] == ""
+    assert lead["Email Status"] == "verified"
+
+
+def test_a_guessed_email_is_kept_but_never_sendable(monkeypatch):
+    scraper = _search_then_bulk(
+        monkeypatch, [_search_person()],
+        [{"email": "guess@acme.com", "email_status": "guessed"}],
+    )
+    lead = scraper.scrape("Dentist")[0]
+
+    # "Email" is the field the send path reads, so a guess must not be in it.
+    assert lead["Email"] == ""
+    # ...but the address is not thrown away either, since it is a real
+    # starting point for verifying by hand.
+    assert lead["Unverified Email"] == "guess@acme.com"
+    assert lead["Email Status"] == "guessed"
+
+
+def test_every_non_verified_status_is_held_back(monkeypatch):
+    for status in ["unverified", "likely to engage", "unavailable", "catch-all", ""]:
+        scraper = _search_then_bulk(
+            monkeypatch, [_search_person()],
+            [{"email": "x@acme.com", "email_status": status}],
+        )
+        assert scraper.scrape("Dentist")[0]["Email"] == "", status
+
+
+def test_a_low_confidence_match_is_discarded_entirely(monkeypatch):
+    """
+    match_confidence "none" is Apollo saying it guessed at WHO this is. The
+    address cannot be trusted whatever status rides along with it.
+    """
+    scraper = _search_then_bulk(
+        monkeypatch, [_search_person()],
+        [{"email": "wrong@acme.com", "email_status": "verified", "match_confidence": "none"}],
+    )
+    lead = scraper.scrape("Dentist")[0]
+
+    assert lead["Email"] == ""
+    assert lead["Unverified Email"] == ""
+
+
+def test_people_are_enriched_ten_at_a_time(monkeypatch):
+    captured = []
+    people = [_search_person(first_name=f"P{i}", last_name="X", website=f"https://c{i}.com", company=f"C{i}")
+              for i in range(23)]
+    scraper = _search_then_bulk(monkeypatch, people, [], capture=captured)
+
+    scraper.scrape("Dentist", limit=100)
+
+    # 23 people is 3 calls, not 23. Same credits either way, so this is
+    # purely about not burning Apollo's per-minute rate limit.
+    assert [len(call["details"]) for call in captured] == [10, 10, 3]
+
+
+def test_a_search_result_apollo_has_no_email_for_is_never_enriched(monkeypatch):
+    """
+    has_email is Apollo telling us for free, in the search response, that it
+    holds no confirmed address. Enriching that person cannot return one.
+    """
+    captured = []
+    scraper = _search_then_bulk(
+        monkeypatch,
+        [dict(_search_person(), has_email=False)],
+        [], capture=captured,
+    )
+
+    assert scraper.scrape("Dentist") == []
+    assert captured == []
+
+
+def test_an_unknown_has_email_is_still_enriched(monkeypatch):
+    """Missing data is unknown, not "no" — same rule as a missing review count."""
+    captured = []
+    scraper = _search_then_bulk(
+        monkeypatch, [_search_person()],
+        [{"email": "jane@acme.com", "email_status": "verified"}], capture=captured,
+    )
+
+    assert scraper.scrape("Dentist")[0]["Email"] == "jane@acme.com"
+    assert len(captured) == 1
+
+
+def test_results_stay_aligned_when_a_nameless_person_sits_between_two_others(monkeypatch):
+    """
+    Nameless people are dropped from the batches, so the match list no longer
+    lines up with the input list positionally. Getting this wrong would
+    attach one person's email to another person's company.
+    """
+    people = [
+        _search_person(first_name="Jane", last_name="Doe", company="A", website="https://a.com"),
+        _search_person(first_name="", last_name="", company="B", website="https://b.com"),
+        _search_person(first_name="Bob", last_name="Lee", company="C", website="https://c.com"),
+    ]
+    scraper = _search_then_bulk(monkeypatch, people, [
+        {"email": "jane@a.com", "email_status": "verified"},
+        {"email": "bob@c.com", "email_status": "verified"},
+    ])
+
+    leads = scraper.scrape("Dentist")
+
+    by_company = {lead["Company"]: lead["Email"] for lead in leads}
+    assert by_company == {"A": "jane@a.com", "B": "", "C": "bob@c.com"}
+
+
+def test_a_null_match_leaves_that_person_blank_without_shifting_the_rest(monkeypatch):
+    people = [
+        _search_person(first_name="Jane", last_name="Doe", company="A", website="https://a.com"),
+        _search_person(first_name="Bob", last_name="Lee", company="C", website="https://c.com"),
+    ]
+    scraper = _search_then_bulk(monkeypatch, people, [
+        None,
+        {"email": "bob@c.com", "email_status": "verified"},
+    ])
+
+    by_company = {lead["Company"]: lead["Email"] for lead in scraper.scrape("Dentist")}
+    assert by_company == {"A": "", "C": "bob@c.com"}
+
+
+def test_the_search_asks_apollo_for_verified_contacts_only(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5, city="Mumbai")
+
+    assert captured["contact_email_status"] == ["verified"]
+
+
+def test_a_domain_search_also_asks_for_verified_contacts_only(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, domains=["acme.com"])
+
+    assert captured["contact_email_status"] == ["verified"]
+
+
+def test_the_coverage_probe_does_not_ask_for_verified_only(monkeypatch):
+    """
+    The probe measures how many people Apollo holds at all. Filtering it to
+    verified would answer a narrower question and make a real coverage gap
+    indistinguishable from an email gap.
+    """
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"pagination": {"total_entries": 5}})
+
+    _scraper(monkeypatch, _post).count_people_at_domains(["acme.com"])
+
+    assert "contact_email_status" not in captured
