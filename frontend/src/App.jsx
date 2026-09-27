@@ -600,15 +600,31 @@ function App() {
   // spreading requests around.
   const handleApolloSearch = async (e) => {
     e.preventDefault();
-    if (!apolloNiche.trim()) { alert('Enter a niche first.'); return; }
+    if (!apolloNiche.trim() && !apolloCity.trim()) {
+      alert('Enter a niche, a place, or both. A place on its own works for a city or a business district.');
+      return;
+    }
     setApolloSearching(true);
     setApolloLastResult('');
     try {
       const res = await axios.post(`${API_BASE}/api/search-apollo`, { niche: apolloNiche, city: apolloCity, limit: parseInt(limit) || 25 });
-      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo', sectorDetail: apolloNiche }));
+      const tagged = res.data.leads.map(lead => ({ ...lead, auditState: 'none', sourceType: 'apollo', sectorDetail: apolloNiche || lead.Category || '' }));
       setLeads(prev => [...tagged, ...prev]);
       setLeadsPage(1);
-      setApolloLastResult(`Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo${apolloCity.trim() ? ` in ${apolloCity.trim()}` : ' across India'}.`);
+
+      const count = `Added ${tagged.length} lead${tagged.length === 1 ? '' : 's'} from Apollo`;
+      if (res.data.area) {
+        // District search. The match count is the honest headline here:
+        // Apollo knows agencies and firms far better than it knows a small
+        // local clinic, so a partial match is normal and hiding it would
+        // make an empty-looking result read as "this district has nobody".
+        setApolloLastResult(
+          `${count} in ${res.data.area.name}. Found ${res.data.companies_found} companies on the map there, Apollo had decision makers for ${res.data.companies_matched}.`
+          + (res.data.note ? ` ${res.data.note}` : '')
+        );
+      } else {
+        setApolloLastResult(`${count}${apolloCity.trim() ? ` in ${apolloCity.trim()}` : ' across India'}.`);
+      }
     } catch (err) {
       console.error('Apollo search failed:', err);
       alert(`Error searching Apollo: ${err.response?.data?.detail || err.message}`);
@@ -1836,11 +1852,13 @@ function App() {
               <input type="text" list="niche-options" value={apolloNiche} onChange={e => setApolloNiche(e.target.value)} placeholder="e.g. Digital Marketing Agency" />
             </div>
             <div className="input-group" style={{ flex: 1, minWidth: 180 }}>
-              <label>City (optional)</label>
-              <input type="text" list="city-options" value={apolloCity} onChange={e => setApolloCity(e.target.value)} placeholder="Blank = all of India" />
+              <label>City or Area (optional)</label>
+              <input type="text" list="city-options" value={apolloCity} onChange={e => setApolloCity(e.target.value)} placeholder="Mumbai, or BKC Mumbai" />
             </div>
             <div style={{ width: '100%', fontSize: 12, color: '#94a3b8', marginTop: -4 }}>
-              Apollo can be narrowed to a city, but not to a specific area or business district — for that, use Search an Area above.
+              A city goes straight to Apollo. A business district (BKC, Andheri East, Koramangala) works too: Apollo has no filter
+              smaller than a city, so the app finds the real companies inside that district on the map first and asks Apollo who runs
+              them. That costs a Google sweep on top, takes about a minute, and Apollo will only know some of the companies found.
             </div>
             <button type="submit" className="primary-btn" disabled={apolloSearching} style={{ background: apolloSearching ? '#94a3b8' : '#0891b2' }}>
               {apolloSearching ? <Loader2 className="spin" /> : <Search />}

@@ -16,7 +16,7 @@ import config
 from scrapers.google_maps import GoogleMapsScraper
 from scrapers.indiamart_dork import IndiaMartDorkScraper, TradeIndiaDorkScraper, ExportersIndiaDorkScraper
 from scrapers.krishi_maharashtra import KrishiMaharashtraScraper
-from scrapers.apollo_free import ApolloFreeScraper
+from scrapers.apollo_free import ApolloFreeScraper, ApolloError
 from scrapers.website import WebsiteScraper
 from scrapers.instagram import InstagramScraper
 from analyzer.ai_audit import AIAuditor
@@ -254,15 +254,19 @@ class KrishiMaharashtraSearchRequest(BaseModel):
     limit: int = Field(default=50, ge=1, le=200)
 
 class ApolloSearchRequest(BaseModel):
-    niche: str
+    # Optional since 2026-09-27: a district search ("BKC") targets named
+    # companies found on the map, so it needs no keyword at all. At least
+    # one of niche/city must be given — enforced in the endpoint so the
+    # error can explain itself rather than being a bare 422.
+    niche: str = ""
     limit: int = Field(default=25, ge=1, le=100)
-    # Apollo's organization_locations filter accepts a city, so this narrows
-    # a search to one city's businesses instead of all of India (which is
-    # what every Apollo search did until 2026-09-25). Neighbourhood-level
-    # targeting is NOT possible here — Apollo takes cities, US states and
-    # countries only — so an area like BKC has to go through
-    # /api/search-area instead. Optional: blank keeps the country-wide
-    # behaviour.
+    # Any place name. A whole city goes straight to Apollo's
+    # organization_locations filter. Anything smaller than a city (a
+    # district like BKC, a suburb like Andheri East) cannot be expressed to
+    # Apollo at all — its location filter stops at city level — so the
+    # endpoint resolves the district on the map first and asks Apollo for
+    # decision makers at the exact companies found inside it. Blank keeps
+    # the country-wide behaviour.
     city: str = ""
 
 
@@ -565,10 +569,86 @@ async def search_leads_apollo(
     """
     if not config.APOLLO_API_KEY:
         raise HTTPException(status_code=400, detail="APOLLO_API_KEY is not set — add it in Railway's Variables tab first.")
+    if not (req.niche or "").strip() and not (req.city or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Give a niche, a place, or both. A place on its own works only for a city or district.",
+        )
+
+    place = (req.city or "").strip()
+    area = None
+    if place:
+        # Resolving even a plain city name is worth the one geocode call: it
+        # is the only way to know whether what was typed is something Apollo
+        # can be aimed at, and it normalises "BKC" to the city Apollo does
+        # understand along the way.
+        area = await asyncio.to_thread(maps_scraper.resolve_area, place)
+
     try:
-        leads = await asyncio.to_thread(apollo_scraper.scrape, req.niche, req.limit, req.city)
+        if area and not area["is_city"]:
+            # A district. Apollo has no filter for this, so find the real
+            # companies inside its map boundary and ask Apollo about those
+            # exact companies by domain.
+            if not config.GOOGLE_MAPS_API_KEY:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{place}' is a district, not a city. Searching one needs GOOGLE_MAPS_API_KEY set, because Apollo cannot target anything smaller than a city on its own.",
+                )
+            # Deliberately sweeps wider than the requested lead count: these
+            # are candidate companies to ask Apollo about, and Apollo will
+            # only know some of them, so a 25-company sweep would routinely
+            # come back with a handful of matches.
+            area_leads = await maps_scraper.scrape_area(area, limit=max(req.limit * 4, 60))
+            domains = []
+            seen = set()
+            for lead in area_leads:
+                domain = maps_scraper._extract_domain(lead.get("Website", ""))
+                if domain and domain not in seen:
+                    seen.add(domain)
+                    domains.append(domain)
+
+            if not domains:
+                return {
+                    "leads": [], "area": {"name": area["name"], "city": area["city"]},
+                    "companies_found": 0, "companies_matched": 0,
+                    "note": f"No businesses with a website were found inside {area['name']}, so there was nothing to ask Apollo about.",
+                }
+
+            leads = await asyncio.to_thread(
+                apollo_scraper.scrape, req.niche, req.limit, "", domains
+            )
+            matched_domains = {
+                maps_scraper._extract_domain(lead.get("Website", "")) for lead in leads
+            }
+            background_tasks.add_task(save_leads_to_sheets_bg, leads)
+            return {
+                "leads": leads,
+                "area": {"name": area["name"], "city": area["city"]},
+                # Reported rather than hidden: Apollo knows agencies and
+                # firms far better than it knows a three-person clinic, so a
+                # partial match is the normal outcome and the user should be
+                # able to see it instead of inferring a short list means the
+                # district is empty.
+                "companies_found": len(domains),
+                "companies_matched": len(matched_domains & seen),
+            }
+
+        # A city, or nothing resolvable — the original city-level path.
+        city_for_apollo = area["city"] if area and area.get("city") else place
+        leads = await asyncio.to_thread(
+            apollo_scraper.scrape, req.niche, req.limit, city_for_apollo, None
+        )
         background_tasks.add_task(save_leads_to_sheets_bg, leads)
-        return {"leads": leads}
+        return {"leads": leads, "area": None}
+    except ApolloError as e:
+        # 502: Apollo refused us, the request itself was fine. The message is
+        # written for the person running the search and goes straight to the
+        # UI — before this, an invalid key, a plan that blocks the endpoint
+        # and a genuinely empty result were indistinguishable, all three
+        # rendering as "Added 0 leads".
+        raise HTTPException(status_code=502, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

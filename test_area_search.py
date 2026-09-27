@@ -440,3 +440,68 @@ def test_search_area_rejects_an_out_of_range_limit(monkeypatch):
     monkeypatch.setattr(app_module.config, "GOOGLE_MAPS_API_KEY", "fake-key")
 
     assert client.post("/api/search-area", json={"area": "BKC", "limit": 500}).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# is_city — which lead source can serve a place (added 2026-09-27)
+#
+# Apollo can be aimed at a city but at nothing smaller, so this flag decides
+# whether a search goes straight to Apollo or has to resolve real companies
+# on the map first. The type values below were read off the live Geocoding
+# API, not assumed.
+# ---------------------------------------------------------------------------
+
+def _geocode_with_types(types):
+    payload = _geocode_payload()
+    payload["results"][0]["types"] = types
+    return payload
+
+
+def test_a_city_is_recognised_as_a_city(monkeypatch):
+    scraper = _scraper(
+        monkeypatch,
+        get_fn=lambda url, params: _json_response(_geocode_with_types(["locality", "political"]), method="GET"),
+    )
+    assert scraper.resolve_area("Mumbai")["is_city"] is True
+
+
+def test_a_state_is_recognised_as_city_or_broader(monkeypatch):
+    scraper = _scraper(
+        monkeypatch,
+        get_fn=lambda url, params: _json_response(
+            _geocode_with_types(["administrative_area_level_1", "political"]), method="GET"),
+    )
+    assert scraper.resolve_area("Maharashtra")["is_city"] is True
+
+
+def test_a_business_district_is_not_a_city(monkeypatch):
+    # BKC, live: ['political', 'sublocality', 'sublocality_level_2']
+    scraper = _scraper(
+        monkeypatch,
+        get_fn=lambda url, params: _json_response(
+            _geocode_with_types(["political", "sublocality", "sublocality_level_2"]), method="GET"),
+    )
+    assert scraper.resolve_area("BKC, Mumbai")["is_city"] is False
+
+
+def test_a_suburb_is_not_a_city(monkeypatch):
+    # Andheri East, live: ['political', 'sublocality', 'sublocality_level_1']
+    scraper = _scraper(
+        monkeypatch,
+        get_fn=lambda url, params: _json_response(
+            _geocode_with_types(["political", "sublocality", "sublocality_level_1"]), method="GET"),
+    )
+    assert scraper.resolve_area("Andheri East, Mumbai")["is_city"] is False
+
+
+def test_a_result_with_no_types_is_treated_as_a_district(monkeypatch):
+    """
+    The conservative default. The district path still works for a city, just
+    at the cost of a Places sweep, whereas wrongly calling a district a city
+    would silently search the wrong geography and look like it worked.
+    """
+    payload = _geocode_payload()
+    payload["results"][0].pop("types", None)
+    scraper = _scraper(monkeypatch, get_fn=lambda url, params: _json_response(payload, method="GET"))
+
+    assert scraper.resolve_area("Something Odd")["is_city"] is False
