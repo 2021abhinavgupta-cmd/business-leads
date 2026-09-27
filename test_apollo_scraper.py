@@ -349,7 +349,14 @@ def test_domain_targeting_drops_the_company_size_filter(monkeypatch):
     assert "organization_num_employees_ranges" not in captured
 
 
-def test_domain_targeting_keeps_the_seniority_filter(monkeypatch):
+def test_domain_targeting_keeps_a_seniority_filter(monkeypatch):
+    """
+    Seniority is the one narrowing filter a domain search keeps — reaching a
+    decision maker is the point. The exact list was widened later the same
+    day (see the Director/Partner tests at the end of this file) after a live
+    search matched nobody; this only guards that the filter still exists at
+    all and still demands an owner-level role.
+    """
     captured = {}
 
     def _post(url, headers, json):
@@ -358,7 +365,8 @@ def test_domain_targeting_keeps_the_seniority_filter(monkeypatch):
 
     _scraper(monkeypatch, _post).scrape("", limit=5, domains=["acme.com"])
 
-    assert captured["person_seniorities"] == ["owner", "founder", "c_suite"]
+    assert "owner" in captured["person_seniorities"]
+    assert "founder" in captured["person_seniorities"]
 
 
 def test_a_blank_niche_sends_no_keyword_at_all_with_domains(monkeypatch):
@@ -408,3 +416,101 @@ def test_blank_domains_fall_back_to_the_ordinary_city_search(monkeypatch):
 
     assert captured["organization_locations"] == ["mumbai"]
     assert "q_organization_domains_list" not in captured
+
+
+# ---------------------------------------------------------------------------
+# Widened reach on domain searches + the coverage probe (added 2026-09-27)
+#
+# A live BKC search found 60 companies and matched 0 people. Apollo combines
+# person_titles and person_seniorities with AND (confirmed in the docs), so
+# the old pairing demanded a literal title from {founder, ceo, owner, cmo,
+# marketing} AND a seniority from {owner, founder, c_suite} — which discards
+# the Director / Partner / Proprietor who actually runs an Indian SME.
+# ---------------------------------------------------------------------------
+
+def _capturing(monkeypatch, response=None):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, response if response is not None else {"people": []})
+
+    return _scraper(monkeypatch, _post), captured
+
+
+def test_a_domain_search_sends_no_job_title_filter(monkeypatch):
+    """
+    Titles AND seniorities is the trap: a Director clears the seniority
+    filter and then fails the title filter, so the pairing threw away every
+    Indian SME decision maker.
+    """
+    scraper, captured = _capturing(monkeypatch)
+    scraper.scrape("", limit=5, domains=["acme.com"])
+
+    assert "person_titles" not in captured
+
+
+def test_a_domain_search_includes_directors_and_partners(monkeypatch):
+    scraper, captured = _capturing(monkeypatch)
+    scraper.scrape("", limit=5, domains=["acme.com"])
+
+    assert set(captured["person_seniorities"]) == {
+        "owner", "founder", "c_suite", "partner", "director",
+    }
+
+
+def test_the_ordinary_city_search_keeps_its_original_filters(monkeypatch):
+    """
+    The widening is scoped to domain searches. A blind city keyword search
+    still needs the tighter pairing, or it drags in any director anywhere.
+    """
+    scraper, captured = _capturing(monkeypatch)
+    scraper.scrape("Dentist", limit=5, city="Mumbai")
+
+    assert captured["person_titles"] == ["founder", "ceo", "owner", "cmo", "marketing"]
+    assert captured["person_seniorities"] == ["owner", "founder", "c_suite"]
+
+
+def test_the_coverage_probe_asks_with_no_role_filter_at_all(monkeypatch):
+    scraper, captured = _capturing(monkeypatch, {"pagination": {"total_entries": 23}})
+
+    assert scraper.count_people_at_domains(["acme.com", "beta.in"]) == 23
+    assert captured["q_organization_domains_list"] == ["acme.com", "beta.in"]
+    # The whole point is measuring coverage, so every narrowing filter has
+    # to be absent or the number answers a different question.
+    for narrowing in ("person_titles", "person_seniorities", "q_keywords",
+                      "organization_locations", "organization_num_employees_ranges"):
+        assert narrowing not in captured, narrowing
+
+
+def test_the_coverage_probe_reports_zero_when_apollo_knows_nobody(monkeypatch):
+    scraper, _ = _capturing(monkeypatch, {"pagination": {"total_entries": 0}, "people": []})
+
+    assert scraper.count_people_at_domains(["acme.com"]) == 0
+
+
+def test_the_coverage_probe_falls_back_to_counting_returned_people(monkeypatch):
+    scraper, _ = _capturing(monkeypatch, {"people": [{"first_name": "A"}, {"first_name": "B"}]})
+
+    assert scraper.count_people_at_domains(["acme.com"]) == 2
+
+
+def test_the_coverage_probe_never_raises(monkeypatch):
+    """
+    It is a diagnostic bolted onto an already-empty result. It must never
+    turn that into a failed request.
+    """
+    def _boom(url, headers, json):
+        raise httpx.ConnectError("no network")
+
+    scraper = _scraper(monkeypatch, _boom)
+
+    assert scraper.count_people_at_domains(["acme.com"]) is None
+
+
+def test_the_coverage_probe_answers_nothing_without_a_key_or_domains(monkeypatch):
+    scraper, _ = _capturing(monkeypatch)
+    assert scraper.count_people_at_domains([]) is None
+
+    monkeypatch.setattr(config, "APOLLO_API_KEY", "")
+    assert ApolloFreeScraper().count_people_at_domains(["acme.com"]) is None

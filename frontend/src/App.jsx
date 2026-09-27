@@ -621,6 +621,9 @@ function App() {
         setApolloLastResult(
           `${count} in ${res.data.area.name}. Found ${res.data.companies_found} companies on the map there, Apollo had decision makers for ${res.data.companies_matched}.`
           + (res.data.note ? ` ${res.data.note}` : '')
+          // Only present when the search matched nobody. Says WHY, so a
+          // zero is an answer rather than a dead end.
+          + (res.data.diagnostic ? ` ${res.data.diagnostic}` : '')
         );
       } else {
         setApolloLastResult(`${count}${apolloCity.trim() ? ` in ${apolloCity.trim()}` : ' across India'}.`);
