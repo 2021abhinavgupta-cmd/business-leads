@@ -198,10 +198,48 @@ class BaseSender:
         "from the outside.\n"
     )
 
+    # MMGA builds automations as well as websites, and this pipeline is one
+    # of its own automations — so the fact the recipient is holding this
+    # email at all is the proof. Added 2026-09-27 on request ("tell that we
+    # do automation too and in that automation add that we have sent you
+    # this mail by building our own automation").
+    #
+    # Written proof first and deliberately short after checking the 2026
+    # cold-email benchmarks rather than writing what sounded good:
+    #   - Pitching costs up to 57% of reply rate (30mpc.com benchmark
+    #     report), so this is framed as one verifiable fact about how the
+    #     email arrived, NOT as a second offer. It carries no ask of its
+    #     own; the email keeps the single CTA _closing_lines already adds,
+    #     because two asks split the reader's attention and neither gets
+    #     answered.
+    #   - Top-performing cold emails run under 80 words total
+    #     (instantly.ai 2026 benchmark). This email is already longer than
+    #     that, so the line is ~45 words and one paragraph rather than the
+    #     two-paragraph capability list it started as.
+    #   - Specificity beats a generic capability list, so it names the one
+    #     concrete thing the reader can verify (this email reached them)
+    #     instead of listing services.
+    #
+    # Unlike the two sector lines above this is NOT gated on `sector` — it
+    # is true for every lead regardless of industry. Still opt-in per draft,
+    # so the plain "Generate AI Audit & Draft" button is unchanged.
+    #
+    # Honesty boundary: says the system found the issues and sent the email,
+    # which is true. It must never claim no human reviewed it, because
+    # drafts are reviewed before sending and that would be a lie the
+    # recipient could catch by replying.
+    _AUTOMATION_PITCH_LINE = (
+        "Worth mentioning how this reached you: the issues above were found "
+        "and this email sent by a system we built ourselves. That kind of "
+        "automation is the other half of what we do alongside websites, so "
+        "if repetitive work is eating your team's time, it is the same "
+        "conversation.\n"
+    )
+
     def generate_email(
         self, company: str, contact_name: str, analysis: dict, your_name: str,
         sector: str = "", sector_detail: str = "", include_agri_credibility: bool = False,
-        include_textile_credibility: bool = False,
+        include_textile_credibility: bool = False, include_automation_pitch: bool = False,
     ) -> tuple[str, str]:
         """
         Generate the subject and body for the cold email.
@@ -233,6 +271,12 @@ class BaseSender:
                 (the Alpine Texworld mention) when True AND sector ==
                 "textile" — both required, gated behind the frontend's
                 dedicated "Generate for Textile" button.
+            include_automation_pitch: Adds _AUTOMATION_PITCH_LINE. Unlike
+                the two flags above there is NO sector check, because the
+                claim is true for every lead whatever its industry. Still
+                opt-in per draft, set by the frontend's "Generate +
+                Automation Pitch" button, and it stacks with either sector
+                line rather than replacing it.
 
         Returns:
             (subject, body) as plain text strings.
@@ -302,6 +346,12 @@ class BaseSender:
 
         if sector == "textile" and include_textile_credibility:
             body_lines.append(self._TEXTILE_CREDIBILITY_LINE)
+
+        # Last thing before the ask, same slot as the sector lines: it is
+        # credibility, not an offer, so it belongs next to the other proof
+        # rather than competing with the CTA.
+        if include_automation_pitch:
+            body_lines.append(self._AUTOMATION_PITCH_LINE)
 
         body_lines.extend(self._closing_lines(variant, your_name))
 

@@ -320,6 +320,14 @@ class AuditRequest(BaseModel):
     # dedicated "Generate for Textile" button (sector=="textile" leads
     # only) — adds the Alpine Texworld credibility line. Added 2026-09-08.
     include_textile_credibility: bool = False
+    # Adds the automation pitch line (BaseSender._AUTOMATION_PITCH_LINE) —
+    # "this email was found and sent by a system we built ourselves", plus a
+    # one-clause note that automation is the other half of what MMGA does.
+    # Unlike the two flags above this is NOT sector gated: it is true for
+    # every lead. Set by the frontend's "Generate + Automation Pitch"
+    # button, and it stacks with either sector line rather than replacing
+    # it. Added 2026-09-27.
+    include_automation_pitch: bool = False
     # When true, /api/audit returns almost immediately ({"started": True})
     # and does the actual work in a background task instead of blocking the
     # HTTP response for the couple of minutes a real audit takes. Exists
@@ -982,6 +990,7 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             sector=req.sector, sector_detail=req.sector_detail,
             include_agri_credibility=req.include_agri_credibility,
             include_textile_credibility=req.include_textile_credibility,
+            include_automation_pitch=req.include_automation_pitch,
         )
 
         # Update Sheets in background
