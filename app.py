@@ -1022,6 +1022,7 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             review_warnings=analysis.get("review_warnings") or [],
             sector=req.sector,
             niche=req.sector_detail,
+            include_automation_pitch=req.include_automation_pitch,
         )
 
         result = {
@@ -1199,6 +1200,15 @@ async def send_email(
             await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
             # Record which copy variant this was, so a reply weeks from now
             # can be attributed to a decision rather than to nothing.
+            #
+            # The automation pitch line is folded into the variant string
+            # ("classic+auto" rather than "classic") instead of getting a
+            # column of its own. get_variant_performance() already buckets
+            # by this exact string, so the two land as separate rows with
+            # their own reply rates and the comparison the line was added to
+            # settle needs no new query — and a send whose draft is gone
+            # (manual entry, deleted draft) just records the plain variant,
+            # never a wrong one.
             # sector/niche come from the draft row (fetched above for the
             # review_warnings gate) rather than the request body — /api/send
             # never receives them from the frontend, and the draft is the
@@ -1207,10 +1217,15 @@ async def send_email(
             # send with no matching draft (e.g. a fully manual entry) —
             # sector/niche just stay blank in that case, same as any send
             # from before this existed.
+            variant_sent = (
+                f"{config.EMAIL_VARIANT}+auto"
+                if draft and draft.get("include_automation_pitch")
+                else config.EMAIL_VARIANT
+            )
             await asyncio.to_thread(
                 db.log_email, req.company, req.website, req.email, config.FROM_EMAIL,
                 req.subject, req.body, message_id=message_id,
-                variant=config.EMAIL_VARIANT,
+                variant=variant_sent,
                 sector=(draft.get("sector") or "") if draft else "",
                 niche=(draft.get("niche") or "") if draft else "",
             )
