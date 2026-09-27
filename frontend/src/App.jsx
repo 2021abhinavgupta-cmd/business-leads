@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle } from 'lucide-react';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
@@ -919,7 +919,7 @@ function App() {
   // already set to", so retrying a failed credibility-line audit doesn't
   // silently drop the line. Only the dedicated Generate buttons below ever
   // pass an explicit true/false.
-  const handleAudit = async (index, force = false, includeAgriCredibility = null, includeTextileCredibility = null) => {
+  const handleAudit = async (index, force = false, includeAgriCredibility = null, includeTextileCredibility = null, includeAutomationPitch = null) => {
     const lead = leadsRef.current[index];
     const effectiveIncludeAgri = includeAgriCredibility !== null
       ? includeAgriCredibility
@@ -927,8 +927,12 @@ function App() {
     const effectiveIncludeTextile = includeTextileCredibility !== null
       ? includeTextileCredibility
       : !!lead.includeTextileCredibility;
-    // Each lead can carry up to three independently-generated drafts (plain /
-    // agriculture-credibility / textile-credibility — the two credibility
+    const effectiveIncludeAutomation = includeAutomationPitch !== null
+      ? includeAutomationPitch
+      : !!lead.includeAutomationPitch;
+    // Each lead can carry several independently-generated drafts (plain /
+    // agriculture-credibility / textile-credibility, each of those
+    // optionally with the automation pitch stacked on top — the two sector
     // flags are mutually exclusive per sector, so this covers every real
     // combination). Reported live: switching from Agriculture to Textile and
     // back on the same lead re-ran the whole paid audit+AI pipeline for a
@@ -938,7 +942,12 @@ function App() {
     // page refresh doesn't lose the cache either). Retry Audit (force=true)
     // is the only way to bypass it, and only overwrites that one variant's
     // cache entry.
-    const variantKey = effectiveIncludeAgri ? 'agri' : effectiveIncludeTextile ? 'textile' : 'plain';
+    // The automation pitch is a suffix rather than its own key because it
+    // stacks with a sector line instead of replacing it — 'agri+auto' has
+    // to cache separately from plain 'agri', or pressing one button would
+    // serve back the other's draft.
+    const sectorKey = effectiveIncludeAgri ? 'agri' : effectiveIncludeTextile ? 'textile' : 'plain';
+    const variantKey = effectiveIncludeAutomation ? `${sectorKey}+auto` : sectorKey;
     const cachedVariant = lead.auditVariants?.[variantKey];
     if (!force && cachedVariant) {
       setLeads(prev => {
@@ -948,6 +957,7 @@ function App() {
         newLeads[index].auditData = cachedVariant;
         newLeads[index].includeAgriCredibility = effectiveIncludeAgri;
         newLeads[index].includeTextileCredibility = effectiveIncludeTextile;
+        newLeads[index].includeAutomationPitch = effectiveIncludeAutomation;
         return newLeads;
       });
       return;
@@ -958,6 +968,7 @@ function App() {
       newLeads[index].auditProgress = null;
       newLeads[index].includeAgriCredibility = effectiveIncludeAgri;
       newLeads[index].includeTextileCredibility = effectiveIncludeTextile;
+      newLeads[index].includeAutomationPitch = effectiveIncludeAutomation;
       return newLeads;
     });
 
@@ -1119,6 +1130,7 @@ function App() {
         sector_detail: lead.sectorDetail || '',
         include_agri_credibility: effectiveIncludeAgri,
         include_textile_credibility: effectiveIncludeTextile,
+        include_automation_pitch: effectiveIncludeAutomation,
         async_mode: !!lead.Website,
       });
 
@@ -2038,12 +2050,12 @@ function App() {
 
               {lead.auditState === 'none' && lead.Website && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
-                  <button className="audit-btn" onClick={() => handleAudit(i, false, false, false)}><Activity size={18} /> Generate AI Audit & Draft</button>
+                  <button className="audit-btn" onClick={() => handleAudit(i, false, false, false, false)}><Activity size={18} /> Generate AI Audit & Draft</button>
                   {/* Agriculture-sourced leads only — adds a few lines about
                       Metazyne/@agriusindia to the draft. Kept off the plain
                       button above so it's opt-in per draft, not automatic. */}
                   {lead.sector === 'agriculture' && (
-                    <button className="audit-btn" style={{ background: '#166534' }} onClick={() => handleAudit(i, false, true, false)}>
+                    <button className="audit-btn" style={{ background: '#166534' }} onClick={() => handleAudit(i, false, true, false, false)}>
                       <Sprout size={18} /> Generate for Agriculture
                     </button>
                   )}
@@ -2051,10 +2063,25 @@ function App() {
                       line about alpinetexworld.com to the draft. Same
                       opt-in-per-draft gating as the agriculture line above. */}
                   {lead.sector === 'textile' && (
-                    <button className="audit-btn" style={{ background: '#7c3aed' }} onClick={() => handleAudit(i, false, false, true)}>
+                    <button className="audit-btn" style={{ background: '#7c3aed' }} onClick={() => handleAudit(i, false, false, true, false)}>
                       <Shirt size={18} /> Generate for Textile
                     </button>
                   )}
+                  {/* Every lead, not just one sector (added 2026-09-27) —
+                      adds the line saying this email was found and sent by
+                      an automation MMGA built, which is true whatever the
+                      industry. Passes the lead's own sector flag through
+                      too, so on an agriculture or textile lead this stacks
+                      the sector credibility line on top instead of making
+                      you choose between the two. */}
+                  <button
+                    className="audit-btn"
+                    style={{ background: '#0891b2' }}
+                    title="Same audit, plus one line saying this email was found and sent by an automation we built, and that automation is the other half of what we do. On an agriculture or textile lead it keeps that sector's credibility line as well."
+                    onClick={() => handleAudit(i, false, lead.sector === 'agriculture', lead.sector === 'textile', true)}
+                  >
+                    <Bot size={18} /> Generate + Automation Pitch
+                  </button>
                 </div>
               )}
 

@@ -457,3 +457,145 @@ def test_the_dash_check_is_collected_into_review_warnings():
 
     source = inspect.getsource(AIAuditor.analyze_lead)
     assert "_check_forbidden_dashes" in source
+
+
+# ---------------------------------------------------------------------------
+# Automation pitch line (added 2026-09-27)
+#
+# One line saying this email was found and sent by an automation MMGA built,
+# and that automation is the other half of what MMGA does. Requested as a
+# per-draft option alongside the existing sector credibility lines.
+#
+# Written short and proof-first after checking the 2026 cold-email
+# benchmarks: pitching costs up to 57% of reply rate, and two asks in one
+# email split attention, so this carries NO ask of its own and must not
+# disturb the single CTA _closing_lines already adds.
+# ---------------------------------------------------------------------------
+
+def test_the_automation_pitch_is_absent_by_default():
+    _, body = _sender().generate_email("Acme", "Priya", _ANALYSIS, "Kshitij")
+
+    assert "system we built ourselves" not in body
+
+
+def test_the_automation_pitch_appears_when_asked_for():
+    _, body = _sender().generate_email(
+        "Acme", "Priya", _ANALYSIS, "Kshitij", include_automation_pitch=True
+    )
+
+    assert BaseSender._AUTOMATION_PITCH_LINE.strip() in body
+
+
+def test_the_automation_pitch_needs_no_sector():
+    """
+    Unlike the agriculture and textile lines, this claim is true for any
+    lead, so it must NOT be gated on a sector tag the way those are.
+    """
+    for sector in ["", "agriculture", "textile", "something-else"]:
+        _, body = _sender().generate_email(
+            "Acme", "Priya", _ANALYSIS, "Kshitij",
+            sector=sector, include_automation_pitch=True,
+        )
+        assert "system we built ourselves" in body, sector
+
+
+def test_the_automation_pitch_stacks_with_the_agriculture_line():
+    # The frontend's button passes the lead's own sector through, so an
+    # agriculture lead gets both rather than having to choose.
+    _, body = _sender().generate_email(
+        "Acme Agro", "Priya", _ANALYSIS, "Kshitij", sector="agriculture",
+        include_agri_credibility=True, include_automation_pitch=True,
+    )
+
+    assert "metazyne.in" in body
+    assert "system we built ourselves" in body
+
+
+def test_the_automation_pitch_stacks_with_the_textile_line():
+    _, body = _sender().generate_email(
+        "Acme Looms", "Priya", _ANALYSIS, "Kshitij", sector="textile",
+        include_textile_credibility=True, include_automation_pitch=True,
+    )
+
+    assert "alpinetexworld.com" in body
+    assert "system we built ourselves" in body
+
+
+def test_the_automation_pitch_sits_before_the_ask():
+    """
+    It is credibility, not an offer. Placed in the same slot as the sector
+    lines so it supports the single CTA rather than competing with it.
+    """
+    _, body = _sender().generate_email(
+        "Acme", "Priya", _ANALYSIS, "Kshitij", include_automation_pitch=True
+    )
+
+    pitch_at = body.index("system we built ourselves")
+    sign_off_at = body.rindex("Kshitij")
+    assert pitch_at < sign_off_at
+
+
+def test_the_automation_pitch_survives_the_short_variant(monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "short")
+    _, body = _sender().generate_email(
+        "Acme", "Priya", _ANALYSIS, "Kshitij", include_automation_pitch=True
+    )
+
+    assert "system we built ourselves" in body
+
+
+def test_the_automation_pitch_carries_no_second_ask():
+    """
+    Two asks in one cold email split the reader's attention and neither gets
+    answered, so this line must stay a statement. Guards against a future
+    edit quietly turning it into "reply if you want a demo".
+    """
+    line = BaseSender._AUTOMATION_PITCH_LINE
+
+    assert "?" not in line
+    for ask in ["reply", "book", "call me", "let me know", "schedule", "demo"]:
+        assert ask not in line.lower(), ask
+
+
+def test_the_automation_pitch_stays_short_and_uses_no_dashes():
+    """
+    Top-performing cold emails run under 80 words TOTAL, and this is bolted
+    onto an email already longer than that — so the line has a hard budget.
+    Dashes are banned in generated copy project-wide.
+    """
+    line = BaseSender._AUTOMATION_PITCH_LINE
+
+    assert len(line.split()) <= 60
+    assert "-" not in line
+    assert "—" not in line
+    assert "–" not in line
+
+
+def test_the_automation_pitch_never_claims_no_human_saw_it():
+    """
+    Drafts are reviewed before sending, so claiming otherwise would be a lie
+    the recipient could catch simply by replying.
+    """
+    lowered = BaseSender._AUTOMATION_PITCH_LINE.lower()
+
+    for false_claim in ["no human", "without a human", "fully automated", "nobody"]:
+        assert false_claim not in lowered, false_claim
+
+
+def test_the_audit_request_actually_carries_the_automation_flag():
+    """
+    Wiring guard, not copy.
+
+    Every copy test above passed while app.py was missing the field
+    declaration entirely — the comment documenting it had been added but the
+    `include_automation_pitch: bool = False` line had not, so Pydantic
+    silently dropped the flag and no button could ever have switched the
+    line on. Caught by hand, which is exactly the kind of gap a test should
+    be catching instead.
+    """
+    from app import AuditRequest
+
+    assert AuditRequest(company="X", website="https://x.example").include_automation_pitch is False
+    assert AuditRequest(
+        company="X", website="https://x.example", include_automation_pitch=True
+    ).include_automation_pitch is True
