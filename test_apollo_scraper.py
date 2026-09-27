@@ -225,3 +225,186 @@ def test_scrape_treats_a_whitespace_only_city_as_no_city(monkeypatch):
     _scraper(monkeypatch, _post).scrape("Dentist", limit=5, city="   ")
 
     assert captured["organization_locations"] == ["india"]
+
+
+# ---------------------------------------------------------------------------
+# Refused requests raise instead of returning empty (added 2026-09-27)
+#
+# A live search reported "Added 0 leads from Apollo" and neither the user nor
+# the logs could tell an invalid key from a plan restriction from a genuinely
+# empty search — all three produced an identical empty list.
+# ---------------------------------------------------------------------------
+
+import pytest
+from scrapers.apollo_free import ApolloError
+
+
+def _raises_status(status, body=None):
+    def _post(url, headers, json):
+        return _response(status, body if body is not None else {"error": "nope"})
+    return _post
+
+
+def test_an_invalid_key_raises_with_a_fixable_message(monkeypatch):
+    scraper = _scraper(monkeypatch, _raises_status(401))
+
+    with pytest.raises(ApolloError) as excinfo:
+        scraper.scrape("Dentist", limit=5)
+
+    message = str(excinfo.value)
+    assert "APOLLO_API_KEY" in message
+    assert "Railway" in message
+
+
+def test_a_plan_restriction_says_so_rather_than_blaming_the_key(monkeypatch):
+    scraper = _scraper(monkeypatch, _raises_status(403))
+
+    with pytest.raises(ApolloError) as excinfo:
+        scraper.scrape("Dentist", limit=5)
+
+    assert "plan" in str(excinfo.value).lower()
+
+
+def test_an_unknown_status_still_raises_with_the_status_in_it(monkeypatch):
+    scraper = _scraper(monkeypatch, _raises_status(500))
+
+    with pytest.raises(ApolloError) as excinfo:
+        scraper.scrape("Dentist", limit=5)
+
+    assert "500" in str(excinfo.value)
+
+
+def test_a_transport_failure_raises_rather_than_looking_like_no_results(monkeypatch):
+    def _boom(url, headers, json):
+        raise httpx.ConnectError("no network")
+
+    scraper = _scraper(monkeypatch, _boom)
+
+    with pytest.raises(ApolloError):
+        scraper.scrape("Dentist", limit=5)
+
+
+def test_an_empty_result_is_still_just_an_empty_list(monkeypatch):
+    """The whole point: empty must now mean "Apollo answered, nobody matched"."""
+    scraper = _scraper(monkeypatch, lambda url, headers, json: _response(200, {"people": []}))
+
+    assert scraper.scrape("Dentist", limit=5) == []
+
+
+def test_a_missing_key_still_returns_empty_rather_than_raising(monkeypatch):
+    # The endpoint already 400s on a missing key before calling this, and the
+    # scheduler treats "not configured" as "skip this source", so this stays
+    # a quiet no-op rather than becoming an error.
+    monkeypatch.setattr(config, "APOLLO_API_KEY", "")
+    assert ApolloFreeScraper().scrape("Dentist", limit=5) == []
+
+
+# ---------------------------------------------------------------------------
+# Domain targeting — how a district search is actually served
+# ---------------------------------------------------------------------------
+
+def test_domains_are_sent_as_the_apollo_domain_list(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, domains=["acme.com", "beta.in"])
+
+    assert captured["q_organization_domains_list"] == ["acme.com", "beta.in"]
+
+
+def test_domain_targeting_drops_the_location_filter(monkeypatch):
+    """
+    The caller picked these companies off a map. Layering Apollo's own
+    geography guess on top could only remove correct answers.
+    """
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, city="Mumbai", domains=["acme.com"])
+
+    assert "organization_locations" not in captured
+
+
+def test_domain_targeting_drops_the_company_size_filter(monkeypatch):
+    """
+    The size filter exists to stop a blind keyword search dragging in
+    enterprises. These companies were hand-picked from one district, so
+    discarding one because Apollo thinks it has 60 staff would throw away a
+    lead the user explicitly asked for.
+    """
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, domains=["acme.com"])
+
+    assert "organization_num_employees_ranges" not in captured
+
+
+def test_domain_targeting_keeps_the_seniority_filter(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, domains=["acme.com"])
+
+    assert captured["person_seniorities"] == ["owner", "founder", "c_suite"]
+
+
+def test_a_blank_niche_sends_no_keyword_at_all_with_domains(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("   ", limit=5, domains=["acme.com"])
+
+    assert "q_keywords" not in captured
+
+
+def test_a_niche_still_narrows_a_domain_search_when_given(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5, domains=["acme.com"])
+
+    assert captured["q_keywords"] == "Dentist"
+
+
+def test_the_domain_list_is_capped_at_apollos_limit(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("", limit=5, domains=[f"d{i}.com" for i in range(1500)])
+
+    assert len(captured["q_organization_domains_list"]) == 1000
+
+
+def test_blank_domains_fall_back_to_the_ordinary_city_search(monkeypatch):
+    captured = {}
+
+    def _post(url, headers, json):
+        captured.update(json or {})
+        return _response(200, {"people": []})
+
+    _scraper(monkeypatch, _post).scrape("Dentist", limit=5, city="Mumbai", domains=[])
+
+    assert captured["organization_locations"] == ["mumbai"]
+    assert "q_organization_domains_list" not in captured

@@ -94,7 +94,16 @@ async def ingest_leads():
             leads = await scraper.scrape_google_maps(niche_query, city, limit=50)
         else:
             print(f"Scraping {source}: {niche}...")
-            leads = scraper.scrape(niche, limit=50)
+            try:
+                leads = scraper.scrape(niche, limit=50)
+            except Exception as e:
+                # ApolloFreeScraper.scrape raises on a refused request as of
+                # 2026-09-27 (an invalid key used to look identical to an
+                # empty result in the UI). That is right for an interactive
+                # search, but this is an unattended batch: one bad niche must
+                # not abandon the remaining niches or kill the nightly job.
+                print(f"Scraping {source} for {niche!r} failed, skipping: {e}")
+                continue
 
         for lead in leads:
             sheets.add_lead(lead)

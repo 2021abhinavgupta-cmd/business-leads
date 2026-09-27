@@ -28,6 +28,24 @@ _REQUEST_DELAY = 2  # seconds
 # fixed radius would under-search the second and over-search the first.
 _DEFAULT_AREA_BOX_DEGREES = 0.02
 
+# Geocoding result types that mean "this is a whole city or bigger", as
+# opposed to a district inside one. Checked live against the real API rather
+# than assumed: "Mumbai" -> ['locality', 'political'], "Maharashtra" ->
+# ['administrative_area_level_1', 'political'], while "BKC, Mumbai" ->
+# ['political', 'sublocality', 'sublocality_level_2'] and "Andheri East,
+# Mumbai" -> ['political', 'sublocality', 'sublocality_level_1'].
+#
+# The distinction decides which lead source can serve a search. Apollo can
+# be pointed at a city, so a city goes straight to Apollo. Apollo cannot
+# express anything smaller, so a district has to be resolved to real
+# companies on the map first and handed to Apollo as a domain list.
+_CITY_OR_BROADER_TYPES = {
+    "locality", "postal_town", "country",
+    "administrative_area_level_1",
+    "administrative_area_level_2",
+    "administrative_area_level_3",
+}
+
 # Place types that are returned by a no-keyword nearby search but are never
 # a sellable lead — infrastructure, transit, civic amenities and the like.
 # Without this, a search around a city centre comes back full of train
@@ -479,9 +497,17 @@ class GoogleMapsScraper:
         south = southwest.get("lat", latitude - _DEFAULT_AREA_BOX_DEGREES)
         west = southwest.get("lng", longitude - _DEFAULT_AREA_BOX_DEGREES)
 
+        types = top.get("types") or []
         area = {
             "name": top.get("formatted_address") or area_name.strip(),
             "query": area_name.strip(),
+            "types": types,
+            # True for a whole city/state/country, False for a district
+            # inside one. A result carrying no types at all is treated as a
+            # district: that is the conservative choice, since the district
+            # path still works for a city (it just costs more) while the
+            # city path would silently return the wrong geography.
+            "is_city": bool(set(types) & _CITY_OR_BROADER_TYPES),
             "latitude": latitude,
             "longitude": longitude,
             "city": self._city_from_components(top.get("address_components") or []),
@@ -493,7 +519,11 @@ class GoogleMapsScraper:
                 "high": {"latitude": north, "longitude": east},
             },
         }
-        print(f"[Maps Area] Resolved {area_name!r} -> {area['name']} (city: {area['city'] or 'unknown'}).")
+        print(
+            f"[Maps Area] Resolved {area_name!r} -> {area['name']} "
+            f"(city: {area['city'] or 'unknown'}, "
+            f"{'whole city or bigger' if area['is_city'] else 'district inside a city'})."
+        )
         return area
 
     async def scrape_area(self, area: dict, limit: int = 25) -> list[dict]:

@@ -6,6 +6,23 @@ import httpx
 import time
 import config
 
+
+class ApolloError(RuntimeError):
+    """
+    Apollo refused the request.
+
+    Raised instead of returning an empty list, added 2026-09-27 after a live
+    search reported "Added 0 leads from Apollo" and neither the user nor the
+    logs could distinguish three completely different situations: an invalid
+    or expired API key, a plan that does not permit the endpoint, and a
+    search that genuinely matched nobody. All three produced the identical
+    empty result, which turned a one-line answer into a guessing session.
+
+    Carries a message written for the person running the search, not for the
+    log, because it is surfaced in the UI.
+    """
+
+
 class ApolloFreeScraper:
     def __init__(self):
         self.api_key = config.APOLLO_API_KEY
@@ -60,7 +77,33 @@ class ApolloFreeScraper:
             print(f"Apollo enrichment failed for {first_name} {last_name}: {e}")
             return ""
 
-    def scrape(self, niche: str, limit: int = 50, city: str = "") -> list[dict]:
+    @staticmethod
+    def _explain_http_error(status: int, body: str) -> str:
+        """
+        Turn an Apollo HTTP status into something the person running the
+        search can act on. The raw status alone ("502") tells them nothing
+        about whether to fix a key, upgrade a plan, or just try later.
+        """
+        if status == 401:
+            return (
+                "Apollo rejected the API key. Generate a new one in Apollo "
+                "(Settings > Integrations > API) and update APOLLO_API_KEY in "
+                "Railway's Variables tab."
+            )
+        if status == 403:
+            return (
+                "Apollo accepted the key but refused this endpoint. People "
+                "Search is usually not available on the free plan, so this "
+                "normally means the plan needs upgrading rather than the key "
+                "being wrong."
+            )
+        if status == 422:
+            return f"Apollo rejected the search filters as invalid: {body[:200]}"
+        if status == 429:
+            return "Apollo rate limited the request. Wait a few minutes and try again."
+        return f"Apollo returned HTTP {status}: {body[:200]}"
+
+    def scrape(self, niche: str, limit: int = 50, city: str = "", domains: list[str] | None = None) -> list[dict]:
         """
         Search Apollo for decision makers in a specific niche.
 
@@ -72,12 +115,30 @@ class ApolloFreeScraper:
         Apollo can be aimed — "mumbai", never "bandra kurla complex". An
         area-level search belongs to the Google Places path
         (GoogleMapsScraper.scrape_area), which is boxed by real coordinates.
+
+        *domains*, when given, is how an area-level search is actually
+        served. Apollo is asked for decision makers at those exact companies
+        via q_organization_domains_list (up to 1000 per request, confirmed
+        against the docs) instead of being asked to guess a geography it
+        cannot express. The caller gets the domains from
+        GoogleMapsScraper.scrape_area, which boxes a real district on the
+        map — so every match is genuinely inside that district rather than
+        merely somewhere in the same city. Added 2026-09-27 on request
+        ("i just want that apollo searches gives me leads if i type bkc").
+
+        Raises ApolloError if Apollo refuses the request. An empty list from
+        this method now means exactly one thing: Apollo answered, and nobody
+        matched.
         """
         if not self.api_key:
             print("APOLLO_API_KEY is not set in .env. Skipping Apollo scraper.")
             return []
             
-        print(f"Scraping Apollo (Free API) for: {niche} in {city or 'india (country-wide)'}...")
+        domains = [d for d in (domains or []) if d]
+        if domains:
+            print(f"Scraping Apollo (Free API) for decision makers at {len(domains)} specific companies...")
+        else:
+            print(f"Scraping Apollo (Free API) for: {niche} in {city or 'india (country-wide)'}...")
         leads = []
         
         headers = {
@@ -119,16 +180,33 @@ class ApolloFreeScraper:
         # the city actually being prospected. A city narrows it; blank keeps
         # the old country-wide behaviour so every existing caller
         # (scheduler.py's b2b job, the tests) is unaffected.
-        locations = [city.strip().lower()] if city and city.strip() else ["india"]
         payload = {
-            "q_keywords": niche,
             "person_titles": ["founder", "ceo", "owner", "cmo", "marketing"],
             "person_seniorities": ["owner", "founder", "c_suite"],
-            "organization_num_employees_ranges": ["1,10", "11,50"],
-            "organization_locations": locations,
             "page": 1,
             "per_page": min(limit, 100) # Apollo limit per page
         }
+
+        if domains:
+            # Targeting named companies, so the geography and keyword filters
+            # are not just unnecessary, they are actively harmful: the caller
+            # already decided which companies count by picking them off a map.
+            # Apollo capped at 1000 domains per request.
+            payload["q_organization_domains_list"] = domains[:1000]
+            # The employee-count filter is dropped here on purpose. It exists
+            # to stop a blind keyword search dragging in enterprises, but
+            # these companies were hand-picked from one district, and
+            # silently discarding a match because Apollo thinks it has 60
+            # staff would throw away a lead the user explicitly asked for.
+            # Seniority stays: the whole point is reaching a decision maker.
+            if niche and niche.strip():
+                payload["q_keywords"] = niche.strip()
+        else:
+            payload["q_keywords"] = niche
+            payload["organization_num_employees_ranges"] = ["1,10", "11,50"]
+            payload["organization_locations"] = (
+                [city.strip().lower()] if city and city.strip() else ["india"]
+            )
 
         for attempt in range(3):
             try:
@@ -139,18 +217,28 @@ class ApolloFreeScraper:
                     break # Success
                     
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < 2:
+                status = e.response.status_code
+                if status == 429 and attempt < 2:
                     print(f"Apollo API Rate Limit hit (429). Sleeping 60s...")
                     time.sleep(60)
-                else:
-                    print(f"Apollo API HTTP error: {e}")
-                    if hasattr(e, 'response') and e.response:
-                        print(e.response.text)
-                    return leads
+                    continue
+                body = ""
+                try:
+                    body = e.response.text
+                except Exception:
+                    pass
+                print(f"Apollo API HTTP error {status}: {body[:500]}")
+                raise ApolloError(self._explain_http_error(status, body)) from e
             except Exception as e:
                 print(f"Error scraping Apollo: {e}")
-                return leads
-                
+                raise ApolloError(f"Could not reach Apollo: {e}") from e
+        else:
+            # Every attempt was a 429 that we slept through.
+            raise ApolloError(
+                "Apollo rate limited every attempt. Wait a few minutes and try again."
+            )
+
+
         people = data.get("people", [])
         credits_used = 0
         for person in people:
