@@ -103,6 +103,52 @@ class ApolloFreeScraper:
             return "Apollo rate limited the request. Wait a few minutes and try again."
         return f"Apollo returned HTTP {status}: {body[:200]}"
 
+    def count_people_at_domains(self, domains: list[str]) -> int | None:
+        """
+        How many people Apollo holds at *domains*, with no role filter at all.
+
+        A diagnostic, not a lead source. When a district search matches zero
+        people there are two completely different causes and the user cannot
+        tell them apart: Apollo may hold no record of those companies, or it
+        may hold plenty of people none of whom clear the seniority filter.
+        The first is a coverage limit with nothing to fix; the second is our
+        filter being too tight. One unfiltered call settles it.
+
+        Returns None if the question could not be answered (no key, Apollo
+        refused). It must never turn a merely-empty result into a failed
+        request, so nothing here raises.
+        """
+        domains = [d for d in (domains or []) if d]
+        if not self.api_key or not domains:
+            return None
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "X-Api-Key": self.api_key,
+        }
+        payload = {
+            "q_organization_domains_list": domains[:1000],
+            "page": 1,
+            # Only the count is wanted, so ask for the smallest page Apollo
+            # will return and read the total off the pagination block.
+            "per_page": 1,
+        }
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(self.base_url, headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except Exception as e:
+            print(f"Apollo coverage probe failed: {e}")
+            return None
+
+        pagination = data.get("pagination") or {}
+        total = pagination.get("total_entries")
+        if isinstance(total, int):
+            return total
+        return len(data.get("people") or [])
+
     def scrape(self, niche: str, limit: int = 50, city: str = "", domains: list[str] | None = None) -> list[dict]:
         """
         Search Apollo for decision makers in a specific niche.
@@ -181,8 +227,6 @@ class ApolloFreeScraper:
         # the old country-wide behaviour so every existing caller
         # (scheduler.py's b2b job, the tests) is unaffected.
         payload = {
-            "person_titles": ["founder", "ceo", "owner", "cmo", "marketing"],
-            "person_seniorities": ["owner", "founder", "c_suite"],
             "page": 1,
             "per_page": min(limit, 100) # Apollo limit per page
         }
@@ -198,11 +242,27 @@ class ApolloFreeScraper:
             # these companies were hand-picked from one district, and
             # silently discarding a match because Apollo thinks it has 60
             # staff would throw away a lead the user explicitly asked for.
-            # Seniority stays: the whole point is reaching a decision maker.
+            #
+            # person_titles is dropped too, and person_seniorities widened,
+            # after a live BKC search found 60 companies and matched 0 people
+            # (2026-09-27). Apollo combines titles and seniorities with AND,
+            # not OR (confirmed in the docs), so the old pairing demanded a
+            # literal title from {founder, ceo, owner, cmo, marketing} AND a
+            # seniority from {owner, founder, c_suite}. An Indian SME is
+            # typically run by a "Director", "Partner", "Proprietor" or
+            # "Managing Director" — none of those words are in the title
+            # list, so every one of them was discarded. Seniority alone
+            # already expresses "decision maker", which is all this needs,
+            # and director/partner are real Apollo enum values.
+            payload["person_seniorities"] = [
+                "owner", "founder", "c_suite", "partner", "director",
+            ]
             if niche and niche.strip():
                 payload["q_keywords"] = niche.strip()
         else:
             payload["q_keywords"] = niche
+            payload["person_titles"] = ["founder", "ceo", "owner", "cmo", "marketing"]
+            payload["person_seniorities"] = ["owner", "founder", "c_suite"]
             payload["organization_num_employees_ranges"] = ["1,10", "11,50"]
             payload["organization_locations"] = (
                 [city.strip().lower()] if city and city.strip() else ["india"]

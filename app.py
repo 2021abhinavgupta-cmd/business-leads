@@ -621,9 +621,38 @@ async def search_leads_apollo(
                 maps_scraper._extract_domain(lead.get("Website", "")) for lead in leads
             }
             background_tasks.add_task(save_leads_to_sheets_bg, leads)
+
+            # Zero matches has two completely different causes that look
+            # identical from the outside: Apollo holds no record of these
+            # companies at all, or it holds people but none senior enough to
+            # clear the filter. One unfiltered probe says which, so the user
+            # is told rather than left to guess (live-reported 2026-09-27:
+            # "Found 60 companies on the map there, Apollo had decision
+            # makers for 0"). Only runs when the answer was already empty,
+            # so it costs nothing on a successful search.
+            diagnostic = None
+            if not leads:
+                known = await asyncio.to_thread(apollo_scraper.count_people_at_domains, domains)
+                if known is None:
+                    diagnostic = "Apollo could not be asked how many people it holds at these companies."
+                elif known == 0:
+                    diagnostic = (
+                        f"Apollo holds no contacts at any of these {len(domains)} companies. "
+                        "That is a gap in Apollo's data, not a filter problem — this district's "
+                        "businesses are not in their database. Use Search an Area for these instead, "
+                        "which gives you the same companies with phone numbers."
+                    )
+                else:
+                    diagnostic = (
+                        f"Apollo holds {known} contact(s) at these companies, but none are an owner, "
+                        "founder, partner, director or C-suite. The people it has are too junior to "
+                        "pitch, so widening the filter further would only add staff who cannot say yes."
+                    )
+
             return {
                 "leads": leads,
                 "area": {"name": area["name"], "city": area["city"]},
+                "diagnostic": diagnostic,
                 # Reported rather than hidden: Apollo knows agencies and
                 # firms far better than it knows a three-person clinic, so a
                 # partial match is the normal outcome and the user should be

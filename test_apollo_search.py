@@ -350,3 +350,95 @@ def test_a_district_search_without_a_maps_key_explains_why_it_cannot_run(monkeyp
 
     assert res.status_code == 400
     assert "GOOGLE_MAPS_API_KEY" in res.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# The "why zero" diagnostic (added 2026-09-27)
+#
+# Live report: "Found 60 companies on the map there, Apollo had decision
+# makers for 0." Two completely different causes look identical from the
+# outside, so one unfiltered probe settles which, and only when the search
+# already came back empty.
+# ---------------------------------------------------------------------------
+
+def test_no_matches_and_no_coverage_blames_apollos_data(monkeypatch):
+    app_module, client = _apollo_ready(monkeypatch)
+    _area_returning(monkeypatch, app_module, _BKC, [
+        {"Company": "A", "Website": "https://a.com"},
+    ])
+    monkeypatch.setattr(
+        app_module.apollo_scraper, "scrape",
+        lambda niche, limit, city="", domains=None: [],
+    )
+    monkeypatch.setattr(app_module.apollo_scraper, "count_people_at_domains", lambda domains: 0)
+
+    res = client.post("/api/search-apollo", json={"city": "BKC, Mumbai"},
+                      headers={"X-API-Key": "bucket-diag-nocoverage"})
+
+    detail = res.json()["diagnostic"]
+    assert "no contacts" in detail
+    # Points at the thing that DOES work for this district rather than
+    # leaving the user at a dead end.
+    assert "Search an Area" in detail
+
+
+def test_no_matches_but_real_coverage_says_the_contacts_are_too_junior(monkeypatch):
+    app_module, client = _apollo_ready(monkeypatch)
+    _area_returning(monkeypatch, app_module, _BKC, [
+        {"Company": "A", "Website": "https://a.com"},
+    ])
+    monkeypatch.setattr(
+        app_module.apollo_scraper, "scrape",
+        lambda niche, limit, city="", domains=None: [],
+    )
+    monkeypatch.setattr(app_module.apollo_scraper, "count_people_at_domains", lambda domains: 23)
+
+    res = client.post("/api/search-apollo", json={"city": "BKC, Mumbai"},
+                      headers={"X-API-Key": "bucket-diag-junior"})
+
+    detail = res.json()["diagnostic"]
+    assert "23 contact" in detail
+    assert "too junior" in detail
+
+
+def test_a_probe_that_cannot_answer_says_so_rather_than_inventing_a_reason(monkeypatch):
+    app_module, client = _apollo_ready(monkeypatch)
+    _area_returning(monkeypatch, app_module, _BKC, [
+        {"Company": "A", "Website": "https://a.com"},
+    ])
+    monkeypatch.setattr(
+        app_module.apollo_scraper, "scrape",
+        lambda niche, limit, city="", domains=None: [],
+    )
+    monkeypatch.setattr(app_module.apollo_scraper, "count_people_at_domains", lambda domains: None)
+
+    res = client.post("/api/search-apollo", json={"city": "BKC, Mumbai"},
+                      headers={"X-API-Key": "bucket-diag-unknown"})
+
+    assert res.status_code == 200
+    assert "could not be asked" in res.json()["diagnostic"]
+
+
+def test_a_successful_district_search_never_runs_the_probe(monkeypatch):
+    """It costs an extra Apollo call, so it only fires on an empty result."""
+    app_module, client = _apollo_ready(monkeypatch)
+    _area_returning(monkeypatch, app_module, _BKC, [
+        {"Company": "A", "Website": "https://a.com"},
+    ])
+    monkeypatch.setattr(
+        app_module.apollo_scraper, "scrape",
+        lambda niche, limit, city="", domains=None: [
+            {"Company": "A", "Website": "https://a.com"},
+        ],
+    )
+
+    def _must_not_run(domains):
+        raise AssertionError("the probe must not run when leads were found")
+
+    monkeypatch.setattr(app_module.apollo_scraper, "count_people_at_domains", _must_not_run)
+
+    res = client.post("/api/search-apollo", json={"city": "BKC, Mumbai"},
+                      headers={"X-API-Key": "bucket-diag-skipped"})
+
+    assert res.status_code == 200, res.text
+    assert res.json()["diagnostic"] is None
