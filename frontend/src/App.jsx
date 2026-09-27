@@ -2008,6 +2008,22 @@ function App() {
                 {lead.auditState === 'rejected' && <span className="badge danger"><X size={14}/> Rejected</span>}
               </div>
 
+              {/* Apollo returns pattern-based GUESSES when it cannot confirm
+                  an inbox, and those bounce. Sending through SES under a
+                  warm-up cap means a bounce damages sender reputation for
+                  every send, not just this one, so a guessed address is
+                  never placed in the field the send path reads. It is shown
+                  here instead, to be verified by hand or used as a starting
+                  point rather than silently thrown away. */}
+              {lead['Unverified Email'] && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '0 0 10px', padding: '6px 10px', background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.35)', borderRadius: '8px', fontSize: '12px' }}>
+                  <AlertTriangle size={14} color="#d97706" />
+                  <span style={{ color: '#b45309' }}>
+                    Apollo guessed <strong>{lead['Unverified Email']}</strong>{lead['Email Status'] ? ` (${lead['Email Status']})` : ''} but could not verify it. Held back from sending so it cannot bounce.
+                  </span>
+                </div>
+              )}
+
               {/* Cross-referenced against email_history, not just this
                   session's lead.auditState — catches a lead re-scraped in a
                   later session that was already emailed before. */}
