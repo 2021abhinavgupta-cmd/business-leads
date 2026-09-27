@@ -3197,7 +3197,13 @@ function App() {
             <tbody>
               {variantPerf.map(v => (
                 <tr key={v.variant} style={{ borderTop: '1px solid rgba(148,163,184,0.15)' }}>
-                  <td style={{ padding: '6px 8px 6px 0' }}>{v.variant}</td>
+                  {/* "classic+auto" is how the send path tags a draft
+                      generated with the automation pitch line. Spelled out
+                      here so the table reads as an answer rather than as a
+                      code. */}
+                  <td style={{ padding: '6px 8px 6px 0' }}>
+                    {v.variant.endsWith('+auto') ? `${v.variant.slice(0, -5)} + automation pitch` : v.variant}
+                  </td>
                   <td style={{ padding: '6px 8px' }}>{v.sent}</td>
                   <td style={{ padding: '6px 8px' }}>{v.replied}</td>
                   <td style={{ padding: '6px 8px', fontWeight: 600 }}>

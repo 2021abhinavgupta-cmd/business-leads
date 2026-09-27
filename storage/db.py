@@ -238,6 +238,26 @@ def init_db():
         cursor.execute("ALTER TABLE email_drafts ADD COLUMN niche TEXT")
         cursor.execute("PRAGMA user_version = 12")
 
+    # Whether the draft was generated with the automation pitch line
+    # (BaseSender._AUTOMATION_PITCH_LINE, added 2026-09-27). Captured for
+    # exactly one reason: so get_variant_performance() can answer whether
+    # that line earns the words it costs, instead of it being argued about
+    # the way all this copy was before `variant` existed at all.
+    #
+    # Stored on the draft for the same reason sector/niche are (v12 above):
+    # the flag is only ever known at draft-generation time, and /api/send
+    # receives only subject/body/company/website from the frontend. The send
+    # path already looks the draft up for the review_warnings gate, so it
+    # can read this across at no extra cost and no frontend send call site
+    # has to change.
+    #
+    # INTEGER not BOOLEAN because SQLite has no boolean type; DEFAULT 0 so
+    # every draft written before this column existed reads as "no pitch",
+    # which is true — the line did not exist yet.
+    if schema_version < 13:
+        cursor.execute("ALTER TABLE email_drafts ADD COLUMN include_automation_pitch INTEGER DEFAULT 0")
+        cursor.execute("PRAGMA user_version = 13")
+
     conn.commit()
     conn.close()
 
@@ -802,13 +822,13 @@ def get_variant_performance() -> list[dict]:
     results.sort(key=lambda r: (r["enough_data"], r["reply_rate"], r["sent"]), reverse=True)
     return results
 
-def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None, sector: str = "", niche: str = ""):
+def log_draft(company: str, website: str, target_email: str, subject: str, body: str, image_url: str = "", review_warnings: list[str] | None = None, sector: str = "", niche: str = "", include_automation_pitch: bool = False):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings, sector, niche) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None, sector or None, niche or None)
+        "INSERT INTO email_drafts (company, website, target_email, subject, body, image_url, review_warnings, sector, niche, include_automation_pitch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (company, website, target_email, subject, body, image_url, json.dumps(review_warnings) if review_warnings else None, sector or None, niche or None, 1 if include_automation_pitch else 0)
     )
     conn.commit()
     conn.close()

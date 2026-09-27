@@ -227,3 +227,95 @@ def test_send_with_a_draft_that_has_no_sector_or_niche_logs_blank(monkeypatch):
     assert res.status_code == 200, res.text
     assert logged["sector"] == ""
     assert logged["niche"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Measuring the automation pitch (added 2026-09-27)
+#
+# The pitch line was shipped without any way to tell whether it earns the
+# words it costs. It is folded into the `variant` string at send time rather
+# than getting a column of its own, because get_variant_performance()
+# already buckets by that exact string — so "classic" and "classic+auto"
+# land as separate rows with their own reply rates and no new query is
+# needed.
+# ---------------------------------------------------------------------------
+
+def test_a_draft_round_trips_the_automation_pitch_flag(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_draft("Acme", "acme.com", "o@acme.com", "S", "B", include_automation_pitch=True)
+
+    assert db.get_draft_by_website("acme.com")["include_automation_pitch"] == 1
+
+
+def test_a_draft_defaults_to_no_automation_pitch(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    db.log_draft("Acme", "acme.com", "o@acme.com", "S", "B")
+
+    assert not db.get_draft_by_website("acme.com")["include_automation_pitch"]
+
+
+def test_send_tags_the_variant_when_the_draft_had_the_pitch(monkeypatch):
+    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 1}
+    import app as app_module
+    client, logged = _send_client_capturing_log_email(monkeypatch, draft)
+    monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "classic")
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+    assert logged["variant"] == "classic+auto"
+
+
+def test_send_leaves_the_variant_alone_without_the_pitch(monkeypatch):
+    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 0}
+    import app as app_module
+    client, logged = _send_client_capturing_log_email(monkeypatch, draft)
+    monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "classic")
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+    assert logged["variant"] == "classic"
+
+
+def test_send_with_no_draft_records_the_plain_variant(monkeypatch):
+    """
+    A manual entry or a deleted draft has nothing to read the flag off. It
+    must record the plain variant rather than crashing or, worse, guessing
+    the email carried a line it did not.
+    """
+    import app as app_module
+    client, logged = _send_client_capturing_log_email(monkeypatch, None)
+    monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "short")
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+    assert logged["variant"] == "short"
+
+
+def test_the_pitch_suffix_rides_whichever_global_variant_is_set(monkeypatch):
+    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 1}
+    import app as app_module
+    client, logged = _send_client_capturing_log_email(monkeypatch, draft)
+    monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "short")
+
+    res = client.post("/api/send", json=_SEND_PAYLOAD)
+
+    assert res.status_code == 200, res.text
+    # short and short+auto have to stay comparable to each other, not get
+    # mixed in with the classic rows.
+    assert logged["variant"] == "short+auto"
+
+
+def test_variant_performance_separates_the_pitch_from_the_plain_copy(monkeypatch, tmp_path):
+    _use_temp_db(monkeypatch, tmp_path)
+    for i in range(3):
+        db.log_email(f"Plain {i}", f"plain{i}.com", "a@x.com", "us@x.com", "S", "B", variant="classic")
+    for i in range(2):
+        db.log_email(f"Auto {i}", f"auto{i}.com", "a@x.com", "us@x.com", "S", "B", variant="classic+auto")
+
+    by_variant = {row["variant"]: row for row in db.get_variant_performance()}
+
+    assert by_variant["classic"]["sent"] == 3
+    assert by_variant["classic+auto"]["sent"] == 2
