@@ -138,6 +138,17 @@ AI_SELF_CONSISTENCY = os.getenv("AI_SELF_CONSISTENCY", "true").strip().lower() n
 # than going out unnoticed. Set to 0 to disable the staleness gate entirely.
 DRAFT_STALE_DAYS = int(os.getenv("DRAFT_STALE_DAYS", "7"))
 
+# === CSV import outreach (2026-10-15) ===
+# Physical postal address appended to every outgoing email's footer. CAN-SPAM
+# requires one on commercial email to US recipients; nothing in an email body
+# carried one before. Unset means emails are byte for byte what they were, and
+# imported US leads cannot be sent (the send route returns 409 saying why).
+MAILING_ADDRESS = os.getenv("MAILING_ADDRESS", "").strip()
+# Pause import sending when the bounce rate across import-automation sends
+# exceeds this many percent, once at least IMPORT_BOUNCE_MIN_SENT have gone out.
+IMPORT_BOUNCE_PAUSE_PCT = float(os.getenv("IMPORT_BOUNCE_PAUSE_PCT", "5"))
+IMPORT_BOUNCE_MIN_SENT = int(os.getenv("IMPORT_BOUNCE_MIN_SENT", "20"))
+
 # Only audit and contact businesses that clear a minimum "established" bar.
 # Two independent filters — the tool was drafting cold emails to businesses
 # too new or too small to be worth the send.

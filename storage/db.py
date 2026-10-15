@@ -258,6 +258,54 @@ def init_db():
         cursor.execute("ALTER TABLE email_drafts ADD COLUMN include_automation_pitch INTEGER DEFAULT 0")
         cursor.execute("PRAGMA user_version = 13")
 
+    # Schema v14 (2026-10-15): CSV import outreach queue. A batch is one
+    # uploaded file; a lead is one row after validation, carrying its status
+    # through ready -> drafted -> approved -> sent. person_phone,
+    # person_linkedin_url and employees are deliberately not stored (data
+    # minimisation: nothing in this feature uses them). See
+    # docs/superpowers/specs/2026-10-15-csv-import-outreach-design.md.
+    if schema_version < 14:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS import_batches (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            filename      TEXT,
+            total_rows    INTEGER NOT NULL,
+            ready_count   INTEGER NOT NULL,
+            skipped_count INTEGER NOT NULL
+        )
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS import_leads (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id         INTEGER NOT NULL,
+            person_name      TEXT,
+            person_title     TEXT,
+            person_seniority TEXT,
+            email            TEXT NOT NULL,
+            organization     TEXT,
+            domain           TEXT,
+            industry         TEXT,
+            city             TEXT,
+            state            TEXT,
+            country          TEXT,
+            status           TEXT NOT NULL,
+            skip_reason      TEXT,
+            subject          TEXT,
+            body             TEXT,
+            review_warnings  TEXT,
+            source_quote     TEXT,
+            drafted_at       DATETIME,
+            sent_at          DATETIME,
+            history_id       INTEGER,
+            error            TEXT,
+            FOREIGN KEY (batch_id) REFERENCES import_batches(id)
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_import_leads_batch_status ON import_leads(batch_id, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_import_leads_email ON import_leads(email)")
+        cursor.execute("PRAGMA user_version = 14")
+
     conn.commit()
     conn.close()
 
