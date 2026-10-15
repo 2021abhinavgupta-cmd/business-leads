@@ -1262,9 +1262,14 @@ async def send_email(
         # deleted by, an import send.
         import_lead = None
         send_subject, send_body = req.subject, req.body
+        send_to, log_company, log_website = req.email, req.company, req.website
         if req.import_lead_id is not None:
             import_lead = await _prepare_import_send(req)
             send_subject, send_body = import_lead["subject"], import_lead["body"]
+            # Identity also comes from the stored lead, never the client.
+            send_to = import_lead["email"]
+            log_company = import_lead.get("organization") or import_lead["domain"]
+            log_website = import_lead["domain"]
 
         # The five accuracy checks in analyzer/ai_audit.py already flag a
         # draft whose copy looks fabricated, and their output has been
@@ -1333,18 +1338,34 @@ async def send_email(
                     else:
                         closeup_image_path = candidate_path
 
+        if import_lead is not None:
+            # IMPORT: claim the lead atomically BEFORE sending, so two concurrent
+            # requests (or a retry after a later DB error) can never both send.
+            # Worst case is marked-sent-but-not-delivered, never delivered twice.
+            claimed = await asyncio.to_thread(
+                import_store.update_lead, import_lead["id"], only_if_status=("approved",),
+                status="sent", sent_at=import_store.now_sql(), error=None,
+            )
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This lead is already being sent or changed; nothing was sent.",
+                )
         try:
             message_id = await asyncio.to_thread(
-                ses.send_email, req.email, send_subject, send_body,   # IMPORT: stored copy for imports
+                ses.send_email, send_to, send_subject, send_body,   # IMPORT: stored copy for imports
                 image_path=image_path, mobile_image_path=mobile_image_path,
                 closeup_image_path=closeup_image_path,
             )
         except Exception as send_error:
             if import_lead is not None:   # IMPORT: keep the real transport error on the lead
-                await asyncio.to_thread(
-                    import_store.update_lead, import_lead["id"],
-                    status="failed", error=str(send_error)[:500],
-                )
+                try:
+                    await asyncio.to_thread(
+                        import_store.update_lead, import_lead["id"],
+                        status="failed", error=str(send_error)[:500],
+                    )
+                except Exception as db_error:
+                    print(f"[Send] Could not mark import lead {import_lead['id']} failed: {db_error}")
             raise
         success = bool(message_id)
 
@@ -1389,19 +1410,18 @@ async def send_email(
             if import_lead is not None:   # IMPORT: its own bucket in get_variant_performance()
                 variant_sent = import_send_policy.IMPORT_VARIANT
             await asyncio.to_thread(
-                db.log_email, req.company, req.website, req.email, config.FROM_EMAIL,
+                db.log_email, log_company, log_website, send_to, config.FROM_EMAIL,
                 send_subject, send_body, message_id=message_id,   # IMPORT
                 variant=variant_sent,
                 sector=(draft.get("sector") or "") if draft else "",
                 niche=(draft.get("niche") or "") if draft else "",
             )
 
-            if import_lead is not None:   # IMPORT: mark sent and link the history row
+            if import_lead is not None:   # IMPORT: link the history row (status was set to sent before sending)
                 history_row = await asyncio.to_thread(db.get_email_history_by_message_id, message_id)
                 await asyncio.to_thread(
                     import_store.update_lead, import_lead["id"],
-                    status="sent", sent_at=import_store.now_sql(),
-                    history_id=history_row["id"] if history_row else None, error=None,
+                    history_id=history_row["id"] if history_row else None,
                 )
             else:
                 # Remove from drafts since it's sent

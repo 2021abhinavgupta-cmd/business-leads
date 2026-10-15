@@ -129,18 +129,75 @@ def test_marks_sent_links_history_and_records_the_variant(env):
     assert row["subject"] == "Stored subject"
 
 
-def test_an_import_send_never_attaches_screenshots_or_touches_audit_drafts(env):
+def test_an_import_send_never_attaches_screenshots_or_touches_audit_drafts(env, monkeypatch, tmp_path):
+    from analyzer.visuals import (
+        make_closeup_screenshot_filename, make_mobile_screenshot_filename, make_screenshot_filename,
+    )
     client, sender = env
-    # Adapted to db.log_draft's real signature (company, website, target_email,
-    # subject, body, image_url, ...): an audit draft for the SAME website must
-    # exist before and after the import send.
-    db.log_draft("Acme Bank", "acme.com", "jane@acme.com", "Audit subject", "Audit body", "img")
-    assert db.get_draft_by_website("acme.com") is not None
+    shots = tmp_path / "shots"
+    shots.mkdir()
+    monkeypatch.setattr(app_module, "SCREENSHOTS_DIR", str(shots))
+    for fn in (make_screenshot_filename, make_mobile_screenshot_filename, make_closeup_screenshot_filename):
+        (shots / fn("Acme Bank", "acme.com")).write_bytes(b"png")
+    # db.log_draft(company, website, target_email, subject, body, image_url, review_warnings=...):
+    # an audit draft with an unacknowledged warning for the SAME website must not gate or be deleted.
+    db.log_draft("Acme Bank", "acme.com", "jane@acme.com", "Audit subject", "Audit body", "img",
+                 review_warnings=["x"])
     lead_id = _approved()
-    assert _post(client, lead_id).status_code == 200
+    r = _post(client, lead_id)
+    assert r.status_code == 200, r.text
     call = sender.calls[0]
     assert not call.get("image_path") and not call.get("mobile_image_path") and not call.get("closeup_image_path")
     assert db.get_draft_by_website("acme.com") is not None
+
+
+def test_identity_comes_from_the_stored_lead_not_the_client(env):
+    client, sender = env
+    lead_id = _approved()
+    r = _post(client, lead_id, email=" Jane@Acme.com ", company="Wrong Co", website="wrong.com")
+    assert r.status_code == 200, r.text
+    assert sender.calls[0]["to"] == "jane@acme.com"
+    lead = import_store.get_lead(lead_id)
+    row = db.get_email_history_by_id(lead["history_id"])
+    assert row["website"] == "acme.com" and row["company"] == "Acme Bank"
+
+
+def test_a_lead_changed_between_the_gates_and_the_claim_is_not_sent(env, monkeypatch):
+    client, sender = env
+    lead_id = _approved()
+    real = app_module._prepare_import_send
+
+    async def flip_after_gates(req):
+        lead = await real(req)
+        import_store.update_lead(lead_id, status="drafted")
+        return lead
+
+    monkeypatch.setattr(app_module, "_prepare_import_send", flip_after_gates)
+    r = _post(client, lead_id)
+    assert r.status_code == 409 and "nothing was sent" in r.text
+    assert sender.calls == []
+    assert import_store.get_lead(lead_id)["status"] == "drafted"
+
+
+def test_a_double_post_sends_exactly_once(env):
+    client, sender = env
+    lead_id = _approved()
+    assert _post(client, lead_id).status_code == 200
+    assert _post(client, lead_id).status_code == 409
+    assert len(sender.calls) == 1
+
+
+def test_a_db_failure_after_a_successful_send_cannot_lead_to_a_resend(env, monkeypatch):
+    client, sender = env
+    lead_id = _approved()
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(app_module.db, "log_email", boom)
+    assert _post(client, lead_id).status_code == 500
+    assert import_store.get_lead(lead_id)["status"] == "sent"
+    assert len(sender.calls) == 1
 
 
 def test_unapproved_missing_and_mismatched_leads_are_refused(env):
@@ -218,12 +275,15 @@ def test_the_bounce_pause_blocks_further_sends(env, monkeypatch):
 
 def test_existing_callers_without_import_lead_id_are_unchanged(env):
     client, sender = env
+    db.log_draft("Y", "y.com", "x@y.com", "Draft subject", "Draft body", "img")
     r = client.post("/api/send", json={
         "email": "x@y.com", "subject": "Plain subject", "body": "Plain body",
         "company": "Y", "website": "y.com",
     })
     assert r.status_code == 200
     assert sender.calls[0]["subject"] == "Plain subject"
+    assert db.get_draft_by_website("y.com") is None
+    assert db.get_email_history()[0]["variant"] == app_module.config.EMAIL_VARIANT
 
 
 def test_status_route(env, monkeypatch):
