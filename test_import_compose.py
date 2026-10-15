@@ -77,3 +77,11 @@ def test_edit_mode_skips_evidence_checks_but_carries_old_evidence_warnings():
     assert warnings == carried
     assert compose.is_evidence_warning(carried[0])
     assert not compose.is_evidence_warning("Contains trigger word(s) ['free']")
+
+
+def test_links_and_email_addresses_are_flagged_but_normal_drafts_are_not():
+    for text in ("See https://evil.example now.", "Visit www.evil.example.", "Write to bob@evil.example."):
+        assert any("link or email" in w for w in _checks(_body([text + " Manual?"])))
+    assert not any("link or email" in w for w in _checks(_body()))
+    assert not any("link or email" in w for w in _checks(_body(), source_quote=""))
+    assert "@" not in compose.FIXED_LINE and "http" not in compose.FIXED_LINE

@@ -99,5 +99,12 @@ def save_edit(lead_id: int, subject: str, body: str) -> dict:
         check_evidence=False, carried_warnings=carried,
     )
     # An edit invalidates any earlier approval and acknowledgement.
-    import_store.update_lead(lead_id, status="drafted", subject=subject, body=body, review_warnings=warnings)
+    if len(subject) > compose.MAX_SUBJECT_CHARS:
+        warnings.append(compose.subject_length_warning(subject))
+    saved = import_store.update_lead(
+        lead_id, only_if_status=("drafted", "approved", "failed"),
+        status="drafted", subject=subject, body=body, review_warnings=warnings,
+    )
+    if not saved:
+        raise FlowError(409, "The lead changed while it was being edited; nothing was saved.")
     return import_store.get_lead(lead_id)

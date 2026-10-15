@@ -8,6 +8,7 @@ public host cannot bounce us onto an internal address. Any failure returns
 None; drafting then proceeds from the CSV fields alone and the draft is
 flagged "no homepage evidence".
 """
+import time
 from urllib.parse import urljoin
 
 import httpx
@@ -23,18 +24,25 @@ _USER_AGENT = "Mozilla/5.0 (compatible; MMGAResearch/1.0)"
 _REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
-def _http_get(url: str) -> tuple[int, dict, bytes]:
-    """One GET, no redirect following, body capped at MAX_BODY_BYTES."""
+def _http_get(url: str, transport=None) -> tuple[int, dict, bytes]:
+    """
+    One GET, no redirect following, body capped at MAX_BODY_BYTES and read for
+    at most FETCH_TIMEOUT_SECONDS in total. Compression is refused
+    (Accept-Encoding identity) so a small download cannot inflate into a huge one.
+    """
+    deadline = time.monotonic() + FETCH_TIMEOUT_SECONDS
     with httpx.Client(
-        follow_redirects=False, timeout=FETCH_TIMEOUT_SECONDS,
-        headers={"User-Agent": _USER_AGENT},
+        follow_redirects=False, timeout=FETCH_TIMEOUT_SECONDS, transport=transport,
+        headers={"User-Agent": _USER_AGENT, "Accept-Encoding": "identity"},
     ) as client:
         with client.stream("GET", url) as response:
             body = b""
-            for chunk in response.iter_bytes():
+            for chunk in response.iter_raw():
                 body += chunk
                 if len(body) >= MAX_BODY_BYTES:
                     body = body[:MAX_BODY_BYTES]
+                    break
+                if time.monotonic() > deadline:
                     break
             return response.status_code, dict(response.headers), body
 

@@ -2077,17 +2077,23 @@ async def import_draft(
     except import_drafting.DraftError as e:
         await _fail(502, str(e))
 
-    if result["ai_cost"]:
-        await asyncio.to_thread(
-            db.log_cost, "AI Import Draft", result["ai_cost"],
-            description=f"Import draft for {lead.get('organization') or lead.get('domain')}",
-        )
-    await asyncio.to_thread(
+    saved = await asyncio.to_thread(
         import_store.update_lead, lead_id,
+        only_if_status=("ready", "drafted", "failed"),
         status="drafted", subject=result["subject"], body=result["body"],
         review_warnings=result["review_warnings"], source_quote=result["source_quote"],
         drafted_at=import_store.now_sql(), error=None,
     )
+    if result["ai_cost"]:
+        try:
+            await asyncio.to_thread(
+                db.log_cost, "AI Import Draft", result["ai_cost"],
+                description=f"Import draft for {lead.get('organization') or lead.get('domain')}",
+            )
+        except Exception as e:
+            print(f"[Import] Could not log draft cost: {e}")
+    if not saved:
+        raise HTTPException(status_code=409, detail="The lead changed while drafting; nothing was saved.")
     return {"lead": await asyncio.to_thread(import_store.get_lead, lead_id)}
 
 

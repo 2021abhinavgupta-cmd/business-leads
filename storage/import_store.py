@@ -146,20 +146,27 @@ def facets(batch_id: int) -> dict:
         conn.close()
 
 
-def update_lead(lead_id: int, **fields) -> None:
+def update_lead(lead_id: int, *, only_if_status: tuple | None = None, **fields) -> bool:
+    """Update a lead. With only_if_status the write is a compare and set: it applies only while
+    the lead is still in one of those statuses. Returns True if a row changed."""
     bad = set(fields) - _UPDATABLE
     if bad:
         raise ValueError(f"Not updatable: {sorted(bad)}")
     if not fields:
-        return
+        return False
     if "review_warnings" in fields and not isinstance(fields["review_warnings"], str):
         fields["review_warnings"] = json.dumps(fields["review_warnings"] or [])
     # Column names come from the whitelist above, never from the caller's input.
     sets = ", ".join(f"{name} = ?" for name in fields)
     conn = _connect()
     try:
-        conn.execute(f"UPDATE import_leads SET {sets} WHERE id = ?", (*fields.values(), lead_id))
+        sql, params = f"UPDATE import_leads SET {sets} WHERE id = ?", [*fields.values(), lead_id]
+        if only_if_status:
+            sql += f" AND status IN ({', '.join('?' * len(only_if_status))})"
+            params.extend(only_if_status)
+        changed = conn.execute(sql, params).rowcount > 0
         conn.commit()
+        return changed
     finally:
         conn.close()
 

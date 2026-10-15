@@ -59,3 +59,41 @@ def test_error_status_and_exceptions_return_none(monkeypatch):
 
     assert homepage.fetch_homepage_text("acme.com", get=boom) is None
     assert homepage.fetch_homepage_text("", get=boom) is None
+
+
+# ---- _http_get over a mock transport --------------------------------------
+
+import httpx
+
+
+def test_http_get_caps_body_and_sends_identity_encoding_and_agent():
+    seen = {}
+
+    def handler(request):
+        seen["headers"] = request.headers
+        return httpx.Response(200, stream=httpx.ByteStream(b"x" * (homepage.MAX_BODY_BYTES + 5000)))
+
+    status, _, body = homepage._http_get("https://acme.com", transport=httpx.MockTransport(handler))
+    assert status == 200 and len(body) == homepage.MAX_BODY_BYTES
+    assert seen["headers"]["accept-encoding"] == "identity"
+    assert "MMGAResearch" in seen["headers"]["user-agent"]
+
+
+def test_http_get_returns_redirects_without_following():
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://10.0.0.5/"}, stream=httpx.ByteStream(b""))
+
+    status, headers, body = homepage._http_get("https://acme.com", transport=httpx.MockTransport(handler))
+    assert status == 302 and headers["location"] == "http://10.0.0.5/" and body == b""
+    assert len(calls) == 1
+
+
+def test_http_get_stops_reading_after_the_deadline(monkeypatch):
+    clock = iter([0.0, 100.0, 200.0, 300.0])
+    monkeypatch.setattr(homepage.time, "monotonic", lambda: next(clock))
+    handler = lambda request: httpx.Response(200, stream=httpx.ByteStream(b"y" * 10))
+    status, _, body = homepage._http_get("https://acme.com", transport=httpx.MockTransport(handler))
+    assert status == 200 and len(body) <= 10

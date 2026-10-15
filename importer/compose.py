@@ -7,7 +7,12 @@ found", which is false for an import where no audit ran) and it must never
 claim that no human reviewed the email, because every draft is reviewed
 before it can be sent.
 """
+import re
+
 from analyzer.ai_audit import AIAuditor
+
+MAX_SUBJECT_CHARS = 50
+_LINK_OR_EMAIL = re.compile(r"https?://|www\.|[\w.+]+@[\w]+\.[\w.]+", re.IGNORECASE)
 
 FIXED_LINE = (
     "Worth mentioning how this reached you: this email was drafted and sent by a system we "
@@ -40,6 +45,10 @@ def facts_text(lead: dict) -> str:
     return " ".join(str(lead.get(k) or "") for k in keys)
 
 
+def subject_length_warning(subject: str) -> str:
+    return f"Subject is {len(subject)} characters; keep it at {MAX_SUBJECT_CHARS} or fewer."
+
+
 def is_evidence_warning(warning: str) -> bool:
     return warning.startswith("No homepage evidence") or "source quote" in warning
 
@@ -67,6 +76,8 @@ def run_checks(
         AIAuditor._check_forbidden_dashes(parsed, company),
         AIAuditor._check_number_hallucination(parsed, corpus, company),
     ) if w]
+    if _LINK_OR_EMAIL.search(f"{subject} {body}"):
+        warnings.append("Contains a link or email address; the email should not include any. Review before sending.")
     if check_evidence:
         if not homepage_text or not source_quote:
             warnings.append(
