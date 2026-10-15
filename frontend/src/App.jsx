@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
-import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot } from 'lucide-react';
+import ImportView from './ImportView.jsx';
+import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NICHES, CITIES } from './searchOptions';
 import { AGRI_NICHES } from './agriNiches';
@@ -96,6 +97,17 @@ const HELP_CONTENT = {
       'Every email actually sent (not just drafted) shows up here, with open/reply status if tracking is enabled for this deployment.',
       '"Check for replies" scans the connected inbox for genuine replies — auto-replies and bounces are detected and excluded, not counted as engagement.',
       'The variant performance table compares reply rates between different email copy styles — treat any row under ~20 sends as too little data to draw a conclusion from yet.',
+    ],
+  },
+  import: {
+    title: 'Import: emailing a lead list from a CSV',
+    tips: [
+      'Upload a CSV with an email column. Rows that are unsafe or redundant are skipped automatically and the reason is shown: invalid email, unsupported country, duplicates, unsubscribed, already emailed, government domains and second contacts at the same company.',
+      'Government and second contact skips can be restored with one click. A restore is re-checked against your unsubscribe list and send history.',
+      'Select leads and click Draft: the AI reads the company homepage and writes one short email per lead. Nothing sends until you have read a draft and approved it.',
+      'A red warning box means a check flagged the draft. Read it, tick the box and approve, or edit the text and save, which re-runs the checks.',
+      '"Send up to N approved" sends slowly on purpose, and never past the daily limit. If more than 5 percent of the first 20 or more sends bounce, sending pauses by itself.',
+      'US leads cannot be sent until the MAILING_ADDRESS environment variable is set on the server.',
     ],
   },
 };
@@ -3546,6 +3558,12 @@ function App() {
           >
             <Clock size={18} /> History
           </button>
+          <button
+            onClick={() => setCurrentView('import')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 16px', background: currentView === 'import' ? 'rgba(255,255,255,0.15)' : 'transparent', border: 'none', borderRadius: '8px', color: currentView === 'import' ? '#fff' : '#94a3b8', cursor: 'pointer', fontSize: '15px', fontWeight: currentView === 'import' ? 'bold' : 'normal', transition: 'all 0.2s' }}
+          >
+            <FileSpreadsheet size={18} /> Import
+          </button>
           
           {/* Global Total Cost Pill in Navbar */}
           <div 
@@ -3598,6 +3616,7 @@ function App() {
         {currentView === 'drafts' && renderDrafts()}
         {currentView === 'history' && renderHistory()}
         {currentView === 'cost' && renderCost()}
+        {currentView === 'import' && <ImportView />}
       </main>
     </div>
   );
