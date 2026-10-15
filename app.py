@@ -43,6 +43,7 @@ from storage import db
 from storage import import_store
 from importer import drafting as import_drafting
 from importer import service as import_service
+from importer import send_policy as import_send_policy
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -366,6 +367,12 @@ class SendRequest(BaseModel):
     # and until now there was no way to send the copy without also sending
     # the picture.
     attach_screenshot: bool = True
+    # Set only by the CSV Import page. When present, /api/send sends the
+    # STORED, reviewed subject and body for that import lead (the client's
+    # copies are ignored), applies the import gates, and skips the audit
+    # pipeline's draft lookup, screenshots, Sheets update and draft deletion.
+    # Existing callers never send it, so their behaviour is unchanged.
+    import_lead_id: int | None = None
 
 maps_scraper = GoogleMapsScraper()
 b2b_directory_scrapers = {
@@ -1198,6 +1205,28 @@ async def recover_audit(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+async def _prepare_import_send(req: SendRequest) -> dict:
+    """Load an import lead and apply every import gate; raise HTTPException on a block."""
+    lead = await asyncio.to_thread(import_store.get_lead, req.import_lead_id)
+    blockers = await asyncio.to_thread(import_store.load_blockers)
+    rows = await asyncio.to_thread(db.get_variant_performance)
+    bounce = import_send_policy.bounce_status(
+        rows, config.IMPORT_BOUNCE_MIN_SENT, config.IMPORT_BOUNCE_PAUSE_PCT
+    )
+    try:
+        import_send_policy.check_import_send(
+            lead, req_email=req.email, acknowledge_warnings=req.acknowledge_warnings,
+            mailing_address=config.MAILING_ADDRESS, blockers=blockers, bounce=bounce,
+        )
+    except import_send_policy.SendBlocked as e:
+        if e.skip_reason and lead:
+            await asyncio.to_thread(
+                import_store.update_lead, lead["id"], status="skipped", skip_reason=e.skip_reason
+            )
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return lead
+
+
 @app.post("/api/send")
 async def send_email(
     req: SendRequest,
@@ -1225,6 +1254,18 @@ async def send_email(
                 ),
             )
 
+        # CSV Import page sends: load the stored lead and apply the import
+        # gates. Everything below that is specific to the audit pipeline
+        # (draft lookup, screenshots, Sheets, draft deletion) is skipped for
+        # these, because those are keyed by website and an old audit draft or
+        # screenshot for the same company would otherwise be attached to, or
+        # deleted by, an import send.
+        import_lead = None
+        send_subject, send_body = req.subject, req.body
+        if req.import_lead_id is not None:
+            import_lead = await _prepare_import_send(req)
+            send_subject, send_body = import_lead["subject"], import_lead["body"]
+
         # The five accuracy checks in analyzer/ai_audit.py already flag a
         # draft whose copy looks fabricated, and their output has been
         # visible in the Drafts UI since 2026-08-07 — but nothing stopped a
@@ -1234,7 +1275,7 @@ async def send_email(
         # draft itself sits in the inbox indefinitely, so an old draft can
         # cite findings that are no longer true. Both now need one explicit
         # acknowledgement rather than passing silently.
-        draft = await asyncio.to_thread(db.get_draft_by_website, req.website)
+        draft = None if import_lead is not None else await asyncio.to_thread(db.get_draft_by_website, req.website)
         if draft and not req.acknowledge_warnings:
             blockers = list(draft.get("review_warnings") or [])
 
@@ -1273,7 +1314,9 @@ async def send_email(
         image_path = None
         mobile_image_path = None
         closeup_image_path = None
-        if not req.attach_screenshot:
+        if import_lead is not None:
+            pass  # import sends never carry audit screenshots
+        elif not req.attach_screenshot:
             print(f"[Send] Sending to {req.email} without the screenshot — attachment disabled for this draft.")
         elif req.company and req.website:
             for filename, target in (
@@ -1290,23 +1333,32 @@ async def send_email(
                     else:
                         closeup_image_path = candidate_path
 
-        message_id = await asyncio.to_thread(
-            ses.send_email, req.email, req.subject, req.body,
-            image_path=image_path, mobile_image_path=mobile_image_path,
-            closeup_image_path=closeup_image_path,
-        )
+        try:
+            message_id = await asyncio.to_thread(
+                ses.send_email, req.email, send_subject, send_body,   # IMPORT: stored copy for imports
+                image_path=image_path, mobile_image_path=mobile_image_path,
+                closeup_image_path=closeup_image_path,
+            )
+        except Exception as send_error:
+            if import_lead is not None:   # IMPORT: keep the real transport error on the lead
+                await asyncio.to_thread(
+                    import_store.update_lead, import_lead["id"],
+                    status="failed", error=str(send_error)[:500],
+                )
+            raise
         success = bool(message_id)
 
         if success:
-            def save_send_to_sheets():
-                try:
-                    row = sheets.find_row_by_website(req.website)
-                    if row:
-                        sheets.update_status(row, "emailed")
-                        sheets.set_message_id(row, message_id)
-                except Exception as e:
-                    print(f"Error updating send status in sheets: {e}")
-            background_tasks.add_task(save_send_to_sheets)
+            if import_lead is None:   # IMPORT: no Sheets row exists for imported leads
+                def save_send_to_sheets():
+                    try:
+                        row = sheets.find_row_by_website(req.website)
+                        if row:
+                            sheets.update_status(row, "emailed")
+                            sheets.set_message_id(row, message_id)
+                    except Exception as e:
+                        print(f"Error updating send status in sheets: {e}")
+                background_tasks.add_task(save_send_to_sheets)
 
             # Log exact costs and email history
             await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
@@ -1334,19 +1386,34 @@ async def send_email(
                 if draft and draft.get("include_automation_pitch")
                 else config.EMAIL_VARIANT
             )
+            if import_lead is not None:   # IMPORT: its own bucket in get_variant_performance()
+                variant_sent = import_send_policy.IMPORT_VARIANT
             await asyncio.to_thread(
                 db.log_email, req.company, req.website, req.email, config.FROM_EMAIL,
-                req.subject, req.body, message_id=message_id,
+                send_subject, send_body, message_id=message_id,   # IMPORT
                 variant=variant_sent,
                 sector=(draft.get("sector") or "") if draft else "",
                 niche=(draft.get("niche") or "") if draft else "",
             )
 
-            # Remove from drafts since it's sent
-            await asyncio.to_thread(db.delete_draft_by_website, req.website)
+            if import_lead is not None:   # IMPORT: mark sent and link the history row
+                history_row = await asyncio.to_thread(db.get_email_history_by_message_id, message_id)
+                await asyncio.to_thread(
+                    import_store.update_lead, import_lead["id"],
+                    status="sent", sent_at=import_store.now_sql(),
+                    history_id=history_row["id"] if history_row else None, error=None,
+                )
+            else:
+                # Remove from drafts since it's sent
+                await asyncio.to_thread(db.delete_draft_by_website, req.website)
 
             return {"status": "success"}
         else:
+            if import_lead is not None:   # IMPORT
+                await asyncio.to_thread(
+                    import_store.update_lead, import_lead["id"],
+                    status="skipped", skip_reason="suppressed",
+                )
             raise HTTPException(status_code=400, detail=f"{req.email} is on the unsubscribe/suppression list")
     except HTTPException:
         # HTTPException subclasses Exception, so the generic handler below
@@ -2105,6 +2172,24 @@ async def import_edit(
     _rl: None = Depends(rate_limit(120, 60)),
 ):
     return {"lead": await _import_call(import_service.save_edit, lead_id, req.subject, req.body)}
+
+
+@app.get("/api/import/status")
+async def import_status(
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    sent_today = await asyncio.to_thread(db.count_emails_sent_today)
+    rows = await asyncio.to_thread(db.get_variant_performance)
+    return {
+        "sent_today": sent_today,
+        "daily_limit": config.DAILY_EMAIL_LIMIT,
+        "remaining": max(0, config.DAILY_EMAIL_LIMIT - sent_today),
+        "bounce": import_send_policy.bounce_status(
+            rows, config.IMPORT_BOUNCE_MIN_SENT, config.IMPORT_BOUNCE_PAUSE_PCT
+        ),
+        "mailing_address_set": bool(config.MAILING_ADDRESS),
+    }
 
 
 # Mount screenshots folder
