@@ -50,10 +50,20 @@ export default function ImportView() {
   const [edit, setEdit] = useState({ subject: '', body: '' });
   const [ack, setAck] = useState(false);
   const [job, setJob] = useState(null);             // { kind, done, total, failed, note, finished }
+  const [drawerMessage, setDrawerMessage] = useState('');
+  const [starting, setStarting] = useState(false);
   const stopRef = useRef(false);
+  const runningRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; stopRef.current = true; };
+  }, []);
+  const setJobSafe = (j) => { if (mountedRef.current) setJob(j); };
 
   const loadStatus = useCallback(() => {
-    axios.get(`${API_BASE}/api/import/status`).then((r) => setStatus(r.data)).catch(() => {});
+    axios.get(`${API_BASE}/api/import/status`).then((r) => { if (mountedRef.current) setStatus(r.data); }).catch(() => {});
   }, []);
 
   const loadLeads = useCallback(() => {
@@ -61,8 +71,14 @@ export default function ImportView() {
     const params = { limit: PAGE, offset };
     Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
     return axios.get(`${API_BASE}/api/import/batches/${batchId}/leads`, { params })
-      .then((r) => setPage(r.data))
-      .catch((e) => setMessage(errText(e)));
+      .then((r) => {
+        if (!mountedRef.current) return;
+        const total = r.data.total || 0;
+        if (total === 0 && offset !== 0) { setOffset(0); return; }
+        if (total > 0 && offset >= total) { setOffset(Math.floor((total - 1) / PAGE) * PAGE); return; }
+        setPage(r.data);
+      })
+      .catch((e) => { if (mountedRef.current) setMessage(errText(e)); });
   }, [batchId, filters, offset]);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
@@ -100,89 +116,105 @@ export default function ImportView() {
   const readyOnPage = page.leads.filter((l) => ['ready', 'failed'].includes(l.status));
 
   const draftSelected = async () => {
+    if (runningRef.current) return;
     const ids = [...selected];
     if (!ids.length) return;
+    runningRef.current = true;
     stopRef.current = false;
     let done = 0; let failed = 0; let note = '';
-    setJob({ kind: 'Drafting', done, total: ids.length, failed, note });
-    for (const id of ids) {
-      if (stopRef.current) { note = 'Stopped.'; break; }
-      try { await axios.post(`${API_BASE}/api/import/leads/${id}/draft`); } catch (err) {
-        failed += 1; note = errText(err);
-        if (err.response?.status === 429) { await sleep(15000); }
+    try {
+      setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note });
+      for (const id of ids) {
+        if (stopRef.current) { note = 'Stopped.'; break; }
+        try { await axios.post(`${API_BASE}/api/import/leads/${id}/draft`); } catch (err) {
+          failed += 1; note = errText(err);
+          if (err.response?.status === 429) { await sleep(15000); }
+        }
+        done += 1; setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note });
       }
-      done += 1; setJob({ kind: 'Drafting', done, total: ids.length, failed, note });
-    }
-    setJob({ kind: 'Drafting', done, total: ids.length, failed, note: note || 'Finished.', finished: true });
-    setSelected(new Set()); loadLeads();
+      setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note: note || 'Finished.', finished: true });
+      if (mountedRef.current) { setSelected(new Set()); loadLeads(); }
+    } finally { runningRef.current = false; }
   };
 
   const sendApproved = async () => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     stopRef.current = false;
-    const remaining = status?.remaining ?? 0;
-    let queue = [];
+    setStarting(true);
     try {
-      const list = await axios.get(`${API_BASE}/api/import/batches/${batchId}/leads`, { params: { status: 'approved', limit: 200 } });
-      queue = list.data.leads.slice(0, remaining);
-    } catch (err) { setMessage(errText(err)); return; }
-    let done = 0; let failed = 0; let note = '';
-    setJob({ kind: 'Sending', done, total: queue.length, failed, note });
-    for (const lead of queue) {
-      if (stopRef.current) { note = 'Stopped.'; break; }
-      let attempt = 0;
-      // The send route allows 10 per minute; the jittered pause below keeps us under it.
-      while (attempt < 2) {
-        try {
-          await axios.post(`${API_BASE}/api/send`, {
-            email: lead.email, subject: lead.subject, body: lead.body,
-            company: lead.organization || lead.domain, website: lead.domain,
-            import_lead_id: lead.id, acknowledge_warnings: true,
-          });
-          done += 1; break;
-        } catch (err) {
-          const detail = errText(err);
-          if (err.response?.status === 429 && /Daily sending limit/i.test(detail)) { note = detail; stopRef.current = true; break; }
-          if (err.response?.status === 429 && attempt === 0) { attempt += 1; await sleep(20000); continue; }
-          if (err.response?.data?.detail?.code === 'import_paused') { note = detail; stopRef.current = true; break; }
-          failed += 1; note = detail; break;
+      const remaining = status?.remaining ?? 0;
+      let queue = [];
+      try {
+        const list = await axios.get(`${API_BASE}/api/import/batches/${batchId}/leads`, { params: { status: 'approved', limit: 200 } });
+        queue = list.data.leads.slice(0, remaining);
+      } catch (err) { if (mountedRef.current) setMessage(errText(err)); return; }
+      let done = 0; let failed = 0; let note = '';
+      setJobSafe({ kind: 'Sending', done, total: queue.length, failed, note });
+      if (mountedRef.current) setStarting(false);
+      for (const lead of queue) {
+        if (stopRef.current) { note = 'Stopped.'; break; }
+        let attempt = 0;
+        // The send route allows 10 per minute; the jittered pause below keeps us under it.
+        while (attempt < 2) {
+          if (stopRef.current) { note = note || 'Stopped.'; break; }
+          try {
+            await axios.post(`${API_BASE}/api/send`, {
+              email: lead.email, subject: lead.subject, body: lead.body,
+              company: lead.organization || lead.domain, website: lead.domain,
+              import_lead_id: lead.id, acknowledge_warnings: true,
+            });
+            done += 1; break;
+          } catch (err) {
+            const detail = errText(err);
+            if (err.response?.status === 429 && /Daily sending limit/i.test(detail)) { note = detail; stopRef.current = true; break; }
+            if (err.response?.status === 429 && attempt === 0) { attempt += 1; await sleep(20000); continue; }
+            if (err.response?.data?.detail?.code === 'import_paused') { note = detail; stopRef.current = true; break; }
+            failed += 1; note = detail; break;
+          }
         }
+        setJobSafe({ kind: 'Sending', done, total: queue.length, failed, note });
+        if (stopRef.current) break;
+        await sleep(6500 + Math.random() * 2500);
       }
-      setJob({ kind: 'Sending', done, total: queue.length, failed, note });
-      if (stopRef.current) break;
-      await sleep(6500 + Math.random() * 2500);
+      setJobSafe({ kind: 'Sending', done, total: queue.length, failed, note: note || 'Finished.', finished: true });
+      if (mountedRef.current) { loadStatus(); loadLeads(); }
+    } finally {
+      runningRef.current = false;
+      if (mountedRef.current) setStarting(false);
     }
-    setJob({ kind: 'Sending', done, total: queue.length, failed, note: note || 'Finished.', finished: true });
-    loadStatus(); loadLeads();
   };
 
-  const openReview = (lead) => { setReview(lead); setEdit({ subject: lead.subject || '', body: lead.body || '' }); setAck(false); };
+  const closeReview = () => { setReview(null); setDrawerMessage(''); };
+  const openReview = (lead) => { setDrawerMessage(''); setReview(lead); setEdit({ subject: lead.subject || '', body: lead.body || '' }); setAck(false); };
 
   const saveEdit = async () => {
     try {
       const r = await axios.put(`${API_BASE}/api/import/leads/${review.id}`, edit);
-      setReview(r.data.lead); replaceLead(r.data.lead); setAck(false); setMessage('');
-    } catch (err) { setMessage(errText(err)); }
+      setReview(r.data.lead); replaceLead(r.data.lead); setAck(false); setDrawerMessage('');
+    } catch (err) { setDrawerMessage(errText(err)); }
   };
 
   const approveReview = async () => {
     try {
       const r = await axios.post(`${API_BASE}/api/import/leads/${review.id}/approve`, { acknowledge_warnings: ack });
-      setReview(r.data.lead); replaceLead(r.data.lead); loadLeads(); setMessage('');
-    } catch (err) { setMessage(errText(err)); }
+      setReview(r.data.lead); replaceLead(r.data.lead); loadLeads(); setDrawerMessage('');
+    } catch (err) { setDrawerMessage(errText(err)); }
   };
 
   const unapproveReview = async () => {
     try {
       const r = await axios.post(`${API_BASE}/api/import/leads/${review.id}/unapprove`);
-      setReview(r.data.lead); replaceLead(r.data.lead); loadLeads();
-    } catch (err) { setMessage(errText(err)); }
+      setReview(r.data.lead); replaceLead(r.data.lead); loadLeads(); setAck(false); setDrawerMessage('');
+    } catch (err) { setDrawerMessage(errText(err)); }
   };
 
   const usBlocked = !!status && !status.mailing_address_set && (summary ? summary.us_ready > 0 : true);
+  const dirty = !!review && (edit.subject !== (review.subject || '') || edit.body !== (review.body || ''));
   const facets = page.facets || {};
-  const busy = !!job && !job.finished;
+  const busy = (!!job && !job.finished) || starting;
   const approvedCount = facets.status?.approved || 0;
-  const sendDisabled = busy || approvedCount === 0 || usBlocked || !!status?.bounce?.paused;
+  const sendDisabled = busy || !status || status.remaining <= 0 || approvedCount === 0 || usBlocked || !!status?.bounce?.paused;
 
   return (
     <div className="glass" style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -208,9 +240,9 @@ export default function ImportView() {
       {message && <div style={{ ...card, borderColor: '#f87171', color: '#fca5a5' }}>{message}</div>}
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <label style={{ ...btn('#10b981', uploading), cursor: uploading ? 'wait' : 'pointer' }}>
+        <label style={{ ...btn('#10b981', uploading || busy), cursor: uploading ? 'wait' : (busy ? 'not-allowed' : 'pointer') }}>
           {uploading ? <Loader2 size={14} /> : <Upload size={14} />} Choose CSV file
-          <input type="file" accept=".csv,text/csv" onChange={handleFile} style={{ display: 'none' }} disabled={uploading} />
+          <input type="file" accept=".csv,text/csv" onChange={handleFile} style={{ display: 'none' }} disabled={uploading || busy} />
         </label>
         {status && (
           <span style={{ color: '#cbd5e1', fontSize: 13 }}>
@@ -311,10 +343,10 @@ export default function ImportView() {
                         <button style={btn('#a78bfa')} onClick={() => openReview(l)}>Review</button>
                       )}{' '}
                       {l.status === 'skipped' && RESTORABLE.includes(l.skip_reason) && (
-                        <button style={btn('#10b981')} onClick={() => act(l, 'restore')}><RotateCcw size={12} /> Restore</button>
+                        <button style={btn('#10b981', busy)} disabled={busy} onClick={() => act(l, 'restore')}><RotateCcw size={12} /> Restore</button>
                       )}
                       {['ready', 'drafted', 'approved', 'failed'].includes(l.status) && (
-                        <button style={btn('#f59e0b')} onClick={() => act(l, 'skip')}>Skip</button>
+                        <button style={btn('#f59e0b', busy)} disabled={busy} onClick={() => act(l, 'skip')}>Skip</button>
                       )}
                     </td>
                   </tr>
@@ -334,14 +366,15 @@ export default function ImportView() {
 
       {review && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(2,6,23,0.7)', zIndex: 30, display: 'flex', justifyContent: 'flex-end' }}
-          onClick={() => setReview(null)}>
+          onClick={() => closeReview()}>
           <div style={{ width: 'min(560px, 96vw)', background: '#0f172a', borderLeft: '1px solid rgba(255,255,255,0.15)', padding: 24, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}
             onClick={(e) => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <h3 style={{ margin: 0 }}>{review.person_name} · {review.organization}</h3>
-              <button style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }} onClick={() => setReview(null)}><X size={18} /></button>
+              <button style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }} onClick={() => closeReview()}><X size={18} /></button>
             </div>
             <div style={{ color: '#94a3b8', fontSize: 12 }}>{review.person_title} · {review.email} · status {review.status}</div>
+            {drawerMessage && <div style={{ ...card, borderColor: '#f87171', color: '#fca5a5' }}>{drawerMessage}</div>}
             {review.status === 'failed' && (
               <div style={{ ...card, borderColor: '#f59e0b', color: '#fbbf24', fontSize: 12 }}>
                 {review.error && <div style={{ marginBottom: 4 }}>{review.error}</div>}
@@ -373,11 +406,12 @@ export default function ImportView() {
               {review.status === 'approved' ? (
                 <button style={btn('#f59e0b')} onClick={unapproveReview}>Un-approve</button>
               ) : (
-                <button style={btn('#10b981', review.review_warnings?.length > 0 && !ack)}
-                  disabled={review.review_warnings?.length > 0 && !ack} onClick={approveReview}>
+                <button style={btn('#10b981', dirty || (review.review_warnings?.length > 0 && !ack))}
+                  disabled={dirty || (review.review_warnings?.length > 0 && !ack)} onClick={approveReview}>
                   <Check size={14} /> Approve
                 </button>
               )}
+              {dirty && review.status !== 'approved' && <span style={{ color: '#fbbf24', fontSize: 12, alignSelf: 'center' }}>Save your edit before approving</span>}
             </div>
           </div>
         </div>
