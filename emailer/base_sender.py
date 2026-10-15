@@ -92,6 +92,29 @@ class BaseSender:
     def _msgid_domain(self) -> str:
         return (self.from_email or "").split("@")[-1] or "localhost"
 
+    def _with_footer(self, body: str, to_email: str) -> str:
+        """
+        Append the CAN-SPAM postal address and an opt-out line.
+
+        Commercial email to US recipients needs a physical postal address and a
+        clear opt-out; before 2026-10-15 no body carried an address. Opt-in
+        through MAILING_ADDRESS so an environment that never sets it sends
+        exactly what it always did. The wording itself contains no hyphens (the
+        copy rule applies to everything we author); the address and URL are
+        whatever the operator configured.
+        """
+        address = (config.MAILING_ADDRESS or "").strip()
+        if not address:
+            return body
+        if config.APP_BASE_URL:
+            optout = (
+                "To stop receiving emails from us, unsubscribe here: "
+                f"{config.APP_BASE_URL}/unsubscribe?email={quote(to_email, safe='')}"
+            )
+        else:
+            optout = "To stop receiving emails from us, reply with the word unsubscribe."
+        return f"{body.rstrip()}\n\n{address}\n{optout}"
+
     def _unsubscribe_headers(self, to_email: str) -> dict:
         """
         Build List-Unsubscribe (+ List-Unsubscribe-Post) headers per RFC 2369 /
@@ -509,6 +532,7 @@ class BaseSender:
         the mobile view is what most of these prospects' customers actually
         see.
         """
+        body = self._with_footer(body, to_email)
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = self.from_email
@@ -593,6 +617,7 @@ class BaseSender:
     def _build_followup_message(
         self, to_email: str, subject: str, body: str, in_reply_to: str = ""
     ) -> MIMEMultipart:
+        body = self._with_footer(body, to_email)
         message_id = make_msgid(domain=self._msgid_domain())
         html_body = body.replace("\n", "<br>")
         pixel = pixel_html(tracking_id_for(message_id))
