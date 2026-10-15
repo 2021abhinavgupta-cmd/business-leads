@@ -8,7 +8,7 @@ from import_test_support import client_with_key, csv_text, make_row, seed_lead, 
 
 ROUTE_FUNCS = [
     "import_upload", "import_batches", "import_batch_leads", "import_restore",
-    "import_skip", "import_approve", "import_unapprove",
+    "import_skip", "import_approve", "import_unapprove", "import_draft", "import_edit",
 ]
 
 

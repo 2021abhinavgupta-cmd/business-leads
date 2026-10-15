@@ -97,6 +97,20 @@ _FOLLOWUP_RESPONSE_SCHEMA = {
     "required": ["subject", "body"],
 }
 
+# Schema for the CSV import page's per-lead email (added 2026-10-15). Its own
+# schema and parser, like the follow-up one above, so the audit prompt and
+# schema are untouched. source_quote must be an exact phrase from the homepage
+# text the model was shown, or empty.
+_IMPORT_EMAIL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string"},
+        "paragraphs": {"type": "array", "items": {"type": "string"}},
+        "source_quote": {"type": "string"},
+    },
+    "required": ["subject", "paragraphs", "source_quote"],
+}
+
 
 class AIAuditor:
     """Run AI-powered audits on lead data with provider fallback."""
@@ -1742,3 +1756,161 @@ Respond with a JSON object: {{"subject": "...", "body": "..."}}. The subject sho
         if not {"subject", "body"}.issubset(data.keys()):
             return None
         return {"subject": data["subject"], "body": data["body"]}
+
+    # ------------------------------------------------------------------
+    # Import email generation: CSV import page (2026-10-15)
+    # ------------------------------------------------------------------
+
+    def _build_import_prompt(self, lead: dict, homepage_text: str | None, your_name: str) -> str:
+        # Written without a single hyphen or dash on purpose: a model mirrors
+        # the style of the prompt it is shown (see _check_forbidden_dashes).
+        return f"""You write one short outbound email for {your_name}, who runs MMGA Agency. MMGA builds automation for businesses: it removes repetitive manual work such as copying data between systems, chasing approvals, preparing recurring reports and sorting documents.
+
+THE RECIPIENT
+Name: {lead.get("person_name") or "unknown"}
+Title: {lead.get("person_title") or "unknown"}
+Company: {lead.get("organization") or "unknown"}
+Industry: {lead.get("industry") or "unknown"}
+Location: {lead.get("city") or ""} {lead.get("state") or ""}
+
+WHAT THE COMPANY WEBSITE SAYS (the only evidence you may rely on about the company)
+\"\"\"
+{homepage_text or "(not available)"}
+\"\"\"
+
+RULES
+1. Start with one specific problem that someone in the recipient's role at this kind of company plausibly has. Do not introduce MMGA in the first sentence. Write no greeting and no sign off, both are added for you.
+2. Use only facts from the recipient block and the website text above. Never state a number, client count or revenue figure about their company. If you need an example number, make it a round and openly hypothetical one, such as "if a team spent 10 hours a week on this".
+3. If the website text is not available or gives you nothing useful, make no factual claim about the company beyond its name and the recipient's title, set source_quote to an empty string, and write the problem as a question instead of a statement.
+4. If you do rely on the website text, copy ONE short exact phrase from it into source_quote. It must appear in the text word for word.
+5. Never use hyphens or dashes of any kind in your response. Write compound words as two words.
+6. Do not use phrases such as "I noticed", "I hope this finds you well", "In today's competitive landscape", "would love to connect", "drive growth" or "unlock".
+7. The subject has at most 50 characters, is not in capital letters, and avoids the words free, guarantee, urgent, cash and winner.
+8. The body is 3 to 5 short sentences and at most 60 words in total, in 1 or 2 paragraphs. The last sentence is one easy question that can be answered with a yes or a no.
+9. Plain, human, direct tone.
+
+Respond with JSON only: {{"subject": "...", "paragraphs": ["..."], "source_quote": "..."}}"""
+
+    def generate_import_email(self, lead: dict, homepage_text: str | None, your_name: str) -> dict | None:
+        """
+        Draft one email for a CSV import lead. Same provider order as
+        generate_followup_from_original (Claude Haiku, Gemini, GPT-4o-mini).
+        Returns {"subject", "paragraphs", "source_quote", "ai_cost"} or None
+        if every provider fails or answers in an unusable shape.
+        """
+        prompt = self._build_import_prompt(lead, homepage_text, your_name)
+        for call_fn in (
+            self._call_import_anthropic,
+            self._call_import_gemini,
+            self._call_import_openai,
+        ):
+            result = call_fn(prompt)
+            if result is None:
+                continue
+            raw, cost = result
+            parsed = self._parse_import_json(raw)
+            if parsed is not None:
+                parsed["ai_cost"] = cost
+                return parsed
+        print("[AIAuditor] All AI providers failed for import email generation.")
+        return None
+
+    def _call_import_anthropic(self, prompt: str) -> tuple[str, float] | None:
+        if not self._anthropic_client:
+            return None
+        try:
+            message = self._anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=700,
+                temperature=_AI_TEMPERATURE,
+                tools=[{
+                    "name": "submit_import_email",
+                    "description": "Submit the drafted email.",
+                    "input_schema": _IMPORT_EMAIL_SCHEMA,
+                }],
+                tool_choice={"type": "tool", "name": "submit_import_email"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            try:
+                cost = (message.usage.input_tokens * 0.25 / 1_000_000) + (message.usage.output_tokens * 1.25 / 1_000_000)
+            except Exception:
+                cost = 0.0003
+            tool_use = next((b for b in message.content if b.type == "tool_use"), None)
+            if tool_use is None:
+                return None
+            return json.dumps(tool_use.input), cost
+        except Exception as e:
+            print(f"Anthropic error (import email): {e}")
+            return None
+
+    def _call_import_gemini(self, prompt: str) -> tuple[str, float] | None:
+        if not config.GEMINI_API_KEY:
+            return None
+        try:
+            model = genai.GenerativeModel(
+                "gemini-3.5-flash",
+                generation_config=genai.types.GenerationConfig(
+                    response_mime_type="application/json",
+                    response_schema=_IMPORT_EMAIL_SCHEMA,
+                    temperature=_AI_TEMPERATURE,
+                ),
+            )
+            response = model.generate_content(prompt)
+            try:
+                cost = (response.usage_metadata.prompt_token_count * 0.075 / 1_000_000) + (
+                    response.usage_metadata.candidates_token_count * 0.30 / 1_000_000)
+            except Exception:
+                cost = 0.0001
+            return response.text, cost
+        except Exception as e:
+            print(f"Gemini error (import email): {e}")
+            return None
+
+    def _call_import_openai(self, prompt: str) -> tuple[str, float] | None:
+        if not self._openai_client:
+            return None
+        try:
+            response = self._openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=_AI_TEMPERATURE,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "import_email_result",
+                        "strict": True,
+                        "schema": {**_IMPORT_EMAIL_SCHEMA, "additionalProperties": False},
+                    },
+                },
+            )
+            try:
+                cost = (response.usage.prompt_tokens * 0.150 / 1_000_000) + (response.usage.completion_tokens * 0.60 / 1_000_000)
+            except Exception:
+                cost = 0.0001
+            return response.choices[0].message.content, cost
+        except Exception as e:
+            print(f"OpenAI error (import email): {e}")
+            return None
+
+    @staticmethod
+    def _parse_import_json(raw: str) -> dict | None:
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        try:
+            data = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+        subject, paragraphs = data.get("subject"), data.get("paragraphs")
+        if not isinstance(subject, str) or not subject.strip() or not isinstance(paragraphs, list):
+            return None
+        paragraphs = [p.strip() for p in paragraphs if isinstance(p, str) and p.strip()]
+        if not paragraphs:
+            return None
+        quote = data.get("source_quote")
+        return {
+            "subject": subject.strip(),
+            "paragraphs": paragraphs,
+            "source_quote": quote.strip() if isinstance(quote, str) else "",
+        }

@@ -41,6 +41,7 @@ from dataclasses import asdict as _dataclass_asdict
 from storage.sheets import SheetsStorage
 from storage import db
 from storage import import_store
+from importer import drafting as import_drafting
 from importer import service as import_service
 from security_utils import validate_public_url, UnsafeURLError
 
@@ -2035,6 +2036,69 @@ async def import_unapprove(
     _rl: None = Depends(rate_limit(120, 60)),
 ):
     return {"lead": await _import_call(import_service.unapprove, lead_id)}
+
+
+IMPORT_DRAFT_TIMEOUT_SECONDS = 45
+
+
+class ImportEditIn(BaseModel):
+    subject: str = Field(max_length=200)
+    body: str = Field(max_length=5000)
+
+
+@app.post("/api/import/leads/{lead_id}/draft")
+async def import_draft(
+    lead_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(12, 60)),
+):
+    # One lead per request, never a batch: Railway's edge cuts requests at
+    # roughly 60 to 65 seconds and a draft is a network fetch plus an LLM call.
+    lead = await asyncio.to_thread(import_store.get_lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Import lead not found")
+    if lead["status"] not in ("ready", "drafted", "failed"):
+        raise HTTPException(status_code=409, detail=f"A {lead['status']} lead cannot be drafted.")
+
+    async def _fail(code: int, message: str):
+        await asyncio.to_thread(import_store.update_lead, lead_id, error=message)
+        raise HTTPException(status_code=code, detail=message)
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                import_drafting.draft_lead, lead, auditor,
+                your_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
+            ),
+            timeout=IMPORT_DRAFT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        await _fail(504, "Drafting timed out. The lead was left as it was; try again.")
+    except import_drafting.DraftError as e:
+        await _fail(502, str(e))
+
+    if result["ai_cost"]:
+        await asyncio.to_thread(
+            db.log_cost, "AI Import Draft", result["ai_cost"],
+            description=f"Import draft for {lead.get('organization') or lead.get('domain')}",
+        )
+    await asyncio.to_thread(
+        import_store.update_lead, lead_id,
+        status="drafted", subject=result["subject"], body=result["body"],
+        review_warnings=result["review_warnings"], source_quote=result["source_quote"],
+        drafted_at=import_store.now_sql(), error=None,
+    )
+    return {"lead": await asyncio.to_thread(import_store.get_lead, lead_id)}
+
+
+@app.put("/api/import/leads/{lead_id}")
+async def import_edit(
+    lead_id: int,
+    req: ImportEditIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"lead": await _import_call(import_service.save_edit, lead_id, req.subject, req.body)}
 
 
 # Mount screenshots folder

@@ -2,7 +2,7 @@
 from collections import Counter
 
 import config
-from importer import csv_rules
+from importer import compose, csv_rules
 from storage import import_store
 
 
@@ -80,4 +80,24 @@ def unapprove(lead_id: int) -> dict:
     if lead["status"] != "approved":
         raise FlowError(409, "Only an approved lead can be un-approved.")
     import_store.update_lead(lead_id, status="drafted")
+    return import_store.get_lead(lead_id)
+
+
+def save_edit(lead_id: int, subject: str, body: str) -> dict:
+    lead = _load(lead_id)
+    if lead["status"] not in ("drafted", "approved", "failed") or not lead.get("body"):
+        raise FlowError(409, "Only a drafted lead can be edited.")
+    subject, body = subject.strip(), body.strip()
+    if not subject or not body:
+        raise FlowError(400, "Subject and body cannot be empty.")
+    carried = [w for w in lead["review_warnings"] if compose.is_evidence_warning(w)]
+    warnings = compose.run_checks(
+        subject, body,
+        company=lead.get("organization") or lead.get("domain") or "this lead",
+        facts_text=compose.facts_text(lead), homepage_text=None,
+        source_quote=lead.get("source_quote") or "",
+        check_evidence=False, carried_warnings=carried,
+    )
+    # An edit invalidates any earlier approval and acknowledgement.
+    import_store.update_lead(lead_id, status="drafted", subject=subject, body=body, review_warnings=warnings)
     return import_store.get_lead(lead_id)
