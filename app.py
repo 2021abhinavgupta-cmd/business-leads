@@ -6,7 +6,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import Literal
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +40,8 @@ from scrapers.social.linkedin import fetch_linkedin
 from dataclasses import asdict as _dataclass_asdict
 from storage.sheets import SheetsStorage
 from storage import db
+from storage import import_store
+from importer import service as import_service
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1930,6 +1932,109 @@ async def social_audit_result(
         return {"ready": False}
     _, result = entry
     return {"ready": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# CSV import outreach (2026-10-15). Logic lives in importer/ and
+# storage/import_store.py; these are thin routes. Design:
+# docs/superpowers/specs/2026-10-15-csv-import-outreach-design.md
+# Keep this block above the "/" static mount below: a route registered after
+# that mount is never reached.
+# ---------------------------------------------------------------------------
+
+class ImportUploadIn(BaseModel):
+    filename: str = Field(default="upload.csv", max_length=255)
+    csv_text: str
+
+
+class ImportApproveIn(BaseModel):
+    acknowledge_warnings: bool = False
+
+
+async def _import_call(fn, *args):
+    """Run a blocking service call off the event loop and map FlowError to HTTP."""
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except import_service.FlowError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@app.post("/api/import/upload")
+async def import_upload(
+    req: ImportUploadIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    return await _import_call(import_service.upload, req.filename, req.csv_text)
+
+
+@app.get("/api/import/batches")
+async def import_batches(
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(60, 60)),
+):
+    return {"batches": await asyncio.to_thread(import_store.list_batches)}
+
+
+@app.get("/api/import/batches/{batch_id}/leads")
+async def import_batch_leads(
+    batch_id: int,
+    status: str | None = None,
+    skip_reason: str | None = None,
+    industry: str | None = None,
+    seniority: str | None = None,
+    state: str | None = None,
+    q: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    def _load():
+        page = import_store.list_leads(
+            batch_id, status=status, skip_reason=skip_reason, industry=industry,
+            seniority=seniority, state=state, q=q, limit=limit, offset=offset,
+        )
+        page["facets"] = import_store.facets(batch_id)
+        return page
+    return await asyncio.to_thread(_load)
+
+
+@app.post("/api/import/leads/{lead_id}/restore")
+async def import_restore(
+    lead_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"lead": await _import_call(import_service.restore, lead_id)}
+
+
+@app.post("/api/import/leads/{lead_id}/skip")
+async def import_skip(
+    lead_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"lead": await _import_call(import_service.skip, lead_id)}
+
+
+@app.post("/api/import/leads/{lead_id}/approve")
+async def import_approve(
+    lead_id: int,
+    req: ImportApproveIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"lead": await _import_call(import_service.approve, lead_id, req.acknowledge_warnings)}
+
+
+@app.post("/api/import/leads/{lead_id}/unapprove")
+async def import_unapprove(
+    lead_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"lead": await _import_call(import_service.unapprove, lead_id)}
 
 
 # Mount screenshots folder
