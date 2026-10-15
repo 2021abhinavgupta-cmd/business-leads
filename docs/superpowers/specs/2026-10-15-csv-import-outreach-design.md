@@ -1,7 +1,7 @@
 # CSV Import Outreach Page: Design
 
 **Date:** 2026-10-15
-**Status:** Draft for review
+**Status:** Implemented
 **Owner:** MMGA Agency (lead-audit-bot)
 
 ## 1. Goal
@@ -69,7 +69,7 @@ New code is isolated in new modules where possible. The only edits to existing b
 
 ## 6. Data model (schema v14)
 
-Added in `storage/db.py:init_db()` behind `if schema_version < 14:`, following the existing guarded pattern. The current version is 13.
+Added in `storage/db.py:init_db()` behind `if schema_version < 14:`, following the existing guarded pattern. The previous version was 13.
 
 ```sql
 CREATE TABLE IF NOT EXISTS import_batches (
@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS import_leads (
     subject          TEXT,
     body             TEXT,
     review_warnings  TEXT,            -- JSON array
+    source_quote     TEXT,            -- homepage evidence quote from the draft
     drafted_at       DATETIME,
     sent_at          DATETIME,
     history_id       INTEGER,         -- email_history.id once sent
@@ -185,6 +186,8 @@ New method `AIAuditor.generate_import_email(...)`, following the existing preced
 - Subject at most 50 characters, no all caps, no spam trigger words.
 - Body at most 60 words, 3 to 5 short sentences, one low pressure question as the only call to action.
 
+**Body order:** greeting, the AI paragraphs, the fixed line below, then the sign off.
+
 **Fixed line, appended by code, not by the AI:**
 
 > Worth mentioning how this reached you: this email was drafted and sent by a system we built ourselves. That is the kind of automation we build for other teams, so if repetitive work is eating into your day, it is the same conversation.
@@ -203,7 +206,7 @@ The frontend sends each approved lead through the **existing** `POST /api/send`,
 
 1. Loads the import lead. 404 if missing, 409 if its status is not `approved`, 409 if `req.email` does not match the lead's email.
 2. Uses the **stored** subject and body, not the client's copy, so what was reviewed and checked is exactly what is sent.
-3. If the lead has `review_warnings` and `acknowledge_warnings` is false, returns the same 409 shape as audit drafts.
+3. If the lead has `review_warnings` and `acknowledge_warnings` is false, returns the same 409 shape as audit drafts. The same rule applies earlier, at approve time: a warned draft cannot be approved without `acknowledge_warnings`, and editing an approved or warned draft returns the lead to `drafted`, so it must be re-reviewed. The send loop then passes `acknowledge_warnings: true` for leads that were acknowledged at approval.
 4. Applies the compliance and bounce gates (section 11).
 5. Skips the main pipeline's draft lookup, screenshot attachment, Sheets update and draft deletion. Those are keyed by website and would otherwise cross contaminate: an old audit draft or screenshot for the same company could be attached to, or deleted by, an import send.
 6. Records `variant = "import-automation"` so `get_variant_performance()` reports these sends as their own bucket.
@@ -229,7 +232,7 @@ Existing callers do not send `import_lead_id`, so their behaviour is unchanged.
 
 ## 12. Frontend
 
-New view `import` in `App.jsx` (nav button "Import", `FileSpreadsheet` icon), rendered by `renderImport()`, following the existing `currentView` switch. Server is the source of truth; lead rows are **not** kept in `localStorage` (size and PII). Only the active `batch_id` is remembered there.
+New view `import` in `App.jsx` (the page itself lives in `ImportView.jsx`) (nav button "Import", `FileSpreadsheet` icon), rendered by `renderImport()`, following the existing `currentView` switch. Server is the source of truth; lead rows are **not** kept in `localStorage` (size and PII). Only the active `batch_id` is remembered there.
 
 Sections, top to bottom:
 
@@ -238,7 +241,7 @@ Sections, top to bottom:
 3. **Sending status.** "Sent today 12 of 50, 38 left", bounce rate with pause state.
 4. **Table.** Paged, filterable by status, industry, seniority and state, with search. Row actions: draft, restore, skip.
 5. **Draft selected.** Loops single lead draft requests with a progress bar and a stop button.
-6. **Review.** A drawer showing subject, body, review warnings (red, must be acknowledged) and the homepage evidence quote. Editable. Approve or un-approve.
+6. **Review.** A drawer showing subject, body, review warnings (red, must be acknowledged before approve) and the homepage evidence quote. Editable; saving an edit returns the lead to `drafted`. Approve or un-approve.
 7. **Send approved.** "Send up to 38 approved" with jittered pacing and a stop button. Final summary lists sent, failed and what stopped the run.
 
 ## 13. Configuration
