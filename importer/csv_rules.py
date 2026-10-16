@@ -18,7 +18,13 @@ MAX_CSV_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 20_000
 RESTORABLE_REASONS = frozenset({"gov_domain", "second_contact", "manual"})
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_BAD = '@\\s,;<>"()\\[\\]\\\\'
+_EMAIL_RE = re.compile(rf"^[^{_EMAIL_BAD}]+@[^{_EMAIL_BAD}]+\.[^{_EMAIL_BAD}]+$")
+_GOV_SUFFIXES = (".gov", ".mil", ".gov.in", ".nic.in")
+_COUNTRY_ALIASES = {
+    "usa": "united states", "us": "united states", "u.s.": "united states",
+    "u.s.a.": "united states", "united states of america": "united states",
+}
 
 # canonical field -> accepted header names (after lowercasing and replacing
 # spaces and hyphens with underscores).
@@ -57,7 +63,17 @@ def _clean_domain(value: str) -> str:
     v = (value or "").strip().lower()
     v = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", v)
     v = v.split("/")[0].split("?")[0].split(":")[0]
+    v = v.rstrip(".")
     return v[4:] if v.startswith("www.") else v
+
+
+def _norm_country(value: str) -> str:
+    v = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return _COUNTRY_ALIASES.get(v, v)
+
+
+def _norm_seniority(value: str) -> str:
+    return re.sub(r"[\s\-]+", "_", (value or "").strip().lower())
 
 
 def parse_csv(text: str) -> list[dict]:
@@ -90,14 +106,14 @@ def parse_csv(text: str) -> list[dict]:
         rows.append({
             "person_name": name,
             "person_title": got.get("person_title", ""),
-            "person_seniority": got.get("person_seniority", "").lower(),
+            "person_seniority": _norm_seniority(got.get("person_seniority", "")),
             "email": got.get("email", "").lower(),
             "organization": got.get("organization", ""),
             "domain": _clean_domain(got.get("domain", "")),
             "industry": got.get("industry", ""),
             "city": got.get("city", ""),
             "state": got.get("state", ""),
-            "country": got.get("country", "").lower(),
+            "country": _norm_country(got.get("country", "")),
         })
     if not rows:
         raise CsvImportError("The file has no data rows.")
@@ -131,7 +147,7 @@ def recheck(lead: dict, blockers: dict) -> str | None:
 
 def _is_gov(lead: dict) -> bool:
     email_domain = lead["email"].rsplit("@", 1)[-1]
-    return any(d.endswith((".gov", ".mil")) for d in (company_key(lead), email_domain))
+    return any(d.endswith(_GOV_SUFFIXES) for d in (company_key(lead), email_domain))
 
 
 def _first_failure(lead: dict, seen: set, blockers: dict) -> str | None:
@@ -155,7 +171,7 @@ def _first_failure(lead: dict, seen: set, blockers: dict) -> str | None:
 
 
 def _contact_score(lead: dict) -> int:
-    rank = _SENIORITY_RANK.get((lead.get("person_seniority") or "").strip().lower(), 0)
+    rank = _SENIORITY_RANK.get(_norm_seniority(lead.get("person_seniority") or ""), 0)
     title = (lead.get("person_title") or "").lower()
     if "chief compliance officer" in title:
         bonus = 2

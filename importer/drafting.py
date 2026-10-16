@@ -16,7 +16,8 @@ def draft_lead(lead: dict, auditor, *, your_name: str, fetch=homepage.fetch_home
         raise DraftError("Every AI provider failed to produce a draft. Try again in a moment.")
 
     paragraphs = result["paragraphs"]
-    subject = result["subject"].strip()
+    # A newline in a Subject header would be header injection; collapse it.
+    subject = " ".join(result["subject"].split())
     quote = result.get("source_quote") or ""
     body = compose.compose_body(lead.get("person_name") or "", paragraphs, your_name)
     warnings = compose.run_checks(

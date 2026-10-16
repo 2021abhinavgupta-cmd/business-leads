@@ -1,4 +1,5 @@
 import asyncio
+import html as _html
 import os
 import random
 import time
@@ -6,6 +7,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import Literal
+from urllib.parse import quote as _urlquote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -1382,7 +1384,11 @@ async def send_email(
                 background_tasks.add_task(save_send_to_sheets)
 
             # Log exact costs and email history
-            await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
+            # A cost-log failure must not skip log_email after a real send.
+            try:
+                await asyncio.to_thread(db.log_cost, "AWS SES", 0.0001, description=f"Email to {req.email}")
+            except Exception as e:
+                print(f"Error logging send cost: {e}")
             # Record which copy variant this was, so a reply weeks from now
             # can be attributed to a decision rather than to nothing.
             #
@@ -1455,6 +1461,19 @@ async def unsubscribe(request: Request, email: str = ""):
     if not email:
         raise HTTPException(status_code=400, detail="Missing email")
 
+    if request.method == "GET":
+        # A GET must never suppress: link scanners (Safe Links, Proofpoint,
+        # Mimecast) fetch every link in a body and would unsubscribe real
+        # prospects. The visible footer link lands here, so it only shows a
+        # confirmation form that POSTs back to this same URL.
+        return HTMLResponse(
+            "<html><body style='font-family: sans-serif; padding: 40px; text-align: center;'>"
+            f"<p>Unsubscribe <strong>{_html.escape(email)}</strong> from our emails?</p>"
+            f"<form method='post' action='/unsubscribe?email={_urlquote(email, safe='')}'>"
+            "<button type='submit'>Confirm unsubscribe</button></form>"
+            "</body></html>"
+        )
+
     await asyncio.to_thread(db.add_suppression, email, "list-unsubscribe")
     try:
         row = await asyncio.to_thread(sheets.find_row_by_email, email)
@@ -1463,8 +1482,11 @@ async def unsubscribe(request: Request, email: str = ""):
     except Exception as e:
         print(f"Error marking unsubscribed in sheets: {e}")
 
-    if request.method == "POST":
-        # One-click (RFC 8058): mail client, not the user, does this POST — no body needed.
+    # Only a POST reaches here. RFC 8058 one-click is a mail client POST with
+    # no Accept header for HTML, so it keeps the JSON reply. A browser form
+    # submit always sends Accept: text/html, so that is what picks the page;
+    # it is simpler and more robust than sniffing the form content type.
+    if "text/html" not in request.headers.get("accept", "").lower():
         return {"status": "unsubscribed"}
 
     return HTMLResponse(
@@ -2032,7 +2054,8 @@ async def social_audit_result(
 
 class ImportUploadIn(BaseModel):
     filename: str = Field(default="upload.csv", max_length=255)
-    csv_text: str
+    # Just above the 5 MB parse limit so oversized bodies are rejected early (422).
+    csv_text: str = Field(max_length=5_300_000)
 
 
 class ImportApproveIn(BaseModel):

@@ -14,6 +14,7 @@ copy would get a fix and the other wouldn't.
 
 import os
 import time
+from html import escape as html_escape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
@@ -546,7 +547,7 @@ class BaseSender:
         for header, value in self._unsubscribe_headers(to_email).items():
             msg[header] = value
 
-        html_body = body.replace("\n", "<br>")
+        html_body = html_escape(body, quote=False).replace("\n", "<br>")
         # Only the HTML alternative carries the pixel — a text/plain part
         # can't load an image, and putting a bare URL there would just show
         # the recipient a tracking link.
@@ -619,7 +620,7 @@ class BaseSender:
     ) -> MIMEMultipart:
         body = self._with_footer(body, to_email)
         message_id = make_msgid(domain=self._msgid_domain())
-        html_body = body.replace("\n", "<br>")
+        html_body = html_escape(body, quote=False).replace("\n", "<br>")
         pixel = pixel_html(tracking_id_for(message_id))
         html_template = f"""
                 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; color: #1a1a1a; line-height: 1.6;">

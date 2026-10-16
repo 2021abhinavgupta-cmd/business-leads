@@ -47,6 +47,8 @@ _PROMPT_HOMEPAGE_CHARS = 6000
 # a fact-citation task). Kept just above 0 rather than exactly 0 so email
 # copy still reads naturally instead of robotically repetitive.
 _AI_TEMPERATURE = 0.2
+# Import drafting runs in a loop; a hung provider call must not stall it.
+_IMPORT_TIMEOUT_S = 30
 
 # JSON Schema shared by every provider that supports enforced structured
 # output (Anthropic tool-use, Gemini response_schema, OpenAI json_schema
@@ -1837,6 +1839,7 @@ Respond with JSON only: {{"subject": "...", "paragraphs": ["..."], "source_quote
                 }],
                 tool_choice={"type": "tool", "name": "submit_import_email"},
                 messages=[{"role": "user", "content": prompt}],
+                timeout=_IMPORT_TIMEOUT_S,
             )
             try:
                 cost = (message.usage.input_tokens * 0.25 / 1_000_000) + (message.usage.output_tokens * 1.25 / 1_000_000)
@@ -1862,7 +1865,7 @@ Respond with JSON only: {{"subject": "...", "paragraphs": ["..."], "source_quote
                     temperature=_AI_TEMPERATURE,
                 ),
             )
-            response = model.generate_content(prompt)
+            response = model.generate_content(prompt, request_options={"timeout": _IMPORT_TIMEOUT_S})
             try:
                 cost = (response.usage_metadata.prompt_token_count * 0.075 / 1_000_000) + (
                     response.usage_metadata.candidates_token_count * 0.30 / 1_000_000)
@@ -1889,6 +1892,7 @@ Respond with JSON only: {{"subject": "...", "paragraphs": ["..."], "source_quote
                         "schema": {**_IMPORT_EMAIL_SCHEMA, "additionalProperties": False},
                     },
                 },
+                timeout=_IMPORT_TIMEOUT_S,
             )
             try:
                 cost = (response.usage.prompt_tokens * 0.150 / 1_000_000) + (response.usage.completion_tokens * 0.60 / 1_000_000)
