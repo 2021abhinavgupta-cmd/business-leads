@@ -24,7 +24,10 @@ def test_fixed_line_is_short_dashless_and_makes_no_false_claim():
     assert len(line.split()) <= 45
     assert not any(d in line for d in ("-", "—", "–"))
     assert "no human" not in line.lower() and "without a human" not in line.lower()
-    parsed = {"email_subject": "x", "opening_line": "", "flaws": [{"paragraph": line, "source_quote": ""}]}
+    parsed = {
+        "email_subject": "x", "opening_line": "",
+        "flaws": [{"paragraph": compose.mask_brand(line), "source_quote": ""}],
+    }
     assert AIAuditor._check_spam_trigger_words(parsed, "c") is None
     assert AIAuditor._check_ai_sounding_phrases(parsed, "c") is None
     assert AIAuditor._check_forbidden_dashes(parsed, "c") is None
@@ -85,3 +88,13 @@ def test_links_and_email_addresses_are_flagged_but_normal_drafts_are_not():
     assert not any("link or email" in w for w in _checks(_body()))
     assert not any("link or email" in w for w in _checks(_body(), source_quote=""))
     assert "@" not in compose.FIXED_LINE and "http" not in compose.FIXED_LINE
+
+
+def test_model_sentences_about_the_brand_are_dropped():
+    body = compose.compose_body(
+        "Jane Roe",
+        ["Reports take hours. MMGA builds automation for this. Errors follow."],
+        "Kshitij Gupta",
+    )
+    assert "Reports take hours. Errors follow." in body
+    assert body.count("MMGA") == 1  # only the fixed line introduces it

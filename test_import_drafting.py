@@ -26,7 +26,7 @@ def test_prompt_contains_no_dashes_and_carries_the_guards():
     prompt = _auditor()._build_import_prompt(LEAD, HOMEPAGE, "Kshitij Gupta")
     assert not any(d in prompt for d in ("-", "—", "–"))
     assert "Acme Bank serves families" in prompt
-    assert "hypothetical" in prompt and "50 characters" in prompt and "60 words" in prompt
+    assert "hypothetical" in prompt and "50 characters" in prompt and "45 words" in prompt
     assert "question instead of a statement" in prompt
 
 

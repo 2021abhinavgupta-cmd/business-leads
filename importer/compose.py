@@ -15,10 +15,17 @@ MAX_SUBJECT_CHARS = 50
 _LINK_OR_EMAIL = re.compile(r"https?://|www\.|[\w.+]+@[\w]+\.[\w.]+", re.IGNORECASE)
 
 FIXED_LINE = (
-    "Worth mentioning how this reached you: this email was drafted and sent by a system we "
-    "built ourselves. That is the kind of automation we build for other teams, so if "
-    "repetitive work is eating into your day, it is the same conversation."
+    "MMGA Agency designs and builds custom automation for businesses, taking repetitive "
+    "reporting, data entry and document handling off the team's plate. Would a short "
+    "walkthrough of how this could work for your team be useful?"
 )
+
+BRAND = "MMGA"
+
+
+def mask_brand(text: str) -> str:
+    """The brand is an acronym on purpose; keep it out of the ALL CAPS check."""
+    return (text or "").replace(BRAND, BRAND.title())
 
 _HONORIFICS = {"dr", "mr", "mrs", "ms", "prof", "mx"}
 
@@ -32,7 +39,14 @@ def _first_name(person_name: str) -> str:
     return ""
 
 
+def _drop_brand_sentences(paragraph: str) -> str:
+    """MMGA is introduced once, by FIXED_LINE; a model sentence about it is a duplicate."""
+    sentences = re.split(r"(?<=[.!?])\s+", paragraph.strip())
+    return " ".join(s for s in sentences if BRAND.lower() not in s.lower())
+
+
 def compose_body(person_name: str, paragraphs: list[str], your_name: str) -> str:
+    paragraphs = [_drop_brand_sentences(p) for p in paragraphs]
     first = _first_name(person_name)
     greeting = f"Hi {first}," if first else "Hi there,"
     parts = [greeting, *[p.strip() for p in paragraphs if p.strip()], FIXED_LINE, your_name]
@@ -64,10 +78,17 @@ def run_checks(
     homepage text is no longer to hand, so the evidence warnings from the
     original draft are carried forward instead of recomputed.
     """
+    def masked(text: str) -> str:
+        # The company's own acronym (APM, ABC Bank) is not shouting either.
+        text = mask_brand(text)
+        for word in re.findall(r"\b[A-Z]{3,}\b", company or ""):
+            text = re.sub(rf"\b{word}\b", word.title(), text)
+        return text
+
     parsed = {
-        "email_subject": subject,
+        "email_subject": masked(subject),
         "opening_line": "",
-        "flaws": [{"paragraph": body, "source_quote": source_quote or ""}],
+        "flaws": [{"paragraph": masked(body), "source_quote": source_quote or ""}],
     }
     corpus = f"{facts_text}\n{homepage_text or ''}\n{source_quote or ''}"
     warnings = [w for w in (
@@ -76,6 +97,8 @@ def run_checks(
         AIAuditor._check_forbidden_dashes(parsed, company),
         AIAuditor._check_number_hallucination(parsed, corpus, company),
     ) if w]
+    if subject[:1].islower():
+        warnings.append("Subject starts with a lowercase letter; capitalize it before sending.")
     if _LINK_OR_EMAIL.search(f"{subject} {body}"):
         warnings.append("Contains a link or email address; the email should not include any. Review before sending.")
     if check_evidence:
