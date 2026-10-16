@@ -11,7 +11,20 @@ fetches anyway, for the review_warnings gate) -> db.log_email persists them
 on the email_history row. No frontend send call site needed to change.
 """
 
+from datetime import datetime
+
 from storage import db
+
+
+def _fresh_timestamp() -> str:
+    """
+    A draft timestamp that is always 'just generated'. These tests stub the
+    draft row /api/send reads, and a hard-coded date silently turns every one
+    of them into a 409 once it is older than DRAFT_STALE_DAYS (the send route
+    refuses stale drafts), which is a clock-dependent failure, not a
+    regression. The staleness gate itself is covered in test_draft_controls.py.
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _use_temp_db(monkeypatch, tmp_path):
@@ -193,7 +206,7 @@ _SEND_PAYLOAD = {
 
 
 def test_send_copies_sector_and_niche_from_the_draft(monkeypatch):
-    draft = {"timestamp": "2026-09-21 10:00:00", "review_warnings": [], "sector": "agriculture", "niche": "Cotton Seed Dealer"}
+    draft = {"timestamp": _fresh_timestamp(), "review_warnings": [], "sector": "agriculture", "niche": "Cotton Seed Dealer"}
     client, logged = _send_client_capturing_log_email(monkeypatch, draft)
 
     res = client.post("/api/send", json=_SEND_PAYLOAD)
@@ -219,7 +232,7 @@ def test_send_with_no_matching_draft_logs_blank_sector_and_niche(monkeypatch):
 def test_send_with_a_draft_that_has_no_sector_or_niche_logs_blank(monkeypatch):
     """A draft saved before this feature existed has no sector/niche keys
     at all — must fall back to blank, not KeyError."""
-    draft = {"timestamp": "2026-09-21 10:00:00", "review_warnings": []}
+    draft = {"timestamp": _fresh_timestamp(), "review_warnings": []}
     client, logged = _send_client_capturing_log_email(monkeypatch, draft)
 
     res = client.post("/api/send", json=_SEND_PAYLOAD)
@@ -255,7 +268,7 @@ def test_a_draft_defaults_to_no_automation_pitch(monkeypatch, tmp_path):
 
 
 def test_send_tags_the_variant_when_the_draft_had_the_pitch(monkeypatch):
-    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 1}
+    draft = {"timestamp": _fresh_timestamp(), "review_warnings": [], "include_automation_pitch": 1}
     import app as app_module
     client, logged = _send_client_capturing_log_email(monkeypatch, draft)
     monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "classic")
@@ -267,7 +280,7 @@ def test_send_tags_the_variant_when_the_draft_had_the_pitch(monkeypatch):
 
 
 def test_send_leaves_the_variant_alone_without_the_pitch(monkeypatch):
-    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 0}
+    draft = {"timestamp": _fresh_timestamp(), "review_warnings": [], "include_automation_pitch": 0}
     import app as app_module
     client, logged = _send_client_capturing_log_email(monkeypatch, draft)
     monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "classic")
@@ -295,7 +308,7 @@ def test_send_with_no_draft_records_the_plain_variant(monkeypatch):
 
 
 def test_the_pitch_suffix_rides_whichever_global_variant_is_set(monkeypatch):
-    draft = {"timestamp": "2026-09-27 10:00:00", "review_warnings": [], "include_automation_pitch": 1}
+    draft = {"timestamp": _fresh_timestamp(), "review_warnings": [], "include_automation_pitch": 1}
     import app as app_module
     client, logged = _send_client_capturing_log_email(monkeypatch, draft)
     monkeypatch.setattr(app_module.config, "EMAIL_VARIANT", "short")
