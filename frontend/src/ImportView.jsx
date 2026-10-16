@@ -35,9 +35,8 @@ const btn = (color = '#38bdf8', disabled = false) => ({
 const input = { background: 'rgba(15,23,42,0.6)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 8, color: '#e2e8f0', padding: '8px 10px', fontSize: 13 };
 
 export default function ImportView() {
-  const [batchId, setBatchId] = useState(() => {
-    try { return Number(localStorage.getItem('importBatchId')) || null; } catch { return null; }
-  });
+  const [batchId, setBatchId] = useState(null);   // chosen once the batch list has loaded
+  const [batches, setBatches] = useState(null);     // null until first load
   const [summary, setSummary] = useState(null);
   const [page, setPage] = useState({ leads: [], total: 0, facets: {} });
   const [filters, setFilters] = useState({ status: '', industry: '', seniority: '', state: '', q: '' });
@@ -81,6 +80,33 @@ export default function ImportView() {
       .catch((e) => { if (mountedRef.current) setMessage(errText(e)); });
   }, [batchId, filters, offset]);
 
+  // Default pick: the stored batch if it still exists, else the newest batch with
+  // work in progress (ready/drafted/approved), else the newest batch.
+  const pickDefault = (list) => {
+    let stored = null;
+    try { stored = Number(localStorage.getItem('importBatchId')) || null; } catch { /* storage may be blocked */ }
+    if (stored && list.some((b) => b.id === stored)) return stored;
+    if (stored) { try { localStorage.removeItem('importBatchId'); } catch { /* ignore */ } }
+    const active = list.find((b) => ['ready', 'drafted', 'approved'].some((k) => (b.status_counts?.[k] || 0) > 0));
+    return (active || list[0])?.id ?? null;
+  };
+
+  // Returns the fresh list so callers can react; never throws.
+  const loadBatches = useCallback(() => axios.get(`${API_BASE}/api/import/batches`)
+    .then((r) => {
+      const list = r.data.batches || [];
+      if (mountedRef.current) setBatches(list);
+      return list;
+    })
+    .catch((e) => { if (mountedRef.current) { setMessage(errText(e)); setBatches((b) => b || []); } return null; }), []);
+
+  useEffect(() => {
+    loadBatches().then((list) => {
+      if (!list || !mountedRef.current) return;
+      setBatchId((current) => (current && list.some((b) => b.id === current) ? current : pickDefault(list)));
+    });
+  }, [loadBatches]);
+
   useEffect(() => { loadStatus(); }, [loadStatus]);
   useEffect(() => { loadLeads(); }, [loadLeads]);
   useEffect(() => {
@@ -98,7 +124,7 @@ export default function ImportView() {
       const r = await axios.post(`${API_BASE}/api/import/upload`, { filename: file.name, csv_text });
       setSummary(r.data); setBatchId(r.data.batch_id); setOffset(0); setSelected(new Set());
       setFilters({ status: '', industry: '', seniority: '', state: '', q: '' });
-      loadStatus();
+      loadStatus(); loadBatches();
     } catch (err) { setMessage(errText(err)); }
     setUploading(false);
   };
@@ -110,6 +136,12 @@ export default function ImportView() {
       const r = await axios.post(`${API_BASE}/api/import/leads/${lead.id}/${action}`);
       replaceLead(r.data.lead); loadLeads();
     } catch (err) { setMessage(errText(err)); loadLeads(); }
+  };
+
+  const chooseBatch = (id) => {
+    setBatchId(id); setSummary(null); setOffset(0); setSelected(new Set()); setMessage('');
+    setFilters({ status: '', industry: '', seniority: '', state: '', q: '' });
+    setPage({ leads: [], total: 0, facets: {} });
   };
 
   const toggle = (id) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -126,14 +158,27 @@ export default function ImportView() {
       setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note });
       for (const id of ids) {
         if (stopRef.current) { note = 'Stopped.'; break; }
-        try { await axios.post(`${API_BASE}/api/import/leads/${id}/draft`); } catch (err) {
-          failed += 1; note = errText(err);
-          if (err.response?.status === 429) { await sleep(15000); }
+        let attempt = 0;
+        let abandoned = false;
+        while (attempt < 2) {
+          try { await axios.post(`${API_BASE}/api/import/leads/${id}/draft`); break; } catch (err) {
+            if (err.response?.status === 429 && attempt === 0) {
+              // Rate limited: wait, then retry the same lead once (unless stopped meanwhile).
+              attempt += 1;
+              await sleep(15000);
+              if (stopRef.current) { abandoned = true; break; }
+              continue;
+            }
+            failed += 1; note = errText(err);
+            if (err.response?.status === 429) { await sleep(15000); }
+            break;
+          }
         }
+        if (abandoned) { note = 'Stopped.'; break; }
         done += 1; setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note });
       }
       setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note: note || 'Finished.', finished: true });
-      if (mountedRef.current) { setSelected(new Set()); loadLeads(); }
+      if (mountedRef.current) { setSelected(new Set()); loadLeads(); loadBatches(); }
     } finally { runningRef.current = false; }
   };
 
@@ -178,7 +223,7 @@ export default function ImportView() {
         await sleep(6500 + Math.random() * 2500);
       }
       setJobSafe({ kind: 'Sending', done, total: queue.length, failed, note: note || 'Finished.', finished: true });
-      if (mountedRef.current) { loadStatus(); loadLeads(); }
+      if (mountedRef.current) { loadStatus(); loadLeads(); loadBatches(); }
     } finally {
       runningRef.current = false;
       if (mountedRef.current) setStarting(false);
@@ -209,7 +254,14 @@ export default function ImportView() {
     } catch (err) { setDrawerMessage(errText(err)); }
   };
 
-  const usBlocked = !!status && !status.mailing_address_set && (summary ? summary.us_ready > 0 : true);
+  const currentBatch = (batches || []).find((b) => b.id === batchId) || null;
+  const counts = currentBatch?.status_counts || {};
+  const hasWork = ['ready', 'drafted', 'approved'].some((k) => (counts[k] || 0) > 0);
+  // With a fresh upload summary we know exactly how many US leads are ready. After a
+  // reload there is no country data, so show the banner whenever the batch still has
+  // ready, drafted or approved leads: it errs on the safe side (may show for an
+  // all-India batch) but never hides a real block. /api/send enforces the real rule.
+  const usBlocked = !!status && !status.mailing_address_set && (summary ? summary.us_ready > 0 : hasWork);
   const dirty = !!review && (edit.subject !== (review.subject || '') || edit.body !== (review.body || ''));
   const facets = page.facets || {};
   const busy = (!!job && !job.finished) || starting;
@@ -252,11 +304,28 @@ export default function ImportView() {
         )}
       </div>
 
-      {summary && (
+      {batches && batches.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>Batch</span>
+          <select style={{ ...input, maxWidth: '100%' }} value={batchId || ''} disabled={busy}
+            onChange={(e) => chooseBatch(Number(e.target.value))}>
+            {batches.map((b) => {
+              const c = b.status_counts || {};
+              return (
+                <option key={b.id} value={b.id}>
+                  {`${b.filename} · ${String(b.created_at || '').slice(0, 10)} · ${c.ready || 0} ready, ${c.drafted || 0} drafted, ${c.approved || 0} approved, ${c.sent || 0} sent`}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
+
+      {(summary || currentBatch) && (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <div style={card}><div style={{ color: '#94a3b8', fontSize: 12 }}>Total rows</div><b style={{ fontSize: 22 }}>{summary.total}</b></div>
-          <div style={card}><div style={{ color: '#94a3b8', fontSize: 12 }}>Ready to draft</div><b style={{ fontSize: 22, color: '#38bdf8' }}>{summary.ready}</b></div>
-          {Object.entries(summary.skip_breakdown || {}).map(([reason, n]) => (
+          <div style={card}><div style={{ color: '#94a3b8', fontSize: 12 }}>Total rows</div><b style={{ fontSize: 22 }}>{summary ? summary.total : currentBatch.total_rows}</b></div>
+          <div style={card}><div style={{ color: '#94a3b8', fontSize: 12 }}>Ready to draft</div><b style={{ fontSize: 22, color: '#38bdf8' }}>{summary ? summary.ready : (counts.ready || 0)}</b></div>
+          {Object.entries(summary ? (summary.skip_breakdown || {}) : (facets.skip_reason || {})).map(([reason, n]) => (
             <div key={reason} style={card}><div style={{ color: '#94a3b8', fontSize: 12 }}>{SKIP_LABELS[reason] || reason}</div><b style={{ fontSize: 22, color: '#f59e0b' }}>{n}</b></div>
           ))}
         </div>
