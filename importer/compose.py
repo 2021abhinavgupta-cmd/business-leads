@@ -41,12 +41,38 @@ def _first_name(person_name: str) -> str:
 
 def _drop_brand_sentences(paragraph: str) -> str:
     """MMGA is introduced once, by FIXED_LINE; a model sentence about it is a duplicate."""
-    sentences = re.split(r"(?<=[.!?])\s+", paragraph.strip())
+    # The greeting is added by compose_body; a model written one would double it.
+    paragraph = re.sub(r"^\s*(hi|hello|dear)\b[^,\n]{0,40},\s*", "", paragraph.strip(), flags=re.IGNORECASE)
+    sentences = re.split(r"(?<=[.!?])\s+", paragraph)
     return " ".join(s for s in sentences if BRAND.lower() not in s.lower())
 
 
+_SIGNOFF = re.compile(
+    r"\n?\s*(best regards|kind regards|warm regards|regards|best|sincerely|thanks|thank you|cheers)\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _drop_model_ending(paragraphs: list[str]) -> list[str]:
+    """FIXED_LINE supplies the sign off and the closing question; drop a model written pair."""
+    paragraphs = [_SIGNOFF.sub("", p).strip() for p in paragraphs]
+    paragraphs = [p for p in paragraphs if p]
+    if paragraphs:
+        sentences = re.split(r"(?<=[.!?])\s+", paragraphs[-1])
+        if len(sentences) > 1 and sentences[-1].endswith("?"):
+            paragraphs[-1] = " ".join(sentences[:-1])
+        elif len(sentences) == 1 and len(paragraphs) > 1 and sentences[0].endswith("?"):
+            paragraphs.pop()
+    return paragraphs
+
+
+def clean_paragraphs(paragraphs: list[str]) -> list[str]:
+    """The model's text as the recipient will read it, minus what code supplies itself."""
+    return _drop_model_ending([_drop_brand_sentences(p) for p in paragraphs])
+
+
 def compose_body(person_name: str, paragraphs: list[str], your_name: str) -> str:
-    paragraphs = [_drop_brand_sentences(p) for p in paragraphs]
+    paragraphs = clean_paragraphs(paragraphs)
     first = _first_name(person_name)
     greeting = f"Hi {first}," if first else "Hi there,"
     parts = [greeting, *[p.strip() for p in paragraphs if p.strip()], FIXED_LINE, your_name]

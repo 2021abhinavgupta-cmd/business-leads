@@ -26,7 +26,7 @@ def test_prompt_contains_no_dashes_and_carries_the_guards():
     prompt = _auditor()._build_import_prompt(LEAD, HOMEPAGE, "Kshitij Gupta")
     assert not any(d in prompt for d in ("-", "—", "–"))
     assert "Acme Bank serves families" in prompt
-    assert "hypothetical" in prompt and "50 characters" in prompt and "45 words" in prompt
+    assert "hypothetical" in prompt and "50 characters" in prompt and "110 words" in prompt
     assert "question instead of a statement" in prompt
 
 
@@ -92,13 +92,13 @@ def test_draft_lead_without_homepage_is_flagged():
 
 
 def test_draft_lead_flags_overlong_subject_and_body():
-    long_para = " ".join(["word"] * 70)
+    long_para = " ".join(["word"] * 140)
     out = drafting.draft_lead(
         LEAD, _FakeAuditor({"subject": "s" * 60, "paragraphs": [long_para], "source_quote": "", "ai_cost": 0}),
         your_name="K", fetch=lambda d: None,
     )
     joined = " ".join(out["review_warnings"])
-    assert "Subject is 60 characters" in joined and "Body is 70 words" in joined
+    assert "Subject is 60 characters" in joined and "Body is 140 words" in joined
 
 
 def test_draft_lead_raises_when_every_provider_failed():
@@ -252,3 +252,67 @@ def test_edit_does_not_overwrite_a_lead_that_changed_meanwhile(monkeypatch, tmp_
         service.save_edit(lead_id, "New", "Body")
     assert e.value.status_code == 409
     assert import_store.get_lead(lead_id)["subject"] == "S"
+
+
+class _CheckedAuditor:
+    """Drafts in sequence; the checker returns one issues list per draft."""
+
+    def __init__(self, drafts, issue_lists):
+        self.drafts, self.issue_lists, self.feedbacks = list(drafts), list(issue_lists), []
+
+    def generate_import_email(self, lead, homepage_text, your_name, feedback=None):
+        self.feedbacks.append(feedback)
+        return self.drafts.pop(0)
+
+    def verify_import_email(self, lead, homepage_text, subject, paragraphs):
+        issues = self.issue_lists.pop(0)
+        return None if issues is None else {"issues": issues, "ai_cost": 0.002}
+
+
+def _draft(text):
+    return {"subject": "Vendor onboarding", "paragraphs": [text], "source_quote": "", "ai_cost": 0.001}
+
+
+def test_failed_fact_check_triggers_a_rewrite_with_the_issues_as_feedback():
+    auditor = _CheckedAuditor(
+        [_draft("Acme Bank has grown fast."), _draft("Acme Bank serves families across Boston.")],
+        [['Not supported by their website: "Acme Bank has grown fast."'], []],
+    )
+    out = drafting.draft_lead(LEAD, auditor, your_name="K", fetch=lambda d: HOMEPAGE)
+    assert auditor.feedbacks[0] is None and "grown fast" in auditor.feedbacks[1][0]
+    assert "serves families across Boston" in out["body"]
+    assert not any(w.startswith("Fact check") for w in out["review_warnings"])
+    assert out["ai_cost"] == pytest.approx(0.006)
+
+
+def test_unresolved_issues_after_all_attempts_are_flagged_on_the_best_draft():
+    auditor = _CheckedAuditor(
+        [_draft("A one."), _draft("B two."), _draft("C three.")],
+        [["x1", "x2"], ["y1"], ["z1", "z2"]],
+    )
+    out = drafting.draft_lead(LEAD, auditor, your_name="K", fetch=lambda d: HOMEPAGE)
+    assert "B two." in out["body"]
+    assert [w for w in out["review_warnings"] if w.startswith("Fact check")] == ["Fact check: y1"]
+
+
+def test_a_checker_that_cannot_run_is_reported_not_silently_passed():
+    auditor = _CheckedAuditor([_draft("Acme Bank serves families across Boston.")], [None])
+    out = drafting.draft_lead(LEAD, auditor, your_name="K", fetch=lambda d: HOMEPAGE)
+    assert any("could not run" in w for w in out["review_warnings"])
+
+
+def test_verify_issues_trust_the_page_not_the_models_supported_flag():
+    page = "Heritage Bank is joining OnPath with a 17-branch network."
+    data = {
+        "claims": [
+            {"statement": "It has 17 branches", "quote": "a 17 branch network", "supported": True},
+            {"statement": "It expanded last year", "quote": "expanded last year", "supported": True},
+            {"statement": "It has 50 ATMs", "quote": "", "supported": False},
+        ],
+        "language_issues": ["Missing comma after 'However'"],
+    }
+    issues = AIAuditor._import_verify_issues(data, page)
+    assert len(issues) == 3
+    assert not any("17 branches" in i for i in issues)
+    assert any("not found on the page" in i and "expanded" in i for i in issues)
+    assert any("50 ATMs" in i for i in issues) and any(i.startswith("Wording:") for i in issues)

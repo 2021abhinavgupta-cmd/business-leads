@@ -3,7 +3,7 @@ from importer import compose
 
 FACTS = "Jane Doe Chief Compliance Officer Acme Bank banking Boston Massachusetts united states acme.com"
 HOMEPAGE = "Acme Bank serves families across Boston and offers wealth management."
-GOOD_PARAS = ["Acme Bank serves families across Boston. Is vendor onboarding still handled by hand?"]
+GOOD_PARAS = ["Acme Bank serves families across Boston. Vendor onboarding often still runs by hand."]
 
 
 def _body(paragraphs=GOOD_PARAS, name="Jane Doe"):
@@ -98,3 +98,18 @@ def test_model_sentences_about_the_brand_are_dropped():
     )
     assert "Reports take hours. Errors follow." in body
     assert body.count("MMGA") == 1  # only the fixed line introduces it
+
+
+def test_model_written_greeting_is_not_doubled():
+    body = compose.compose_body("Jamie Wilson", ["Hi Jamie, Reports take hours."], "K")
+    assert body.count("Hi Jamie,") == 1 and "Reports take hours." in body
+
+
+def test_model_written_signoff_and_closing_question_are_dropped():
+    body = compose.compose_body(
+        "Jamie Wilson",
+        ["Reports take hours.", "Would a chat help?\n\nBest regards,\nKshitij Gupta"],
+        "Kshitij Gupta",
+    )
+    assert "Best regards" not in body and "Would a chat help?" not in body
+    assert body.count("Kshitij Gupta") == 1 and body.count("?") == 1
