@@ -11,6 +11,7 @@ from PIL import Image
 FOOTER_MARKER = "<!--FOOTER-->"
 IMG_WIDTH = 520
 FALLBACK_HEIGHT = 325
+MAX_SECTIONS = 5
 
 CREAM = "#fff8ef"
 INK = "#2a1f14"
@@ -42,7 +43,9 @@ def _img_height(path) -> int:
 
 
 def _section(n: int, section: dict, shot: dict) -> str:
-    title = _e(section.get("title"))
+    raw_title = (section.get("title") or "").strip()
+    title = _e(raw_title)
+    alt = _e(raw_title or f"Screenshot {n}")
     sentence = _e(section.get("sentence"))
     height = _img_height((shot or {}).get("path"))
     return (
@@ -51,26 +54,39 @@ def _section(n: int, section: dict, shot: dict) -> str:
         f'letter-spacing:1px;color:{ACCENT};">{n}</p>'
         f'<h2 style="margin:0 0 8px 0;font-family:{FONT};font-size:19px;line-height:25px;color:{INK};">{title}</h2>'
         f'<p style="margin:0 0 14px 0;font-family:{FONT};font-size:15px;line-height:23px;color:{INK};">{sentence}</p>'
-        f'<img src="cid:flaw{n}" alt="{title}" width="{IMG_WIDTH}" height="{height}" '
+        f'<img src="cid:flaw{n}" alt="{alt}" width="{IMG_WIDTH}" height="{height}" '
         f'style="display:block;border:0;">'
         f'</td></tr>'
     )
 
 
+def _mailto(reply_to: str, subject: str) -> str:
+    parts = (reply_to or "").strip().split()
+    address = parts[0].split("?")[0] if parts else ""
+    if not address:
+        return ""
+    return f"mailto:{quote(address, safe='@+.-_')}?subject={quote('Re: ' + subject, safe='')}"
+
+
 def _button(reply_to: str, subject: str) -> str:
     label = _e(BUTTON_TEXT)
-    style = (
-        f'display:inline-block;padding:13px 26px;font-family:{FONT};'
-        f'font-size:15px;font-weight:bold;color:{LIGHT};text-decoration:none;'
+    text_style = (
+        f'font-family:{FONT};font-size:15px;font-weight:bold;color:{LIGHT};text-decoration:none;'
     )
-    if reply_to:
-        href = f"mailto:{reply_to}?subject={quote('Re: ' + subject, safe='')}"
-        inner = f'<a href="{_e(href)}" style="{style}">{label}</a>'
+    href = _mailto(reply_to, subject)
+    if href:
+        inner = (
+            f'<a href="{_e(href)}" style="display:inline-block;background-color:{ACCENT};'
+            f'{text_style}">{label}</a>'
+        )
     else:
-        inner = f'<span style="{style}">{label}</span>'
+        inner = f'<span style="{text_style}">{label}</span>'
+    # Bulletproof cell button: padding and background live on the td so Outlook
+    # (Word engine) does not shrink it.
     return (
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
-        f'<td bgcolor="{ACCENT}" style="background-color:{ACCENT};border-radius:6px;">{inner}</td>'
+        f'<td bgcolor="{ACCENT}" style="background-color:{ACCENT};border-radius:6px;'
+        f'padding:13px 26px;">{inner}</td>'
         f'</tr></table>'
     )
 
@@ -81,14 +97,20 @@ def render(copy: dict, shots: list[dict], *, first_name: str, company: str,
     headline = copy.get("headline") or ""
     opening = copy.get("opening") or ""
     sections = copy.get("sections") or []
+    href_ok = bool(_mailto(reply_to, subject))
     greeting = f"Hi {first_name.strip()}," if (first_name or "").strip() else "Hi there,"
     company_tag = (company or "").strip()
     tag = f"A quick look at {company_tag}" if company_tag else "A quick look at your website"
 
-    rows = [
-        _section(i + 1, section, shots[i] if i < len(shots) else {})
-        for i, section in enumerate(sections)
-    ]
+    if not 1 <= len(shots) <= MAX_SECTIONS:
+        raise ValueError(f"expected 1 to {MAX_SECTIONS} shots, got {len(shots)}")
+    if len(sections) != len(shots):
+        raise ValueError(f"{len(sections)} sections but {len(shots)} shots")
+    for i, section in enumerate(sections):
+        if section.get("index") != i:
+            raise ValueError(f"section {i} has index {section.get('index')!r}, expected {i}")
+
+    rows = [_section(i + 1, section, shots[i]) for i, section in enumerate(sections)]
 
     html = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
@@ -122,10 +144,10 @@ def render(copy: dict, shots: list[dict], *, first_name: str, company: str,
         '</table></td></tr></table></body></html>'
     )
 
-    reply_text = "Want the full review? Just reply yes." if reply_to else (
+    reply_text = "Want the full review? Just reply yes." if href_ok else (
         "Want the full review? Just reply to this email."
     )
-    lines = [greeting, "", headline, "", opening, ""]
+    lines = [headline, "", greeting, "", opening, ""]
     for i, section in enumerate(sections):
         lines += [f"{i + 1}. {section.get('title') or ''}", section.get("sentence") or "", ""]
     lines += [

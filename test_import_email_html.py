@@ -120,7 +120,7 @@ def _copy(n=3, **over):
         "headline": "Three things a visitor sees on your site",
         "opening": "I looked at your site and found a few things.",
         "sections": [
-            {"index": i + 1, "title": f"Title number {i + 1}", "sentence": f"Sentence number {i + 1}."}
+            {"index": i, "title": f"Title number {i + 1}", "sentence": f"Sentence number {i + 1}."}
             for i in range(n)
         ],
     }
@@ -229,7 +229,7 @@ def test_text_version_contains_every_section_title_and_sentence(tmp_path):
     c = _copy(4)
     _, text = _render(tmp_path, 4, copy=c)
     for s in c["sections"]:
-        assert f'{s["index"]}. {s["title"]}' in text
+        assert f'{s["index"] + 1}. {s["title"]}' in text
         assert s["sentence"] in text
     assert c["headline"] in text and c["opening"] in text
     assert "Hi Priya," in text
@@ -238,9 +238,97 @@ def test_text_version_contains_every_section_title_and_sentence(tmp_path):
 
 
 def test_copy_has_no_hyphens_or_dashes_in_template_text(tmp_path):
-    empty = {"subject": "", "headline": "", "opening": "", "sections": []}
-    html, text = email_html.render(empty, [], first_name="", company="", reply_to="")
+    empty = {"subject": "", "headline": "", "opening": "",
+             "sections": [{"index": 0, "title": "", "sentence": ""}]}
+    html, text = email_html.render(empty, _shots(tmp_path, 1), first_name="", company="", reply_to="")
     visible = re.sub(r"<[^>]+>", " ", html)
     for ch in ("-", "–", "—"):
         assert ch not in visible, repr(ch)
         assert ch not in text, repr(ch)
+
+
+# ------------------------------------------------------------ review fixes
+
+def test_render_rejects_count_mismatch_both_directions(tmp_path):
+    with pytest.raises(ValueError):
+        email_html.render(_copy(3), _shots(tmp_path, 2), first_name="A", company="B", reply_to="x@y.com")
+    with pytest.raises(ValueError):
+        email_html.render(_copy(2), _shots(tmp_path, 3), first_name="A", company="B", reply_to="x@y.com")
+
+
+def test_render_rejects_zero_and_six_shots(tmp_path):
+    with pytest.raises(ValueError):
+        email_html.render(_copy(0), [], first_name="A", company="B", reply_to="x@y.com")
+    with pytest.raises(ValueError):
+        email_html.render(_copy(6), _shots(tmp_path, 6), first_name="A", company="B", reply_to="x@y.com")
+
+
+def test_render_rejects_wrong_index_order(tmp_path):
+    c = _copy(3)
+    c["sections"][0], c["sections"][1] = c["sections"][1], c["sections"][0]
+    with pytest.raises(ValueError):
+        email_html.render(c, _shots(tmp_path, 3), first_name="A", company="B", reply_to="x@y.com")
+
+
+def test_render_correct_input_renders(tmp_path):
+    html, text = _render(tmp_path, 5)
+    assert html.count("cid:flaw") == 5 and "5. Title number 5" in text
+
+
+def test_prepare_noisy_image_falls_back_in_width_and_warns(tmp_path, capsys):
+    import random
+    rnd = random.Random(1)
+    img = Image.frombytes("RGB", (1280, 800), rnd.randbytes(1280 * 800 * 3))
+    p = str(tmp_path / "noise.png")
+    img.save(p)
+    data = email_images.prepare(p, max_bytes=20_000)
+    assert Image.open(io.BytesIO(data)).width == 460 and len(data) <= 20_000  # width fallback
+    assert capsys.readouterr().out == ""
+    data = email_images.prepare(p, max_bytes=10_000)  # nothing fits: warn, return anyway
+    out = capsys.readouterr().out
+    assert len(data) > 10_000 and p in out and str(len(data)) in out
+
+
+def test_prepare_transparency_is_composited_on_cream(tmp_path):
+    for mode in ("RGBA", "LA"):
+        img = Image.new(mode, (200, 100), (0, 0) if mode == "LA" else (0, 0, 0, 0))
+        p = str(tmp_path / f"{mode}.png")
+        img.save(p)
+        px = _decode(email_images.prepare(p)).getpixel((100, 50))
+        assert all(abs(a - b) <= 6 for a, b in zip(px, (255, 248, 239))), (mode, px)
+    pal = Image.new("P", (200, 100), 0)
+    pal.putpalette([0, 0, 0] * 256)
+    p = str(tmp_path / "P.png")
+    pal.save(p, transparency=0)
+    px = _decode(email_images.prepare(p)).getpixel((100, 50))
+    assert all(abs(a - b) <= 6 for a, b in zip(px, (255, 248, 239))), px
+
+
+def test_blank_title_falls_back_to_screenshot_alt(tmp_path):
+    c = _copy(2)
+    c["sections"][0]["title"] = "   "
+    c["sections"][1]["title"] = ""
+    html, _ = _render(tmp_path, 2, copy=c)
+    assert 'alt="Screenshot 1"' in html and 'alt="Screenshot 2"' in html
+
+
+def test_reply_to_is_sanitized_for_mailto(tmp_path):
+    html, _ = _render(tmp_path, reply_to="me@x.com?cc=y@z.com")
+    assert html.count("mailto:") == 1
+    assert 'href="mailto:me@x.com?subject=' in html
+    assert "cc=" not in html
+    html, text = _render(tmp_path, reply_to=" ?cc=a@b.com")
+    assert "mailto:" not in html and "<a " not in html
+    assert "Just reply to this email" in text
+
+
+def test_button_cell_carries_padding_and_bgcolor(tmp_path):
+    html, _ = _render(tmp_path)
+    m = re.search(r'<td bgcolor="#d9480f"[^>]*>', html)
+    assert m and "padding:13px 26px" in m.group(0)
+
+
+def test_text_order_matches_html(tmp_path):
+    c = _copy(2)
+    _, text = _render(tmp_path, 2, copy=c)
+    assert text.index(c["headline"]) < text.index("Hi Priya,") < text.index(c["opening"])
