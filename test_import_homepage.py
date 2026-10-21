@@ -97,3 +97,10 @@ def test_http_get_stops_reading_after_the_deadline(monkeypatch):
     handler = lambda request: httpx.Response(200, stream=httpx.ByteStream(b"y" * 10))
     status, _, body = homepage._http_get("https://acme.com", transport=httpx.MockTransport(handler))
     assert status == 200 and len(body) <= 10
+
+
+def test_non_plain_hostname_is_refused_before_any_request():
+    called = []
+    for bad in ("127.0.0.1\\@example.com", "user@example.com", "example.com:81", "example.com/x", "93.184.216.34"):
+        assert homepage.fetch_homepage_text(bad, get=lambda u: called.append(u)) is None
+    assert called == []

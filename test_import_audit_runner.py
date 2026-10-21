@@ -84,10 +84,17 @@ async def test_done_when_at_least_two_flaw_shots(tmp_path):
 
 
 async def test_no_flaws_when_fewer_than_two_shots(tmp_path):
+    ids = _make_leads(["ready"])
     cap = _capture_returning([_shot(tmp_path, 1)])
     res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
     assert res["audit_status"] == "no_flaws"
-    assert res["audit_error"] is None
+    assert res["flaw_shots"] == []
+    audit_runner.start_audit(ids, capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(ids[0])
+    assert lead["audit_status"] == "no_flaws"
+    assert lead["flaw_shots"] == []
+    assert lead["audit_error"] == "fewer than 2 flaws with a verified screenshot"
 
 
 async def test_failed_when_capture_returns_no_html():
@@ -102,10 +109,10 @@ async def test_failed_when_capture_raises():
         raise RuntimeError("boom")
     res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
     assert res["audit_status"] == "failed"
-    assert "RuntimeError" in res["audit_error"]
+    assert res["audit_error"] == "capture failed: RuntimeError"
 
 
-@pytest.mark.parametrize("domain", ["", "localhost", "127.0.0.1"])
+@pytest.mark.parametrize("domain", ["", "localhost", "127.0.0.1", "10.0.0.1"])
 async def test_unsafe_or_empty_domain_is_failed_not_fetched(domain):
     cap = _capture_returning([])
     res = await audit_runner.audit_one(_lead(domain=domain), capture=cap, judge=_yes)
@@ -264,8 +271,8 @@ async def test_shot_with_no_image_file_is_dropped(tmp_path):
 
 
 @pytest.mark.parametrize("selector", [
-    "#onetrust-banner-sdk", ".CookieConsent", "iframe#intercom-frame", "div.chat-widget",
-    "#hubspot-messages-iframe-container"])
+    "#chat-widget", ".cookie-banner", "#onetrust-banner-sdk", ".intercom-lightweight-app",
+    "#hubspot-messages-iframe-container", ".CookieConsent", "div.chat_widget"])
 async def test_shot_dropped_when_the_flagged_element_is_a_cookie_banner_or_chat_widget(tmp_path, selector):
     called = []
     kept, dropped = await audit_runner.verify_shots(
@@ -275,11 +282,20 @@ async def test_shot_dropped_when_the_flagged_element_is_a_cookie_banner_or_chat_
 
 
 async def test_dropping_shots_below_two_makes_the_lead_no_flaws_with_reasons_recorded(tmp_path):
+    ids = _make_leads(["ready"])
     cap = _capture_returning([_shot(tmp_path, 1), _shot(tmp_path, 2)])
-    res = await audit_runner.audit_one(_lead(), capture=cap, judge=lambda b, d: d == "defect 1")
+    judge = lambda b, d: d == "defect 1"  # noqa: E731
+    res = await audit_runner.audit_one(_lead(), capture=cap, judge=judge)
     assert res["audit_status"] == "no_flaws"
     assert len(res["dropped_shots"]) == 1
     assert res["dropped_shots"][0]["reason"]
+    audit_runner.start_audit(ids, capture=cap, judge=judge)
+    await _wait()
+    lead = import_store.get_lead(ids[0])
+    assert lead["audit_status"] == "no_flaws"
+    assert res["dropped_shots"][0]["reason"] in lead["audit_error"]
+    assert len(lead["audit_error"]) <= 300
+    assert lead["flaw_shots"] == []
 
 
 async def test_judge_error_drops_the_shot_rather_than_trusting_it(tmp_path):
@@ -288,3 +304,89 @@ async def test_judge_error_drops_the_shot_rather_than_trusting_it(tmp_path):
 
     kept, dropped = await audit_runner.verify_shots([_shot(tmp_path, 1)], judge)
     assert kept == [] and len(dropped) == 1 and dropped[0]["reason"]
+
+
+@pytest.mark.parametrize("selector", ["#chatham-hero", ".chateau-banner", "#snowdrift", ".crispy-nav", "div.hero"])
+async def test_lookalike_selectors_are_not_dropped(tmp_path, selector):
+    kept, dropped = await audit_runner.verify_shots([_shot(tmp_path, 1, selector=selector)], _yes)
+    assert len(kept) == 1 and dropped == []
+
+
+@pytest.mark.parametrize("domain", [
+    "127.0.0.1\\@example.com", "user@example.com", "example.com:8080", "example.com/path",
+    "https://example.com", "exa mple.com", "93.184.216.34", "exämple.com",
+    "-bad.example.com", "a%2eb.com", "[::1]", "example",
+])
+async def test_non_plain_hostname_is_failed_before_any_capture(domain):
+    cap = _capture_returning([])
+    # note: real hostname validation runs; only the DNS step is faked
+    res = await audit_runner.audit_one(_lead(domain=domain),
+                                       capture=cap, judge=_yes)
+    assert cap.calls == []
+    assert res["audit_status"] == "failed"
+    assert res["audit_error"]
+
+
+async def test_uppercase_domain_is_lowercased_then_accepted(tmp_path):
+    cap = _capture_returning([_shot(tmp_path, 1), _shot(tmp_path, 2)])
+    res = await audit_runner.audit_one(_lead(domain="ACME.Com"), capture=cap, judge=_yes)
+    assert res["audit_status"] == "done"
+    assert cap.calls[0][0] == "https://acme.com"
+
+
+async def test_queued_lead_approved_before_its_turn_is_not_captured(tmp_path):
+    ids = _make_leads(["ready", "ready"])
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+    seen = []
+
+    async def cap(url, company_name, on_queued=None, on_started=None):
+        seen.append(url)
+        import_store.update_lead(ids[1], status="approved")  # approved while lead 2 waits
+        return "p", "<html/>", {"flaw_shots": shots}
+
+    audit_runner.start_audit(ids, capture=cap, judge=_yes)
+    await _wait()
+    assert seen == ["https://site0.com"]
+    lead = import_store.get_lead(ids[1])
+    assert lead["status"] == "approved"
+    assert lead["audit_status"] == "none"
+    assert lead["flaw_shots"] == [] and lead["audited_at"] is None and not lead["audit_error"]
+
+
+async def test_lead_sent_during_capture_keeps_its_fields_and_late_result_is_discarded(tmp_path):
+    ids = _make_leads(["ready"])
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+
+    async def cap(url, company_name, on_queued=None, on_started=None):
+        import_store.update_lead(ids[0], status="sent")
+        return "p", "<html/>", {"flaw_shots": shots}
+
+    audit_runner.start_audit(ids, capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(ids[0])
+    assert lead["status"] == "sent"
+    assert lead["flaw_shots"] == [] and lead["audited_at"] is None and not lead["audit_error"]
+    assert audit_runner.progress()["done"] == 0
+
+
+async def test_db_error_in_start_audit_does_not_wedge_the_runner(monkeypatch, tmp_path):
+    ids = _make_leads(["ready", "ready"])
+    real = import_store.update_lead
+    state = {"n": 0}
+
+    def flaky(lead_id, **kw):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise RuntimeError("db down")
+        return real(lead_id, **kw)
+
+    monkeypatch.setattr(import_store, "update_lead", flaky)
+    with pytest.raises(RuntimeError):
+        audit_runner.start_audit(ids, capture=_capture_returning([]), judge=_yes)
+    monkeypatch.setattr(import_store, "update_lead", real)
+    assert audit_runner.progress()["running"] is False
+    assert all(import_store.get_lead(i)["audit_status"] == "none" for i in ids)
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+    assert audit_runner.start_audit(ids, capture=_capture_returning(shots), judge=_yes) is True
+    await _wait()
+    assert import_store.get_lead(ids[0])["audit_status"] == "done"

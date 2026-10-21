@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import trafilatura
 
-from security_utils import UnsafeURLError, validate_public_url
+from security_utils import UnsafeURLError, is_plain_hostname, validate_public_url
 
 MAX_REDIRECTS = 3
 FETCH_TIMEOUT_SECONDS = 8.0
@@ -73,7 +73,7 @@ def fetch_homepage_text(domain: str, get=_http_get) -> str | None:
     the homepage ended on, so the drafter has more than a tagline to work from.
     A failing extra page is skipped; only the homepage failing yields None.
     """
-    if not domain:
+    if not domain or not is_plain_hostname(domain):
         return None
     try:
         text, final_url = _fetch_page(f"https://{domain}", get)

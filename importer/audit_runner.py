@@ -13,14 +13,18 @@ from pathlib import Path
 
 from analyzer import visuals
 from analyzer.visuals import generate_audit_screenshot
-from security_utils import UnsafeURLError, validate_public_url
+from urllib.parse import urlparse
+
+from security_utils import UnsafeURLError, is_plain_hostname, validate_public_url
 from storage import import_store
 
 MIN_SHOTS = 2
 AUDITABLE_STATUSES = ("ready", "drafted")
 _CHROME_SELECTOR = re.compile(
-    r"(?i)cookie|consent|gdpr|onetrust|cookiebot|chat|intercom|drift|tawk|crisp|livechat|zendesk|hubspot-messages"
+    r"(?i)(?:^|[^a-z])(?:chat|drift|crisp|cookie|cookies|consent|gdpr)(?:[^a-z]|$)"
+    r"|onetrust|cookiebot|cookieconsent|intercom|tawk|livechat|zendesk|hubspot-messages"
 )
+_NO_VERIFIED = "fewer than 2 flaws with a verified screenshot"
 _ERROR_MAX = 300
 
 _task: asyncio.Task | None = None
@@ -87,10 +91,14 @@ async def audit_one(lead: dict, capture=generate_audit_screenshot,
         return {"audit_status": status, "flaw_shots": shots or [],
                 "dropped_shots": dropped or [], "audit_error": error}
 
-    domain = (lead.get("domain") or "").strip()
+    domain = (lead.get("domain") or "").strip().lower()
     if not domain:
         return result("failed", error="lead has no domain")
+    if not is_plain_hostname(domain):
+        return result("failed", error="domain is not a plain hostname")
     url = f"https://{domain}"
+    if urlparse(url).hostname != domain:
+        return result("failed", error="domain is not a plain hostname")
     try:
         await asyncio.to_thread(_check_url, url)
     except UnsafeURLError:
@@ -100,42 +108,52 @@ async def audit_one(lead: dict, capture=generate_audit_screenshot,
     try:
         _path, html, extra = await capture(url, lead.get("organization") or "")
     except Exception as exc:
-        return result("failed", error=_err(f"capture failed: {type(exc).__name__}: {exc}"))
+        return result("failed", error=_err(f"capture failed: {type(exc).__name__}"))
     if html is None or extra is None:
         return result("failed", error="capture failed: the website could not be loaded")
     kept, dropped = await verify_shots(list(extra.get("flaw_shots") or []), judge)
     if len(kept) < MIN_SHOTS:
-        return result("no_flaws", kept, dropped)
+        reasons = "; ".join(d["reason"] for d in dropped) or _NO_VERIFIED
+        return result("no_flaws", [], dropped, _err(reasons))
     return result("done", kept, dropped)
 
 
 async def _run(lead_ids: list[int], capture, judge) -> None:
     global _running
     try:
-        for lead_id in lead_ids:
-            if _cancel:
-                break
-            lead = import_store.get_lead(lead_id)
-            if not lead or lead.get("audit_status") != "queued":
-                continue
-            _progress["current"] = lead.get("organization") or lead.get("domain")
-            import_store.update_lead(lead_id, audit_status="running")
-            try:
-                res = await audit_one(lead, capture=capture, judge=judge)
-            except Exception as exc:
-                res = {"audit_status": "failed", "flaw_shots": [],
-                       "audit_error": _err(f"audit crashed: {type(exc).__name__}")}
-            status = res["audit_status"]
-            import_store.update_lead(
-                lead_id, audit_status=status, flaw_shots=res["flaw_shots"],
-                audit_error=res["audit_error"], audited_at=import_store.now_sql(),
-            )
-            _progress["done" if status == "done" else status] += 1
+        try:
+            for lead_id in lead_ids:
+                if _cancel:
+                    break
+                lead = import_store.get_lead(lead_id)
+                if not lead or lead.get("audit_status") != "queued":
+                    continue
+                if lead.get("status") not in AUDITABLE_STATUSES:
+                    import_store.update_lead(lead_id, audit_status="none")
+                    continue
+                _progress["current"] = lead.get("organization") or lead.get("domain")
+                if not import_store.update_lead(
+                        lead_id, only_if_status=AUDITABLE_STATUSES, audit_status="running"):
+                    continue
+                try:
+                    res = await audit_one(lead, capture=capture, judge=judge)
+                except Exception as exc:
+                    res = {"audit_status": "failed", "flaw_shots": [],
+                           "audit_error": _err(f"audit crashed: {type(exc).__name__}")}
+                status = res["audit_status"]
+                if not import_store.update_lead(
+                        lead_id, only_if_status=AUDITABLE_STATUSES, audit_status=status,
+                        flaw_shots=res["flaw_shots"], audit_error=res["audit_error"],
+                        audited_at=import_store.now_sql()):
+                    continue  # lead changed while auditing: discard the result
+                _progress["done" if status == "done" else status] += 1
+        finally:
+            for lead_id in lead_ids:
+                lead = import_store.get_lead(lead_id)
+                if lead and lead.get("audit_status") in ("queued", "running"):
+                    import_store.update_lead(
+                        lead_id, only_if_status=AUDITABLE_STATUSES, audit_status="none")
     finally:
-        for lead_id in lead_ids:
-            lead = import_store.get_lead(lead_id)
-            if lead and lead.get("audit_status") in ("queued", "running"):
-                import_store.update_lead(lead_id, audit_status="none")
         _progress["current"] = None
         _running = False
 
@@ -154,10 +172,20 @@ def start_audit(lead_ids: list[int], *, capture=generate_audit_screenshot, judge
     if not eligible:
         return False
     loop = asyncio.get_running_loop()
+    marked = []
+    try:
+        for lead_id in eligible:
+            import_store.update_lead(lead_id, audit_status="queued", audit_error=None)
+            marked.append(lead_id)
+    except Exception:
+        for lead_id in marked:
+            try:
+                import_store.update_lead(lead_id, audit_status="none")
+            except Exception:
+                pass
+        raise
     _running, _cancel = True, False
     _progress.update(total=len(eligible), done=0, no_flaws=0, failed=0, current=None)
-    for lead_id in eligible:
-        import_store.update_lead(lead_id, audit_status="queued", audit_error=None)
     _task = loop.create_task(_run(eligible, capture, judge or visuals._vision_confirms_visible_defect))
     return True
 
