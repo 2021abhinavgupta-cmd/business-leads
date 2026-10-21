@@ -193,9 +193,11 @@ def facets(batch_id: int) -> dict:
         conn.close()
 
 
-def update_lead(lead_id: int, *, only_if_status: tuple | None = None, **fields) -> bool:
+def update_lead(lead_id: int, *, only_if_status: tuple | None = None,
+                only_if_designed: bool | None = None, **fields) -> bool:
     """Update a lead. With only_if_status the write is a compare and set: it applies only while
-    the lead is still in one of those statuses. Returns True if a row changed."""
+    the lead is still in one of those statuses. only_if_designed=True (False) also requires the
+    lead to have (not to have) a designed html_body. Returns True if a row changed."""
     bad = set(fields) - _UPDATABLE
     if bad:
         raise ValueError(f"Not updatable: {sorted(bad)}")
@@ -214,6 +216,10 @@ def update_lead(lead_id: int, *, only_if_status: tuple | None = None, **fields) 
         if only_if_status:
             sql += f" AND status IN ({', '.join('?' * len(only_if_status))})"
             params.extend(only_if_status)
+        if only_if_designed is True:
+            sql += " AND html_body IS NOT NULL AND html_body != ''"
+        elif only_if_designed is False:
+            sql += " AND (html_body IS NULL OR html_body = '')"
         changed = conn.execute(sql, params).rowcount > 0
         conn.commit()
         return changed

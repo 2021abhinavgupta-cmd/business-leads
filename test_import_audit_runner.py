@@ -390,3 +390,63 @@ async def test_db_error_in_start_audit_does_not_wedge_the_runner(monkeypatch, tm
     assert audit_runner.start_audit(ids, capture=_capture_returning(shots), judge=_yes) is True
     await _wait()
     assert import_store.get_lead(ids[0])["audit_status"] == "done"
+
+
+# --- a new audit result invalidates a designed email (designed flaw email review) ---
+
+from import_test_support import seed_designed_lead, seed_lead  # noqa: E402
+
+_CLEARED = {"status": "ready", "html_body": None, "design_json": {}, "subject": None,
+            "body": None, "review_warnings": [], "source_quote": None}
+
+
+@pytest.mark.parametrize("found", [2, 0])  # a done result, and a no_flaws one
+async def test_a_new_result_clears_a_designed_email_and_sends_the_lead_back_to_ready(tmp_path, found):
+    lead_id = seed_designed_lead(tmp_path, review_warnings=["Fact check: old"])
+    assert import_store.get_lead(lead_id)["html_body"]
+    shots = [_shot(tmp_path, i) for i in range(1, found + 1)]
+    audit_runner.start_audit([lead_id], capture=_capture_returning(shots), judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert {k: lead[k] for k in _CLEARED} == _CLEARED
+    assert lead["audit_status"] == ("done" if found else "no_flaws") and lead["audited_at"]
+    assert [s["path"] for s in lead["flaw_shots"]] == [s["path"] for s in shots]
+
+
+async def test_a_designed_email_drafted_during_the_audit_is_cleared_too(tmp_path):
+    lead_id = seed_lead(status="drafted", subject="S", body="Hi Jane,\n\nText")
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+
+    async def cap(url, company_name, on_queued=None, on_started=None):
+        import_store.update_lead(lead_id, html_body="<p>designed</p>", design_json={"opening": "o"})
+        return "p", "<html/>", {"flaw_shots": shots}
+
+    audit_runner.start_audit([lead_id], capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert {k: lead[k] for k in _CLEARED} == _CLEARED and lead["audit_status"] == "done"
+
+
+async def test_a_text_draft_keeps_its_email_when_audited(tmp_path):
+    lead_id = seed_lead(status="drafted", subject="S", body="Hi Jane,\n\nText", review_warnings=["w"])
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+    audit_runner.start_audit([lead_id], capture=_capture_returning(shots), judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert lead["status"] == "drafted" and lead["subject"] == "S" and lead["body"] == "Hi Jane,\n\nText"
+    assert lead["review_warnings"] == ["w"] and lead["audit_status"] == "done"
+
+
+async def test_a_designed_lead_that_left_the_auditable_statuses_keeps_its_email(tmp_path):
+    lead_id = seed_designed_lead(tmp_path)
+    before = import_store.get_lead(lead_id)
+
+    async def cap(url, company_name, on_queued=None, on_started=None):
+        import_store.update_lead(lead_id, status="approved")
+        return "p", "<html/>", {"flaw_shots": [_shot(tmp_path, 1), _shot(tmp_path, 2)]}
+
+    audit_runner.start_audit([lead_id], capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert lead["status"] == "approved" and lead["html_body"] == before["html_body"]
+    assert lead["flaw_shots"] == before["flaw_shots"] and lead["design_json"] == before["design_json"]

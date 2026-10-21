@@ -1,4 +1,5 @@
 """Draft one import lead: fetch evidence, ask the model, assemble, check."""
+import hashlib
 import os
 import re
 
@@ -22,12 +23,19 @@ class DesignEditError(ValueError):
     """A design edit the user must correct (the route answers 422)."""
 
 
+# Every hyphen or dash, Unicode ones included: hyphen minus, U+2010 to U+2015,
+# minus, soft hyphen, Armenian hyphen, double oblique hyphen, hyphen bullet,
+# wave dash, the two and three em dashes, and the small and fullwidth forms.
+# The one pattern for the homepage text and for the designed copy.
+_ANY_DASH = re.compile("[\\-‐-―−­֊⸗⁃〜⸺⸻﹘﹣－]")
+
+
 def _dashless(text: str | None) -> str | None:
     # The model may not write dashes, so a quoted "17-branch" comes back as
     # "17 branch"; give it, and the quote check, the same dashless text.
     if not text:
         return text
-    return " ".join(re.sub(r"[-‐-―]", " ", text).split())
+    return " ".join(_ANY_DASH.sub(" ", text).split())
 
 
 def _best_attempt(generate, check):
@@ -123,8 +131,6 @@ def draft_lead(lead: dict, auditor, *, your_name: str, fetch=homepage.fetch_home
 # here, because the AI parser only checks its shape, never its content.
 # ---------------------------------------------------------------------------
 
-# Every hyphen or dash, Unicode ones included.
-_ANY_DASH = re.compile(r"[\-‐-―−⸺⸻﹘﹣－]")
 _NUMBER = re.compile(r"\d+")
 _LINK = re.compile(
     r"https?://|www\.|[\w.+]+@[\w]+\.[\w.]+"
@@ -137,7 +143,7 @@ _SPAM = re.compile(r"\b(free|guarantee\w*|urgent|cash|winner)\b", re.IGNORECASE)
 
 
 def _clean(text) -> str:
-    return " ".join(_ANY_DASH.sub(" ", str(text or "")).split())
+    return _dashless(str(text or "")) or ""
 
 
 def _clean_copy(copy: dict) -> dict:
@@ -154,23 +160,34 @@ def _clean_copy(copy: dict) -> dict:
     }
 
 
-def copy_issues(copy: dict, flaw_count: int) -> list[str]:
-    """Deterministic rule breaks in already cleaned copy, phrased as checker notes."""
+def _without_organization(text: str, organization: str | None) -> str:
+    """text with the lead's own company name (as the cleaner writes it) blanked
+    out, so a name like Overstock.com, Cash App or 3M is not a rule break."""
+    name = _clean(organization)
+    if not name:
+        return text
+    return re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", " ", text, flags=re.IGNORECASE)
+
+
+def copy_issues(copy: dict, flaw_count: int, organization: str | None = None) -> list[str]:
+    """Deterministic rule breaks in already cleaned copy, phrased as checker notes.
+    The organization's own name is exempt from the number, link and spam rules."""
     subject = copy.get("subject") or ""
     parts = [subject, copy.get("headline") or "", copy.get("opening") or ""]
     for s in copy.get("sections") or []:
         parts += [s.get("title") or "", s.get("sentence") or ""]
     text = " ".join(parts)
+    masked = _without_organization(text, organization)
     issues = []
     if not all(parts):
         issues.append("A subject, headline, opening, title or sentence is empty; fill in every one.")
-    numbers = sorted({n for n in _NUMBER.findall(text) if n != str(flaw_count)})
+    numbers = sorted({n for n in _NUMBER.findall(masked) if n != str(flaw_count)})
     if numbers:
         issues.append(
             f"Contains a number other than the flaw count ({flaw_count}): {', '.join(numbers)}. "
             "Write no numbers except the count of problems."
         )
-    if _LINK.search(text):
+    if _LINK.search(masked):
         issues.append("Contains a link or email address; the copy must not include any.")
     if _PHONE.search(text):
         issues.append("Contains a phone number; the copy must not include any.")
@@ -182,7 +199,7 @@ def copy_issues(copy: dict, flaw_count: int) -> list[str]:
             f"Subject is {len(subject)} characters and {words} words; it must be "
             f"{MIN_SUBJECT_WORDS} to {MAX_SUBJECT_WORDS} words and at most {MAX_SUBJECT_CHARS} characters."
         )
-    spam = sorted({w.lower() for w in _SPAM.findall(text)})
+    spam = sorted({w.lower() for w in _SPAM.findall(masked)})
     if spam:
         issues.append(f"Contains the spam trigger word(s) {', '.join(spam)}; never use them.")
     return issues
@@ -216,12 +233,32 @@ def _render(lead: dict, copy: dict, shots: list[dict], reply_to: str) -> tuple[s
     )
 
 
+def shot_fingerprints(shots: list[dict], prepared: list[tuple[str, bytes]] | None = None) -> list[dict]:
+    """{"path", "description", "sha256"} per shot, the hash taken over the exact
+    bytes email_images.prepare_all produces (what would be attached and sent).
+    Raises whatever prepare_all raises when prepared is not given."""
+    if prepared is None:
+        prepared = email_images.prepare_all(shots)
+    return [
+        {"path": s.get("path"), "description": s.get("description"),
+         "sha256": hashlib.sha256(data).hexdigest()}
+        for s, (_cid, data) in zip(shots, prepared)
+    ]
+
+
 def shots_match_design(lead: dict) -> bool:
-    """True while the stored screenshots are the ones the email was drafted with.
-    A re-audit can replace or reorder them; then every sentence could sit under
-    the wrong screenshot, so the email must be drafted again."""
-    paths = [s.get("path") for s in lead.get("flaw_shots") or []]
-    return bool(paths) and (lead.get("design_json") or {}).get("shot_paths") == paths
+    """True while the screenshots are the ones the email was drafted with.
+    Shot file names are deterministic, so a re-audit overwrites the same paths
+    with new images: every shot's path, description and freshly prepared bytes
+    must match what was stored at draft time. Never raises."""
+    try:
+        stored = (lead.get("design_json") or {}).get("shot_fingerprints")
+        shots = lead.get("flaw_shots") or []
+        if not stored or not isinstance(stored, list) or len(stored) != len(shots):
+            return False
+        return shot_fingerprints(shots) == stored
+    except Exception:
+        return False
 
 
 def is_designable(lead: dict) -> bool:
@@ -253,7 +290,7 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
     try:
         # The exact images the sender will attach; a file that cannot be
         # prepared means no designed email, found before any copy is paid for.
-        email_images.prepare_all(shots)
+        fingerprints = shot_fingerprints(shots, email_images.prepare_all(shots))
     except Exception as e:
         return _as_text(lead, auditor, your_name, fetch,
                         reason=f"a screenshot could not be prepared ({type(e).__name__}).")
@@ -262,6 +299,7 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
     evidence = _flaw_evidence(homepage_text, shots)
     verify = getattr(auditor, "verify_import_email", None)
     count = len(shots)
+    organization = lead.get("organization")
 
     def generate(feedback):
         copy = auditor.generate_flaw_email_copy(lead, homepage_text, shots, your_name, feedback=feedback)
@@ -272,7 +310,7 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
             verify, lead, evidence, copy["subject"],
             [copy["opening"], *(s["sentence"] for s in copy["sections"])],
         )
-        return copy_issues(copy, count) + issues, cost, ran
+        return copy_issues(copy, count, organization) + issues, cost, ran
 
     copy, issues, total_cost, checked = _best_attempt(generate, check)
     try:
@@ -285,7 +323,8 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
     warnings.extend(_fact_check_warnings(issues, verify, checked))
     return {
         "subject": copy["subject"], "body": text, "html_body": html,
-        "design": {"opening": copy["opening"], "headline": copy["headline"], "sections": copy["sections"]},
+        "design": {"opening": copy["opening"], "headline": copy["headline"], "sections": copy["sections"],
+                   "shot_fingerprints": fingerprints},
         "review_warnings": warnings, "source_quote": "", "ai_cost": total_cost,
     }
 
@@ -319,9 +358,14 @@ def redesign(lead: dict, subject: str, opening: str, sections: list[dict], *, re
     })
     if not all([copy["subject"], copy["opening"], *(s["sentence"] for s in copy["sections"])]):
         raise DesignEditError("Subject, opening and every sentence must be filled in.")
-    html, text = _render(lead, copy, shots, reply_to)
+    try:
+        html, text = _render(lead, copy, shots, reply_to)
+    except Exception as e:
+        raise DesignEditError(f"The designed email could not be built ({e}); draft it again.") from e
     warnings = _design_checks(lead, copy["subject"], text, len(shots))
-    warnings.extend(f"Copy check: {i}" for i in copy_issues(copy, len(shots)))
+    warnings.extend(f"Copy check: {i}" for i in copy_issues(copy, len(shots), lead.get("organization")))
+    # design keeps the shot fingerprints stored at draft time: an edit changes
+    # the words, never which screenshots the email was checked against.
     return {
         "subject": copy["subject"], "body": text, "html_body": html,
         "design": {**design, "opening": copy["opening"], "headline": copy["headline"],

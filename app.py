@@ -2216,13 +2216,10 @@ async def import_draft(
     except import_drafting.DraftError as e:
         await _fail(502, str(e))
 
-    design = result.get("design")
-    if result.get("html_body") and design:
-        # The shots this email pairs its sentences with; preview, edit and send
-        # refuse the email if a re-audit changes them.
-        design = {**design, "shot_paths": [s.get("path") for s in lead.get("flaw_shots") or []]}
-    else:
-        design = None
+    # A designed result's design carries the shot fingerprints (path,
+    # description, hash of the prepared bytes); preview, edit and send refuse
+    # the email once the screenshots no longer match them.
+    design = result.get("design") if result.get("html_body") else None
     saved = await asyncio.to_thread(
         import_store.update_lead, lead_id,
         only_if_status=("ready", "drafted", "failed"),

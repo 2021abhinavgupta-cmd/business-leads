@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 import pytest
@@ -320,7 +321,9 @@ def test_verify_issues_trust_the_page_not_the_models_supported_flag():
 
 # ---- designed drafts (designed flaw email, Task 7) -----------------------
 
-from importer import email_html  # noqa: E402
+import hashlib  # noqa: E402
+
+from importer import email_html, email_images  # noqa: E402
 from import_test_support import flaw_copy, make_flaw_shots  # noqa: E402
 
 
@@ -384,6 +387,11 @@ def test_designed_draft_returns_html_text_and_design(tmp_path):
     assert out["design"] == {
         "opening": flaw_copy(3)["opening"], "headline": "Acme Bank has 3 website problems",
         "sections": flaw_copy(3)["sections"],
+        "shot_fingerprints": [
+            {"path": s["path"], "description": s["description"],
+             "sha256": hashlib.sha256(data).hexdigest()}
+            for s, (_cid, data) in zip(lead["flaw_shots"], email_images.prepare_all(lead["flaw_shots"]))
+        ],
     }
     assert out["review_warnings"] == [] and out["source_quote"] == ""
     assert out["ai_cost"] == pytest.approx(0.003)
@@ -621,7 +629,8 @@ def test_designed_draft_stores_html_body_and_design_json_and_status_drafted(monk
     assert out["status"] == "drafted" and out["is_designed"] is True
     assert "html_body" not in out
     assert out["design_json"]["sections"] == flaw_copy()["sections"]
-    assert out["design_json"]["shot_paths"] == [s["path"] for s in shots]
+    assert out["design_json"]["shot_fingerprints"] == drafting.shot_fingerprints(shots)
+    assert drafting.shots_match_design(import_store.get_lead(lead_id)) is True
 
     stored = import_store.get_lead(lead_id)
     assert stored["html_body"].count("cid:flaw") == 2 and "reply@mmga.example" in stored["html_body"]
@@ -685,3 +694,123 @@ def test_designed_draft_route_maps_a_provider_failure_like_text(monkeypatch, tmp
     assert r.status_code == 502
     lead = import_store.get_lead(lead_id)
     assert lead["status"] == "ready" and "Every AI provider failed" in lead["error"]
+
+
+# ---- review fixes: shot fingerprints, company name exemption, dashes ----
+
+from PIL import Image  # noqa: E402
+
+
+def _fingerprinted(tmp_path, n=2):
+    lead = _designed(tmp_path, n)
+    lead["design_json"] = {"sections": [], "shot_fingerprints": drafting.shot_fingerprints(lead["flaw_shots"])}
+    return lead
+
+
+def test_identical_shots_still_match_the_design(tmp_path):
+    lead = _fingerprinted(tmp_path)
+    assert drafting.shots_match_design(lead) is True
+    # a fresh copy of the shot list, as read back from the database, matches too
+    assert drafting.shots_match_design({**lead, "flaw_shots": [dict(s) for s in lead["flaw_shots"]]}) is True
+
+
+def test_a_shot_overwritten_at_the_same_path_no_longer_matches(tmp_path):
+    lead = _fingerprinted(tmp_path)
+    path = lead["flaw_shots"][1]["path"]
+    Image.new("RGB", (900, 600), (10, 120, 30)).save(path)  # a re-audit wrote new pixels to the same file
+    assert [s["path"] for s in lead["flaw_shots"]][1] == path
+    assert drafting.shots_match_design(lead) is False
+
+
+def test_a_changed_description_no_longer_matches(tmp_path):
+    lead = _fingerprinted(tmp_path)
+    lead["flaw_shots"][0] = {**lead["flaw_shots"][0], "description": "A different flaw"}
+    assert drafting.shots_match_design(lead) is False
+
+
+def test_a_missing_or_unreadable_shot_is_false_and_never_raises(tmp_path):
+    lead = _fingerprinted(tmp_path)
+    os.remove(lead["flaw_shots"][0]["path"])
+    assert drafting.shots_match_design(lead) is False
+    lead = _fingerprinted(tmp_path)
+    with open(lead["flaw_shots"][1]["path"], "wb") as f:
+        f.write(b"not an image")
+    assert drafting.shots_match_design(lead) is False
+
+
+@pytest.mark.parametrize("design_json", [
+    {}, {"shot_fingerprints": []}, {"shot_fingerprints": "x"}, {"shot_paths": ["a", "b"]},
+])
+def test_no_or_malformed_fingerprints_do_not_match(tmp_path, design_json):
+    lead = {**_designed(tmp_path), "design_json": design_json}
+    assert drafting.shots_match_design(lead) is False
+
+
+def test_a_different_shot_count_does_not_match(tmp_path):
+    lead = _fingerprinted(tmp_path, 3)
+    assert drafting.shots_match_design({**lead, "flaw_shots": lead["flaw_shots"][:2]}) is False
+    assert drafting.shots_match_design({**lead, "flaw_shots": []}) is False
+
+
+def test_redesign_keeps_the_stored_fingerprints_instead_of_recomputing(tmp_path):
+    lead = _designed(tmp_path)
+    stored = [{"path": "p", "description": "d", "sha256": "stored at draft time"}] * 2
+    lead["design_json"] = {"opening": "o", "headline": "Acme Bank has 2 website problems",
+                           "sections": flaw_copy()["sections"], "shot_fingerprints": stored}
+    out = drafting.redesign(
+        lead, "Problems on the Acme site", "A visitor sees this first.",
+        [{"index": i, "sentence": f"Sentence {'AB'[i]}."} for i in range(2)], reply_to="r@x.example",
+    )
+    # the bogus stored hashes survive: nothing was re-hashed from the files on disk
+    assert out["design"]["shot_fingerprints"] == stored
+
+
+def test_redesign_turns_a_render_failure_into_a_design_edit_error(monkeypatch, tmp_path):
+    lead = _fingerprinted(tmp_path)
+    lead["design_json"].update(headline="Acme Bank has 2 website problems", sections=flaw_copy()["sections"])
+
+    def boom(*a, **kw):
+        raise ValueError("bad template")
+
+    monkeypatch.setattr(drafting.email_html, "render", boom)
+    with pytest.raises(drafting.DesignEditError, match="could not be built"):
+        drafting.redesign(lead, "Problems on the Acme site", "Opening.",
+                          [{"index": 0, "sentence": "A."}, {"index": 1, "sentence": "B."}], reply_to="r@x")
+
+
+@pytest.mark.parametrize("organization, text, rule", [
+    ("Overstock.com", "Overstock.com has 2 website problems", "link"),
+    ("ASP.NET", "ASP.NET has 2 website problems", "link"),
+    ("Cash App", "Cash App has 2 website problems", "spam"),
+    ("3M", "3M has 2 website problems", "number"),
+    ("7-Eleven", "7 Eleven has 2 website problems", "number"),
+])
+def test_the_leads_own_company_name_is_exempt_from_number_link_and_spam(organization, text, rule):
+    copy = drafting._clean_copy(flaw_copy(headline=text))
+    assert not any(rule in i.lower() for i in drafting.copy_issues(copy, 2, organization))
+    # the same word is still a rule break for any other company
+    assert any(rule in i.lower() for i in drafting.copy_issues(copy, 2, "Acme Bank"))
+    assert any(rule in i.lower() for i in drafting.copy_issues(copy, 2))
+
+
+def test_the_company_name_exemption_masks_nothing_else():
+    copy = drafting._clean_copy(flaw_copy(headline="Overstock.com has 2 website problems",
+                                          opening="See www.example.com for a free 40 day trial."))
+    joined = " ".join(drafting.copy_issues(copy, 2, "Overstock.com")).lower()
+    assert "link" in joined and "spam" in joined and "40" in joined
+
+
+def test_designed_draft_does_not_rewrite_for_the_companys_own_name(tmp_path):
+    lead = _designed(tmp_path, organization="Overstock.com")
+    auditor = _FlawAuditor([flaw_copy(headline="Overstock.com has 2 website problems")])
+    out = _draft_designed(lead, auditor)
+    assert auditor.feedbacks == [None] and _fact_checks(out) == []
+
+
+def test_soft_hyphen_and_minus_are_dashes_for_copy_and_homepage():
+    copy = drafting._clean_copy(flaw_copy(opening="A first\u00adtime visitor waits \u2212 then leaves."))
+    assert copy["opening"] == "A first time visitor waits then leaves."
+    for ch in "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u00ad\u058a\u2e17\u2043\u301c\ufe58\ufe63\uff0d":
+        assert drafting._dashless(f"a{ch}b") == "a b", hex(ord(ch))
+        assert drafting._clean(f"a{ch}b") == "a b", hex(ord(ch))
+    assert drafting._dashless("17\u00adbranch") == "17 branch"

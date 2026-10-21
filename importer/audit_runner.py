@@ -141,10 +141,19 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
                     res = {"audit_status": "failed", "flaw_shots": [],
                            "audit_error": _err(f"audit crashed: {type(exc).__name__}")}
                 status = res["audit_status"]
-                if not import_store.update_lead(
-                        lead_id, only_if_status=AUDITABLE_STATUSES, audit_status=status,
-                        flaw_shots=res["flaw_shots"], audit_error=res["audit_error"],
-                        audited_at=import_store.now_sql()):
+                fields = dict(audit_status=status, flaw_shots=res["flaw_shots"],
+                              audit_error=res["audit_error"], audited_at=import_store.now_sql())
+                # A designed email pairs its sentences with the old screenshots, so a
+                # new result makes it invalid: clear it and send the lead back to ready
+                # in the same compare and set write (the user drafts it again).
+                saved = import_store.update_lead(
+                    lead_id, only_if_status=AUDITABLE_STATUSES, only_if_designed=True, **fields,
+                    status="ready", html_body=None, design_json={}, subject=None, body=None,
+                    review_warnings=[], source_quote=None)
+                if not saved:
+                    saved = import_store.update_lead(
+                        lead_id, only_if_status=AUDITABLE_STATUSES, only_if_designed=False, **fields)
+                if not saved:
                     continue  # lead changed while auditing: discard the result
                 _progress["done" if status == "done" else status] += 1
         finally:

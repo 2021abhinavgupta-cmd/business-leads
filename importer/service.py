@@ -1,5 +1,6 @@
 """Orchestration for the CSV import queue: upload and the status transitions."""
 import base64
+import os
 import re
 from collections import Counter
 
@@ -119,16 +120,17 @@ def save_edit(lead_id: int, subject: str, body: str) -> dict:
     return import_store.get_lead(lead_id)
 
 
-_SHOTS_CHANGED = (
-    "The screenshots changed since this email was drafted (the site was audited again). "
-    "Draft it again before previewing, editing or sending."
-)
+_SHOTS_CHANGED = "The screenshots changed after this email was drafted; draft it again."
+_SHOT_MISSING = "A screenshot file is missing on disk; audit this lead again and redraft it."
 
 
 def _require_designed(lead: dict) -> dict:
     if not lead.get("html_body"):
         raise FlowError(409, "This lead has no designed email.")
     if not drafting.shots_match_design(lead):
+        shots = lead.get("flaw_shots") or []
+        if any(not (s.get("path") and os.path.isfile(s["path"])) for s in shots):
+            raise FlowError(409, _SHOT_MISSING)
         raise FlowError(409, _SHOTS_CHANGED)
     return lead
 
@@ -144,7 +146,7 @@ def preview_html(lead_id: int) -> str:
     try:
         images = dict(email_images.prepare_all(lead["flaw_shots"]))
     except FileNotFoundError:
-        raise FlowError(409, "A screenshot file is missing on disk; audit this lead again and redraft it.")
+        raise FlowError(409, _SHOT_MISSING)
     except Exception as e:
         raise FlowError(409, f"A screenshot could not be prepared ({type(e).__name__}); audit this lead again.")
 

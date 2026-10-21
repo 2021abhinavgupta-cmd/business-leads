@@ -107,7 +107,7 @@ def flaw_copy(n: int = 2, *, subject="Website problems at Acme Bank", headline=N
 
 def seed_designed_lead(tmp_path, n: int = 2, *, status="drafted", **over) -> int:
     """A lead drafted as a designed email: audit done, n real shot files, rendered html."""
-    from importer import email_html
+    from importer import drafting, email_html
     lead_id = seed_lead(status=status, **over)
     shots = make_flaw_shots(tmp_path, n)
     copy = flaw_copy(n)
@@ -119,7 +119,7 @@ def seed_designed_lead(tmp_path, n: int = 2, *, status="drafted", **over) -> int
         review_warnings=over.get("review_warnings", []),
         design_json={
             "opening": copy["opening"], "headline": copy["headline"], "sections": copy["sections"],
-            "shot_paths": [s["path"] for s in shots],
+            "shot_fingerprints": drafting.shot_fingerprints(shots),
         },
     )
     return lead_id

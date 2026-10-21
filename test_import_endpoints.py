@@ -314,7 +314,7 @@ def test_design_edit_rerenders_and_rejects_html_in_sentences(monkeypatch, tmp_pa
     # headline and titles are not editable and are kept
     assert design["headline"] == before["design_json"]["headline"]
     assert [s["title"] for s in design["sections"]] == [s["title"] for s in before["design_json"]["sections"]]
-    assert design["shot_paths"] == before["design_json"]["shot_paths"]
+    assert design["shot_fingerprints"] == before["design_json"]["shot_fingerprints"]
     assert stored["review_warnings"] == []
 
     for bad in (
@@ -389,3 +389,64 @@ def test_text_edit_of_a_designed_lead_is_refused(monkeypatch, tmp_path):
     r = client.put(f"/api/import/leads/{lead_id}", json={"subject": "New", "body": "Hi Jane,\n\nNew"})
     assert r.status_code == 409 and "design" in r.json()["detail"].lower()
     assert import_store.get_lead(lead_id)["body"] == before["body"]
+
+
+# --- review fixes: screenshot fingerprints and render failures ---
+
+from PIL import Image  # noqa: E402
+
+
+def _overwrite_pixels(lead_id, index=0):
+    path = import_store.get_lead(lead_id)["flaw_shots"][index]["path"]
+    Image.new("RGB", (900, 600), (10, 120, 30)).save(path)  # same path, new image
+
+
+def test_preview_and_design_edit_refuse_a_shot_overwritten_at_the_same_path(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    assert client.get(f"/api/import/leads/{lead_id}/preview").status_code == 200
+    before = import_store.get_lead(lead_id)
+    _overwrite_pixels(lead_id)
+    assert [s["path"] for s in import_store.get_lead(lead_id)["flaw_shots"]] == [
+        s["path"] for s in before["flaw_shots"]]
+    for r in (client.get(f"/api/import/leads/{lead_id}/preview"),
+              client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())):
+        assert r.status_code == 409
+        assert r.json()["detail"] == "The screenshots changed after this email was drafted; draft it again."
+    assert import_store.get_lead(lead_id)["html_body"] == before["html_body"]
+
+
+def test_preview_and_design_edit_refuse_a_changed_description(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    shots = import_store.get_lead(lead_id)["flaw_shots"]
+    shots[1]["description"] = "A different flaw on the same screenshot"
+    import_store.update_lead(lead_id, flaw_shots=shots)  # a discarded re-audit kept the files, not the words
+    assert client.get(f"/api/import/leads/{lead_id}/preview").status_code == 409
+    assert client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body()).status_code == 409
+
+
+def test_design_edit_with_a_missing_shot_file_is_409_not_500(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    os.remove(import_store.get_lead(lead_id)["flaw_shots"][0]["path"])
+    r = client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())
+    assert r.status_code == 409 and "missing" in r.json()["detail"]
+
+
+def test_design_edit_render_failure_is_a_message_not_a_500(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    before = import_store.get_lead(lead_id)
+
+    def boom(*a, **kw):
+        raise ValueError("bad template")
+
+    monkeypatch.setattr(email_html, "render", boom)
+    r = client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())
+    assert r.status_code == 422 and "could not be built" in r.json()["detail"]
+    assert import_store.get_lead(lead_id)["html_body"] == before["html_body"]
