@@ -48,12 +48,52 @@ def validate_public_url(url: str) -> None:
 
     for addr in addrs:
         ip = ipaddress.ip_address(addr)
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+        if not _ip_is_public(ip):
             raise UnsafeURLError(f"URL resolves to a non-public address: {hostname} -> {addr}")
+
+
+class UnsafeNavigationError(UnsafeURLError):
+    """The capture browser was sent (directly or by a redirect) to a non-public host."""
+
+
+_LOCAL_SCHEMES = ("data", "blob", "about")
+
+
+def _ip_is_public(ip) -> bool:
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def browser_url_allowed(url: str, *, navigation: bool, check_public=None) -> bool:
+    """
+    May the audit browser load *url*? data:, blob: and about: never touch the
+    network and are allowed. Anything else must be http(s) to a host that is
+    not localhost and not a non-public IP literal. A navigation (a document or
+    frame load) is also resolved with validate_public_url, so a public looking
+    name that resolves to a private address is refused; subresources skip the
+    DNS lookup (too many of them) and get only the literal checks. Any error
+    refuses (fail closed).
+    """
+    try:
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme in _LOCAL_SCHEMES:
+            return True
+        if scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").rstrip(".").lower()
+        if not host or host == "localhost" or host.endswith(".localhost"):
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if ip is not None and not _ip_is_public(ip):
+            return False
+        if navigation:
+            (check_public or validate_public_url)(url)
+        return True
+    except Exception:
+        return False

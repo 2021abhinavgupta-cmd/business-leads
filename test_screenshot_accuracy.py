@@ -407,7 +407,7 @@ def test_the_mobile_user_agent_matches_the_engine_we_actually_drive():
 
 def test_the_mobile_pass_uses_its_own_context_not_a_resized_desktop_one():
     source = _source("analyzer/visuals.py")
-    assert "browser.new_context(**_MOBILE_DEVICE)" in source
+    assert "browser.new_context(**_MOBILE_DEVICE" in source
     # The old approach, which cannot set a user agent or is_mobile at all.
     assert 'set_viewport_size({"width": 390' not in source
 

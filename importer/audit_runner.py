@@ -16,7 +16,7 @@ from analyzer import visuals
 from analyzer.visuals import generate_audit_screenshot
 from urllib.parse import urlparse
 
-from security_utils import UnsafeURLError, is_plain_hostname, validate_public_url
+from security_utils import UnsafeNavigationError, UnsafeURLError, is_plain_hostname, validate_public_url
 from storage import import_store
 
 MIN_SHOTS = 2
@@ -129,7 +129,12 @@ async def audit_one(lead: dict, capture=generate_audit_screenshot,
         # Per-lead file names: another lead for the same company, or a
         # Dashboard audit of the same site, can never overwrite these shots.
         _path, html, extra = await capture(
-            url, lead.get("organization") or "", file_prefix=visuals.import_shot_prefix(lead["id"]))
+            url, lead.get("organization") or "", file_prefix=visuals.import_shot_prefix(lead["id"]),
+            raise_on_unsafe_navigation=True)
+    except UnsafeNavigationError:
+        # The site (or a redirect) pointed the browser at localhost, cloud
+        # metadata or the private network; the capture stopped before any shot.
+        return result("failed", error="the website redirected to a non-public address, so it was not audited")
     except Exception as exc:
         return result("failed", error=_err(f"capture failed: {type(exc).__name__}"))
     if html is None or extra is None:

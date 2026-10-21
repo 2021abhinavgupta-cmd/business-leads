@@ -15,6 +15,7 @@ from playwright.async_api import async_playwright
 from PIL import Image
 
 import config
+from security_utils import UnsafeNavigationError, browser_url_allowed
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
@@ -299,6 +300,73 @@ def import_shot_prefix(lead_id: int) -> str:
     trailing "-" keeps lead 1 from being a prefix of lead 11.
     """
     return f"import-lead{int(lead_id)}-"
+
+
+def _make_ssrf_route_handler(blocked: list, *, check_public=None):
+    """
+    A context.route handler that aborts every request the audit browser may not
+    make (see security_utils.browser_url_allowed): navigations are resolved and
+    must be public, subresources must not be localhost or a private IP literal.
+    Navigation verdicts are cached per host for the context's lifetime. Each
+    blocked navigation URL is appended to *blocked*. Playwright does not call a
+    route handler for redirect hops, so _assert_public_navigation checks those
+    after every goto.
+    """
+    verdicts: dict[str, bool] = {}
+
+    async def handler(route):
+        request = route.request
+        url = request.url
+        try:
+            navigation = bool(request.is_navigation_request()) or request.resource_type == "document"
+        except Exception:
+            navigation = True
+        if navigation:
+            host = (urlparse(url).hostname or "").lower()
+            ok = verdicts.get(host)
+            if ok is None:
+                ok = await asyncio.to_thread(
+                    browser_url_allowed, url, navigation=True, check_public=check_public)
+                verdicts[host] = ok
+        else:
+            ok = browser_url_allowed(url, navigation=False, check_public=check_public)
+        if ok:
+            await route.continue_()
+            return
+        if navigation:
+            blocked.append(url)
+        await route.abort("blockedbyclient")
+    return handler
+
+
+def _assert_public_navigation(final_url: str, response, *, check_public=None) -> None:
+    """Raise UnsafeNavigationError unless the page's final URL and every hop of
+    the redirect chain that led to it are public. Route handlers never see
+    redirect hops, so this runs after each goto, before anything is captured."""
+    hops = [final_url]
+    request = getattr(response, "request", None) if response is not None else None
+    while request is not None:
+        hops.append(request.url)
+        request = getattr(request, "redirected_from", None)
+    for url in hops:
+        if not browser_url_allowed(url, navigation=True, check_public=check_public):
+            raise UnsafeNavigationError(f"the website redirected to a non-public address ({url})")
+
+
+async def _guarded_goto(page, url: str, blocked: list, **kwargs):
+    """page.goto, then the redirect chain check. A navigation the route guard
+    aborted is reported as the violation it is, not as a load failure."""
+    try:
+        response = await page.goto(url, **kwargs)
+    except Exception:
+        if blocked:
+            raise UnsafeNavigationError(
+                f"the website tried to load a non-public address ({blocked[0]})")
+        raise
+    if blocked:
+        raise UnsafeNavigationError(f"the website tried to load a non-public address ({blocked[0]})")
+    await asyncio.to_thread(_assert_public_navigation, page.url, response)
+    return response
 
 
 def _save_jpeg(image_bytes: bytes, path: str) -> None:
@@ -930,6 +998,7 @@ async def generate_audit_screenshot(
     on_started: "Callable[[], None] | None" = None,
     *,
     file_prefix: str = "",
+    raise_on_unsafe_navigation: bool = False,
 ) -> tuple[str | None, str | None, dict | None]:
     """
     Thin retry wrapper around _generate_audit_screenshot_once. A single
@@ -947,11 +1016,21 @@ async def generate_audit_screenshot(
     giving up and reporting unreachable, same "transient blip, not a dead
     site" assumption as SES's Throttling retry.
     """
+    # A navigation to a non-public host (directly or by redirect) is never
+    # retried: it returns (None, None, None) like an unreachable site, or
+    # raises UnsafeNavigationError when raise_on_unsafe_navigation is set (the
+    # CSV import audit, which records the reason).
     last_result = (None, None, None)
     for attempt in range(_AUDIT_SCREENSHOT_RETRIES):
-        last_result = await _generate_audit_screenshot_once(
-            url, company_name, on_queued=on_queued, on_started=on_started, file_prefix=file_prefix
-        )
+        try:
+            last_result = await _generate_audit_screenshot_once(
+                url, company_name, on_queued=on_queued, on_started=on_started, file_prefix=file_prefix
+            )
+        except UnsafeNavigationError as e:
+            print(f"[Visuals] Audit of {url} stopped: {e}")
+            if raise_on_unsafe_navigation:
+                raise
+            return (None, None, None)
         if last_result[1] is not None:  # html_content present = success
             return last_result
         if attempt < _AUDIT_SCREENSHOT_RETRIES - 1:
@@ -1022,8 +1101,16 @@ async def _generate_audit_screenshot_once(
 
                 context = await browser.new_context(
                     viewport={'width': 1280, 'height': 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    # Service worker requests would bypass the route guard below.
+                    service_workers="block",
                 )
+                # SSRF guard: the audited site (or a redirect, an iframe, a
+                # script) must not point this server's browser at localhost,
+                # cloud metadata or the private network. See
+                # _make_ssrf_route_handler and _guarded_goto.
+                blocked_navigations: list[str] = []
+                await context.route("**/*", _make_ssrf_route_handler(blocked_navigations))
 
                 # Real, in-browser Core Web Vitals (not Lighthouse's lab-
                 # simulated ones) via PerformanceObserver, same primitives
@@ -1107,7 +1194,9 @@ async def _generate_audit_screenshot_once(
                 # browser (see _PLAYWRIGHT_SEMAPHORE below), so a truly unbounded
                 # wait on one bad site would freeze every other lead queued behind
                 # it, not just fail the one lead.
-                response = await page.goto(url, timeout=120000, wait_until="domcontentloaded")
+                response = await _guarded_goto(
+                    page, url, blocked_navigations, timeout=120000, wait_until="domcontentloaded"
+                )
 
                 # Response headers, reused for the security-headers check — this is
                 # the request we're already making for the screenshot, so capturing
@@ -1216,7 +1305,9 @@ async def _generate_audit_screenshot_once(
                 for extra_url in extra_urls:
                     label = _page_label(extra_url)
                     try:
-                        await page.goto(extra_url, timeout=60000, wait_until="domcontentloaded")
+                        await _guarded_goto(
+                            page, extra_url, blocked_navigations, timeout=60000, wait_until="domcontentloaded"
+                        )
                         try:
                             await page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
@@ -1224,6 +1315,8 @@ async def _generate_audit_screenshot_once(
                         await page.wait_for_timeout(1500)
                         await _suppress_overlays(page)
                         pages_checked.append(await _audit_current_page(page, context, label))
+                    except UnsafeNavigationError:
+                        raise
                     except Exception as e:
                         # A slow/broken subpage shouldn't sink the whole audit —
                         # just skip it and keep whatever pages did succeed.
@@ -1255,7 +1348,8 @@ async def _generate_audit_screenshot_once(
                     # image the email then described as "on mobile". The
                     # descriptor has to be applied at context creation, so
                     # this cannot be fixed by resizing after navigation.
-                    mobile_context = await browser.new_context(**_MOBILE_DEVICE)
+                    mobile_context = await browser.new_context(**_MOBILE_DEVICE, service_workers="block")
+                    await mobile_context.route("**/*", _make_ssrf_route_handler(blocked_navigations))
                     mobile_page = await mobile_context.new_page()
 
                     # Same listeners as the desktop page — the previous
@@ -1277,7 +1371,9 @@ async def _generate_audit_screenshot_once(
                             pass
                     mobile_page.on("request", _track_mobile_mixed_content)
 
-                    await mobile_page.goto(final_url, timeout=60000, wait_until="domcontentloaded")
+                    await _guarded_goto(
+                        mobile_page, final_url, blocked_navigations, timeout=60000, wait_until="domcontentloaded"
+                    )
                     try:
                         await mobile_page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
@@ -1344,6 +1440,8 @@ async def _generate_audit_screenshot_once(
                     await _remove_highlight(mobile_page)
                     if mobile_visual_flaw:
                         print(f"[Visuals] Mobile highlight drawn on {mobile_visual_flaw['selector']}")
+                except UnsafeNavigationError:
+                    raise
                 except Exception as e:
                     print(f"[Visuals] Mobile screenshot/checks failed (non-critical): {e}")
                 finally:
@@ -1476,6 +1574,8 @@ async def _generate_audit_screenshot_once(
 
         return filepath, html_content, extra_audit_data
 
+    except UnsafeNavigationError:
+        raise
     except Exception as e:
         print(f"Failed to generate visual evidence for {url}: {e}")
         return None, None, None
@@ -2018,6 +2118,9 @@ async def _check_broken_assets(page, context) -> tuple[list, int]:
         }""")
 
         assets = [a for a in assets if not _is_bot_hostile(a["url"])]
+        # context.request is not covered by the browser's route guard: never
+        # probe a link that points at this server's own network.
+        assets = [a for a in assets if await asyncio.to_thread(browser_url_allowed, a["url"], navigation=True)]
         
         # Check each asset with a HEAD request first (fast, no body download).
         # Some servers/WAFs specifically reject or rate-limit HEAD probes from

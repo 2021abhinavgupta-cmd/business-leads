@@ -47,7 +47,7 @@ def _writing_capture(out_dir):
     """A capture that really writes its shots, in a new color on every call."""
     calls = []
 
-    async def capture(url, company_name, on_queued=None, on_started=None, *, file_prefix=""):
+    async def capture(url, company_name, on_queued=None, on_started=None, *, file_prefix="", **_kw):
         calls.append(file_prefix)
         shots = visuals.collect_flaw_shots(_pages((40 * len(calls), 120, 160)), None, None,
                                            company_name, url, out_dir=str(out_dir),
