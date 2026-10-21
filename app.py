@@ -5,6 +5,7 @@ import random
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Literal
 from urllib.parse import quote as _urlquote
@@ -46,12 +47,24 @@ from storage import import_store
 from importer import drafting as import_drafting
 from importer import service as import_service
 from importer import send_policy as import_send_policy
+from importer import audit_runner
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
 
-app = FastAPI(title="Lead Audit Bot Web App")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Leads a crashed process left mid-audit go back to 'none'. A failure here must
+    # never stop the server from starting.
+    try:
+        await asyncio.to_thread(audit_runner.reset_stale_running)
+    except Exception as e:
+        print(f"[Import] Could not reset stale audit state: {e}")
+    yield
+
+
+app = FastAPI(title="Lead Audit Bot Web App", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2233,6 +2246,53 @@ async def import_status(
         ),
         "mailing_address_set": bool(config.MAILING_ADDRESS),
     }
+
+
+class ImportAuditIn(BaseModel):
+    lead_ids: list[int] | None = Field(default=None, max_length=200)
+    limit: int | None = Field(default=None, ge=1, le=200)
+
+
+IMPORT_AUDIT_DEFAULT_LIMIT = 25
+
+
+@app.post("/api/import/batches/{batch_id}/audit")
+async def import_audit_start(
+    batch_id: int,
+    req: ImportAuditIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(12, 60)),
+):
+    # The audit stage runs for hours and costs money (vision calls), so selection is
+    # always capped at 200 leads per request. Explicit ids from another batch are
+    # silently dropped; `queued` reports how many were actually handed over.
+    if not await asyncio.to_thread(import_store.batch_exists, batch_id):
+        raise HTTPException(status_code=404, detail="Import batch not found")
+    if req.lead_ids is not None:
+        lead_ids = await asyncio.to_thread(import_store.lead_ids_in_batch, batch_id, req.lead_ids)
+    else:
+        lead_ids = await asyncio.to_thread(
+            import_store.next_leads_to_audit, batch_id, req.limit or IMPORT_AUDIT_DEFAULT_LIMIT
+        )
+    started = bool(lead_ids) and audit_runner.start_audit(lead_ids)
+    return {"started": started, "queued": len(lead_ids) if started else 0}
+
+
+@app.get("/api/import/audit/progress")
+async def import_audit_progress(
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(240, 60)),
+):
+    return audit_runner.progress()
+
+
+@app.post("/api/import/audit/cancel")
+async def import_audit_cancel(
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(30, 60)),
+):
+    audit_runner.cancel()
+    return audit_runner.progress()
 
 
 # Mount screenshots folder

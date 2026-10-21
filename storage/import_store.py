@@ -131,6 +131,47 @@ def list_leads(
         conn.close()
 
 
+def batch_exists(batch_id: int) -> bool:
+    conn = _connect()
+    try:
+        return conn.execute("SELECT 1 FROM import_batches WHERE id = ?", (batch_id,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def next_leads_to_audit(batch_id: int, limit: int) -> list[int]:
+    """Ids of the first `limit` leads of the batch that are ready and not yet audited, by id."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM import_leads WHERE batch_id = ? AND status = 'ready' "
+            "AND audit_status = 'none' ORDER BY id LIMIT ?",
+            (batch_id, limit),
+        ).fetchall()
+        return [r["id"] for r in rows]
+    finally:
+        conn.close()
+
+
+def lead_ids_in_batch(batch_id: int, lead_ids: list[int]) -> list[int]:
+    """The given ids that belong to the batch, de-duplicated, in the order given."""
+    wanted = list(dict.fromkeys(lead_ids))
+    if not wanted:
+        return []
+    conn = _connect()
+    try:
+        marks = ", ".join("?" * len(wanted))
+        found = {
+            r["id"] for r in conn.execute(
+                f"SELECT id FROM import_leads WHERE batch_id = ? AND id IN ({marks})",
+                (batch_id, *wanted),
+            )
+        }
+        return [i for i in wanted if i in found]
+    finally:
+        conn.close()
+
+
 def facets(batch_id: int) -> dict:
     out = {}
     conn = _connect()

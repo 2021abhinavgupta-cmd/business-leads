@@ -190,3 +190,29 @@ def test_list_leads_filters_by_audit_status(monkeypatch, tmp_path):
     assert import_store.list_leads(batch_id, audit_status="none")["total"] == 1
     assert import_store.list_leads(batch_id)["total"] == 3
     assert import_store.facets(batch_id)["audit_status"] == {"done": 1, "failed": 1, "none": 1}
+
+
+def test_next_leads_to_audit_selects_ready_unaudited_in_id_order(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    rows = [_ready(email=f"{n}@a.com", domain="a.com") for n in "abcde"]
+    skipped = make_row(email="s@a.com")
+    skipped.update(status="skipped", skip_reason="manual")
+    batch_id = import_store.create_batch("f.csv", rows + [skipped])
+    other = import_store.create_batch("g.csv", [_ready(email="z@z.com", domain="z.com")])
+    ids = [l["id"] for l in import_store.list_leads(batch_id)["leads"]]
+    import_store.update_lead(ids[0], audit_status="done")
+    import_store.update_lead(ids[1], status="drafted")
+    assert import_store.next_leads_to_audit(batch_id, 2) == [ids[2], ids[3]]
+    assert import_store.next_leads_to_audit(batch_id, 50) == [ids[2], ids[3], ids[4]]
+    assert import_store.next_leads_to_audit(other, 5) != []
+
+
+def test_batch_exists_and_lead_ids_in_batch(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    batch_id = import_store.create_batch("f.csv", [_ready(email="a@a.com", domain="a.com")])
+    other = import_store.create_batch("g.csv", [_ready(email="z@z.com", domain="z.com")])
+    mine = import_store.list_leads(batch_id)["leads"][0]["id"]
+    theirs = import_store.list_leads(other)["leads"][0]["id"]
+    assert import_store.batch_exists(batch_id) and not import_store.batch_exists(999)
+    assert import_store.lead_ids_in_batch(batch_id, [theirs, mine, mine, 999]) == [mine]
+    assert import_store.lead_ids_in_batch(batch_id, []) == []
