@@ -275,6 +275,99 @@ def make_closeup_screenshot_filename(company_name: str, url: str) -> str:
     return make_screenshot_filename(company_name, url).replace("_audit.jpg", "_closeup.jpg")
 
 
+def make_flaw_shot_filename(company_name: str, url: str, index: int, kind: str) -> str:
+    """
+    Filename of one per-flaw boxed screenshot. Same collision-safe base as the
+    other helpers (company slug + URL hash), with the flaw's index and kind
+    ("desktop", "mobile", or "<kind>_closeup") so no two shots overwrite each
+    other or the three legacy images.
+    """
+    return make_screenshot_filename(company_name, url).replace(
+        "_audit.jpg", f"_flaw{index}_{kind}.jpg"
+    )
+
+
+def _save_jpeg(image_bytes: bytes, path: str) -> None:
+    Image.open(BytesIO(image_bytes)).convert("RGB").save(path, format="JPEG", quality=85)
+
+
+def collect_flaw_shots(
+    pages: list[dict],
+    mobile_flaw: dict | None,
+    mobile_bytes: bytes | None,
+    company_name: str,
+    url: str,
+    *,
+    mobile_closeup_bytes: bytes | None = None,
+    max_shots: int = 5,
+    out_dir: str = SCREENSHOTS_DIR,
+) -> list[dict]:
+    """
+    One boxed screenshot per measured flaw, most severe first, at most
+    *max_shots*. Only pages where a box was actually drawn (visual_flaw set)
+    contribute; the same description found on several pages keeps only the
+    highest-impact one. The mobile capture is included only if a mobile box
+    was drawn. Items carry the flaw's selector so later steps can verify the
+    box against the real element.
+    """
+    candidates: list[dict] = []
+    for page in pages:
+        flaw = page.get("visual_flaw")
+        if not flaw or not page.get("screenshot_bytes"):
+            continue
+        candidates.append({
+            "kind": "desktop",
+            "page": page.get("label", ""),
+            "flaw": flaw,
+            "shot": page["screenshot_bytes"],
+            "closeup": page.get("closeup_bytes"),
+        })
+
+    # Dedupe across desktop pages: keep the most severe of identical descriptions.
+    best_by_desc: dict[str, dict] = {}
+    for c in candidates:
+        desc = c["flaw"].get("description", "")
+        rank = _SEVERITY_RANK.get(c["flaw"].get("impact"), 4)
+        kept = best_by_desc.get(desc)
+        if kept is None or rank < _SEVERITY_RANK.get(kept["flaw"].get("impact"), 4):
+            best_by_desc[desc] = c
+    unique = list(best_by_desc.values())
+
+    if mobile_flaw and mobile_bytes:
+        unique.append({
+            "kind": "mobile",
+            "page": "Mobile",
+            "flaw": mobile_flaw,
+            "shot": mobile_bytes,
+            "closeup": mobile_closeup_bytes,
+        })
+
+    unique.sort(key=lambda c: _SEVERITY_RANK.get(c["flaw"].get("impact"), 4))
+    unique = unique[:max_shots]
+
+    os.makedirs(out_dir, exist_ok=True)
+    shots: list[dict] = []
+    for index, c in enumerate(unique):
+        path = os.path.join(out_dir, make_flaw_shot_filename(company_name, url, index, c["kind"]))
+        _save_jpeg(c["shot"], path)
+        closeup_path = None
+        if c["closeup"]:
+            closeup_path = os.path.join(
+                out_dir, make_flaw_shot_filename(company_name, url, index, f"{c['kind']}_closeup")
+            )
+            _save_jpeg(c["closeup"], closeup_path)
+        shots.append({
+            "path": path,
+            "closeup_path": closeup_path,
+            "page": c["page"],
+            "description": c["flaw"].get("description", ""),
+            "impact": c["flaw"].get("impact", ""),
+            "selector": c["flaw"].get("selector", ""),
+            "kind": c["kind"],
+        })
+    return shots
+
+
 async def _discover_extra_urls_via_sitemap(base_url: str) -> list[str]:
     """
     Try /sitemap.xml first for page discovery — catches real pages that
@@ -1089,6 +1182,7 @@ async def _generate_audit_screenshot_once(
                 mobile_horizontal_overflow = False
                 mobile_violations: list[dict] = []
                 mobile_visual_flaw = None
+                mobile_closeup_bytes = None
                 mobile_context = None
                 try:
                     # A SEPARATE context carrying a real device descriptor.
@@ -1177,13 +1271,15 @@ async def _generate_audit_screenshot_once(
 
                     # The mobile capture gets the same treatment as the
                     # desktop one: highlight in-browser, capture, un-highlight.
-                    # No separate close up crop here — at 390px wide the box
-                    # already occupies a much bigger share of the frame than
-                    # it does on the 1280px desktop capture, so the ambiguity
-                    # the close up exists to remove is far less of a problem
-                    # on this image to begin with.
+                    # No close up is saved for the legacy mobile image — at 390px
+                    # wide the box already fills much of the frame. A crop IS
+                    # captured below (still unsaved here) purely so the
+                    # per-flaw mobile shot can be verified like the desktop ones.
                     mobile_visual_flaw = await _highlight_element(mobile_page, mobile_candidates)
                     mobile_screenshot_bytes = await _capture(mobile_page)
+                    if mobile_visual_flaw:
+                        # Crop while the box is still drawn, so this shot can be verified too.
+                        mobile_closeup_bytes = await _capture_closeup(mobile_page, mobile_visual_flaw)
                     await _remove_highlight(mobile_page)
                     if mobile_visual_flaw:
                         print(f"[Visuals] Mobile highlight drawn on {mobile_visual_flaw['selector']}")
@@ -1251,6 +1347,15 @@ async def _generate_audit_screenshot_once(
             )
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
+        flaw_shots = collect_flaw_shots(
+            pages_checked,
+            mobile_visual_flaw,
+            mobile_screenshot_bytes,
+            company_name,
+            url,
+            mobile_closeup_bytes=mobile_closeup_bytes,
+        )
+
         # Aggregate signals across every page audited, most severe first.
         # Consolidated by id/url first — the same violation or broken link
         # found on multiple pages becomes ONE entry with a combined page
@@ -1304,6 +1409,7 @@ async def _generate_audit_screenshot_once(
             "closeup_image_path": closeup_filepath,
             "real_web_vitals": real_web_vitals,
             "text_renderable": text_renderable,
+            "flaw_shots": flaw_shots,
         }
 
         return filepath, html_content, extra_audit_data
