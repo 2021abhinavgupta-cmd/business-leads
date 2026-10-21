@@ -450,3 +450,15 @@ def test_design_edit_render_failure_is_a_message_not_a_500(monkeypatch, tmp_path
     r = client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())
     assert r.status_code == 422 and "could not be built" in r.json()["detail"]
     assert import_store.get_lead(lead_id)["html_body"] == before["html_body"]
+
+
+def test_leads_listing_filters_by_audit_status(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    rows = [make_row(email="f@f.com", domain="f.com"), make_row(email="n@n.com", domain="n.com")]
+    batch_id = client.post("/api/import/upload", json={"filename": "f.csv", "csv_text": csv_text(rows)}).json()["batch_id"]
+    leads = client.get(f"/api/import/batches/{batch_id}/leads").json()["leads"]
+    assert len(leads) == 2
+    import_store.update_lead(leads[0]["id"], audit_status="failed")
+    body = client.get(f"/api/import/batches/{batch_id}/leads", params={"audit_status": "failed"}).json()
+    assert [lead["id"] for lead in body["leads"]] == [leads[0]["id"]]

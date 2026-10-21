@@ -2242,6 +2242,7 @@ async def import_batch_leads(
     seniority: str | None = None,
     state: str | None = None,
     q: str | None = None,
+    audit_status: str | None = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     _auth: None = Depends(require_api_key),
@@ -2250,7 +2251,8 @@ async def import_batch_leads(
     def _load():
         page = import_store.list_leads(
             batch_id, status=status, skip_reason=skip_reason, industry=industry,
-            seniority=seniority, state=state, q=q, limit=limit, offset=offset,
+            seniority=seniority, state=state, q=q, audit_status=audit_status,
+            limit=limit, offset=offset,
         )
         page["leads"] = [_lead_out(lead) for lead in page["leads"]]
         page["facets"] = import_store.facets(batch_id)
