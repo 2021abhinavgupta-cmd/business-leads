@@ -14,3 +14,6 @@ warmup_log.txt
 
 # lead lists hold personal data, never commit them
 *.csv
+
+# Superpowers scratch (SDD ledgers, brainstorm mockups)
+.superpowers/
