@@ -16,6 +16,9 @@ const STATUS_COLOR = {
   ready: '#38bdf8', drafted: '#a78bfa', approved: '#10b981', sent: '#64748b',
   failed: '#f87171', skipped: '#f59e0b',
 };
+const AUDIT_LABELS = { none: 'none', queued: 'queued', running: 'running', done: 'done', no_flaws: 'no flaws', failed: 'failed' };
+const AUDIT_COLOR = { none: '#64748b', queued: '#94a3b8', running: '#38bdf8', done: '#10b981', no_flaws: '#a78bfa', failed: '#f87171' };
+const clampN = (v) => Math.min(200, Math.max(1, Math.floor(Number(v)) || 25));
 const FAILED_NOTE = 'Check History before retrying: a timeout can mean the email was sent.';
 
 const errText = (err) => {
@@ -39,7 +42,7 @@ export default function ImportView() {
   const [batches, setBatches] = useState(null);     // null until first load
   const [summary, setSummary] = useState(null);
   const [page, setPage] = useState({ leads: [], total: 0, facets: {} });
-  const [filters, setFilters] = useState({ status: '', industry: '', seniority: '', state: '', q: '' });
+  const [filters, setFilters] = useState({ status: '', industry: '', seniority: '', state: '', q: '', audit_status: '' });
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState(new Set());
   const [status, setStatus] = useState(null);
@@ -54,6 +57,14 @@ export default function ImportView() {
   const stopRef = useRef(false);
   const runningRef = useRef(false);
   const mountedRef = useRef(true);
+  const [auditN, setAuditN] = useState('25');
+  const [auditProg, setAuditProg] = useState(null);  // { running, total, done, no_flaws, failed, current }
+  const [auditStarting, setAuditStarting] = useState(false);
+  const [designEdit, setDesignEdit] = useState(null); // { subject, opening, sentences: [] } for designed leads
+  const [previewHtml, setPreviewHtml] = useState('');
+  const [previewError, setPreviewError] = useState('');
+  const previewSeq = useRef(0);
+  const wasAuditing = useRef(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -108,6 +119,42 @@ export default function ImportView() {
   }, [loadBatches]);
 
   useEffect(() => { loadStatus(); }, [loadStatus]);
+
+  const pollAudit = useCallback(() => axios.get(`${API_BASE}/api/import/audit/progress`)
+    .then((r) => { if (mountedRef.current) setAuditProg(r.data); return r.data; })
+    .catch(() => null), []);
+  useEffect(() => { pollAudit(); }, [pollAudit]);   // resume after a reload if an audit is still running
+  const auditRunning = !!auditProg?.running;
+  useEffect(() => {
+    if (!auditRunning) return undefined;
+    const t = setInterval(pollAudit, 3000);
+    return () => clearInterval(t);
+  }, [auditRunning, pollAudit]);
+  useEffect(() => {
+    // When an audit stops, refresh the table once so the badges settle.
+    if (auditRunning) { wasAuditing.current = true; return; }
+    if (wasAuditing.current) { wasAuditing.current = false; loadLeads(); loadBatches(); }
+  }, [auditRunning, loadLeads, loadBatches]);
+
+  const startAudit = async () => {
+    if (!batchId || auditRunning || auditStarting) return;
+    const n = clampN(auditN);
+    setAuditN(String(n)); setAuditStarting(true); setMessage('');
+    try {
+      const r = await axios.post(`${API_BASE}/api/import/batches/${batchId}/audit`, { limit: n });
+      if (mountedRef.current) {
+        if (!r.data.started) setMessage('Nothing to audit: no leads are waiting, or an audit is already running.');
+        await pollAudit(); loadLeads();
+      }
+    } catch (err) { if (mountedRef.current) setMessage(errText(err)); }
+    if (mountedRef.current) setAuditStarting(false);
+  };
+  const cancelAudit = async () => {
+    try {
+      const r = await axios.post(`${API_BASE}/api/import/audit/cancel`);
+      if (mountedRef.current) setAuditProg(r.data);
+    } catch (err) { if (mountedRef.current) setMessage(errText(err)); }
+  };
   useEffect(() => { loadLeads(); }, [loadLeads]);
   useEffect(() => {
     if (!batchId) return;
@@ -123,7 +170,7 @@ export default function ImportView() {
       const csv_text = await file.text();
       const r = await axios.post(`${API_BASE}/api/import/upload`, { filename: file.name, csv_text });
       setSummary(r.data); setBatchId(r.data.batch_id); setOffset(0); setSelected(new Set());
-      setFilters({ status: '', industry: '', seniority: '', state: '', q: '' });
+      setFilters({ status: '', industry: '', seniority: '', state: '', q: '', audit_status: '' });
       loadStatus(); loadBatches();
     } catch (err) { setMessage(errText(err)); }
     setUploading(false);
@@ -140,7 +187,7 @@ export default function ImportView() {
 
   const chooseBatch = (id) => {
     setBatchId(id); setSummary(null); setOffset(0); setSelected(new Set()); setMessage('');
-    setFilters({ status: '', industry: '', seniority: '', state: '', q: '' });
+    setFilters({ status: '', industry: '', seniority: '', state: '', q: '', audit_status: '' });
     setPage({ leads: [], total: 0, facets: {} });
   };
 
@@ -230,13 +277,39 @@ export default function ImportView() {
     }
   };
 
-  const closeReview = () => { setReview(null); setDrawerMessage(''); };
-  const openReview = (lead) => { setDrawerMessage(''); setReview(lead); setEdit({ subject: lead.subject || '', body: lead.body || '' }); setAck(false); };
+  const designFields = (lead) => ({
+    subject: lead.subject || '',
+    opening: lead.design_json?.opening || '',
+    sentences: (lead.design_json?.sections || []).map((x) => x.sentence || ''),
+  });
+  const loadPreview = (leadId) => {
+    const seq = ++previewSeq.current;
+    setPreviewError('');
+    return axios.get(`${API_BASE}/api/import/leads/${leadId}/preview`)
+      .then((r) => { if (mountedRef.current && seq === previewSeq.current) setPreviewHtml(r.data.html || ''); })
+      .catch((err) => { if (mountedRef.current && seq === previewSeq.current) { setPreviewHtml(''); setPreviewError(errText(err)); } });
+  };
+  const closeReview = () => { previewSeq.current += 1; setReview(null); setDrawerMessage(''); setDesignEdit(null); setPreviewHtml(''); setPreviewError(''); };
+  const openReview = (lead) => {
+    setDrawerMessage(''); setReview(lead); setEdit({ subject: lead.subject || '', body: lead.body || '' }); setAck(false);
+    setPreviewHtml(''); setPreviewError('');
+    if (lead.is_designed) { setDesignEdit(designFields(lead)); loadPreview(lead.id); } else { setDesignEdit(null); }
+  };
 
   const saveEdit = async () => {
     try {
       const r = await axios.put(`${API_BASE}/api/import/leads/${review.id}`, edit);
       setReview(r.data.lead); replaceLead(r.data.lead); setAck(false); setDrawerMessage('');
+    } catch (err) { setDrawerMessage(errText(err)); }
+  };
+
+  const saveDesign = async () => {
+    try {
+      const sections = designEdit.sentences.map((sentence, index) => ({ index, sentence }));
+      const r = await axios.put(`${API_BASE}/api/import/leads/${review.id}/design`,
+        { subject: designEdit.subject, opening: designEdit.opening, sections });
+      setReview(r.data.lead); replaceLead(r.data.lead); setAck(false); setDrawerMessage('');
+      setDesignEdit(designFields(r.data.lead)); loadPreview(r.data.lead.id);
     } catch (err) { setDrawerMessage(errText(err)); }
   };
 
@@ -262,7 +335,9 @@ export default function ImportView() {
   // ready, drafted or approved leads: it errs on the safe side (may show for an
   // all-India batch) but never hides a real block. /api/send enforces the real rule.
   const usBlocked = !!status && !status.mailing_address_set && (summary ? summary.us_ready > 0 : hasWork);
-  const dirty = !!review && (edit.subject !== (review.subject || '') || edit.body !== (review.body || ''));
+  const designDirty = !!review?.is_designed && !!designEdit && JSON.stringify(designEdit) !== JSON.stringify(designFields(review));
+  const textDirty = !!review && !review.is_designed && (edit.subject !== (review.subject || '') || edit.body !== (review.body || ''));
+  const dirty = designDirty || textDirty;
   const facets = page.facets || {};
   const busy = (!!job && !job.finished) || starting;
   const approvedCount = facets.status?.approved || 0;
@@ -350,6 +425,10 @@ export default function ImportView() {
               <option value="">All states</option>
               {Object.entries(facets.state || {}).map(([k, n]) => <option key={k} value={k}>{k} ({n})</option>)}
             </select>
+            <select style={input} value={filters.audit_status} onChange={(e) => { setFilters({ ...filters, audit_status: e.target.value }); setOffset(0); }}>
+              <option value="">All audit states</option>
+              {Object.entries(facets.audit_status || {}).map(([k, n]) => <option key={k} value={k}>{AUDIT_LABELS[k] || k} ({n})</option>)}
+            </select>
             <input style={{ ...input, minWidth: 180 }} placeholder="Search name, company, email" value={filters.q}
               onChange={(e) => { setFilters({ ...filters, q: e.target.value }); setOffset(0); }} />
           </div>
@@ -365,6 +444,24 @@ export default function ImportView() {
               <Send size={14} /> Send up to {Math.min(approvedCount, status?.remaining ?? 0)} approved
             </button>
             {busy && <button style={btn('#f87171')} onClick={() => { stopRef.current = true; }}><X size={14} /> Stop</button>}
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ color: '#94a3b8', fontSize: 13 }}>Audit next</span>
+            <input type="number" min={1} max={200} style={{ ...input, width: 80 }} value={auditN} disabled={auditRunning || auditStarting}
+              onChange={(e) => setAuditN(e.target.value)} onBlur={() => setAuditN(String(clampN(auditN)))} />
+            <span style={{ color: '#94a3b8', fontSize: 13 }}>sites</span>
+            <button style={btn('#a78bfa', auditRunning || auditStarting)} disabled={auditRunning || auditStarting} onClick={startAudit}>
+              {auditStarting ? <Loader2 size={14} /> : <Sparkles size={14} />} Start audit
+            </button>
+            {auditRunning && <button style={btn('#f87171')} onClick={cancelAudit}><X size={14} /> Cancel audit</button>}
+            {auditProg && (auditRunning || auditProg.total > 0) && (
+              <span style={{ color: '#cbd5e1', fontSize: 13 }}>
+                {auditRunning ? 'Auditing' : 'Last audit'}: {(auditProg.done || 0) + (auditProg.no_flaws || 0) + (auditProg.failed || 0)} of {auditProg.total}
+                {` (${auditProg.done || 0} done, ${auditProg.no_flaws || 0} no flaws, ${auditProg.failed || 0} failed)`}
+                {auditRunning && auditProg.current ? `, now ${auditProg.current}` : ''}
+              </span>
+            )}
           </div>
 
           {job && (
@@ -387,7 +484,7 @@ export default function ImportView() {
                   <th style={{ padding: 8 }} />
                   <th style={{ padding: 8 }}>Name</th><th style={{ padding: 8 }}>Title</th>
                   <th style={{ padding: 8 }}>Company</th><th style={{ padding: 8 }}>Email</th>
-                  <th style={{ padding: 8 }}>Status</th><th style={{ padding: 8 }} />
+                  <th style={{ padding: 8 }}>Status</th><th style={{ padding: 8 }}>Audit</th><th style={{ padding: 8 }} />
                 </tr>
               </thead>
               <tbody>
@@ -406,6 +503,9 @@ export default function ImportView() {
                       {l.status}{l.skip_reason ? `: ${SKIP_LABELS[l.skip_reason] || l.skip_reason}` : ''}
                       {l.error && <div style={{ color: '#f87171', fontSize: 11 }}>{l.error}</div>}
                       {l.status === 'failed' && <div style={{ color: '#fbbf24', fontSize: 11 }}>{FAILED_NOTE}</div>}
+                    </td>
+                    <td style={{ padding: 8, whiteSpace: 'nowrap', color: AUDIT_COLOR[l.audit_status || 'none'] || '#cbd5e1' }}>
+                      <span title={l.audit_error || undefined}>{AUDIT_LABELS[l.audit_status || 'none'] || l.audit_status}</span>
                     </td>
                     <td style={{ padding: 8, whiteSpace: 'nowrap' }}>
                       {['drafted', 'approved', 'failed'].includes(l.status) && l.body && (
@@ -466,12 +566,35 @@ export default function ImportView() {
               <div style={{ ...card, color: '#94a3b8', fontSize: 12 }}>Evidence from their homepage: “{review.source_quote}”</div>
             )}
 
-            <input style={input} value={edit.subject} onChange={(e) => setEdit({ ...edit, subject: e.target.value })} />
-            <textarea style={{ ...input, minHeight: 280, fontFamily: 'inherit', lineHeight: 1.5 }} value={edit.body}
-              onChange={(e) => setEdit({ ...edit, body: e.target.value })} />
+            {review.is_designed && designEdit ? (
+              <>
+                {previewError && <div style={{ ...card, borderColor: '#f87171', color: '#fca5a5', fontSize: 12 }}>{previewError}</div>}
+                {previewHtml && (
+                  <iframe title="Email preview" sandbox="" srcDoc={previewHtml}
+                    style={{ width: '100%', height: 480, border: '1px solid rgba(255,255,255,0.15)', borderRadius: 8, background: '#fff' }} />
+                )}
+                <label style={{ color: '#94a3b8', fontSize: 12 }}>Subject</label>
+                <input style={input} value={designEdit.subject} onChange={(e) => setDesignEdit({ ...designEdit, subject: e.target.value })} />
+                <label style={{ color: '#94a3b8', fontSize: 12 }}>Opening</label>
+                <textarea style={{ ...input, minHeight: 80, fontFamily: 'inherit', lineHeight: 1.5 }} value={designEdit.opening}
+                  onChange={(e) => setDesignEdit({ ...designEdit, opening: e.target.value })} />
+                {designEdit.sentences.map((sentence, i) => (
+                  <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <label style={{ color: '#94a3b8', fontSize: 12 }}>{review.design_json?.sections?.[i]?.title || `Section ${i + 1}`}</label>
+                    <textarea style={{ ...input, minHeight: 60, fontFamily: 'inherit', lineHeight: 1.5 }} value={sentence}
+                      onChange={(e) => setDesignEdit({ ...designEdit, sentences: designEdit.sentences.map((x, j) => (j === i ? e.target.value : x)) })} />
+                  </div>
+                ))}
+              </>
+            ) : (
+              <>
+                <input style={input} value={edit.subject} onChange={(e) => setEdit({ ...edit, subject: e.target.value })} />
+                <textarea style={{ ...input, minHeight: 280, fontFamily: 'inherit', lineHeight: 1.5 }} value={edit.body}
+                  onChange={(e) => setEdit({ ...edit, body: e.target.value })} />
+              </>
+            )}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button style={btn('#38bdf8', edit.subject === review.subject && edit.body === review.body)}
-                disabled={edit.subject === review.subject && edit.body === review.body} onClick={saveEdit}>Save edit</button>
+              <button style={btn('#38bdf8', !dirty)} disabled={!dirty} onClick={review.is_designed ? saveDesign : saveEdit}>Save edit</button>
               {review.status === 'approved' ? (
                 <button style={btn('#f59e0b')} onClick={unapproveReview}>Un-approve</button>
               ) : (
