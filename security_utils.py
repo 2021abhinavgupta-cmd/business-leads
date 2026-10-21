@@ -111,6 +111,36 @@ def _browser_ipv4(host: str):
     return ipaddress.IPv4Address(value)
 
 
+def link_probe_verdict(url: str, *, resolve=None) -> str:
+    """
+    What the broken-link scan should do with *url*, whose HTTP client is not
+    behind the browser's route guard:
+      "probe"        resolves, and only to public addresses
+      "unresolvable" the name does not exist (NXDOMAIN): a dead link, to be
+                     reported without probing, since by request time the name
+                     could be made to resolve somewhere private
+      "skip"         localhost, a private IP literal or a name resolving to a
+                     private address; any other error also skips (fail closed)
+    """
+    try:
+        if not browser_url_allowed(url, navigation=False):
+            return "skip"
+        host = urlparse(url).hostname
+        try:
+            infos = (resolve or socket.getaddrinfo)(host, None)
+        except socket.gaierror:
+            return "unresolvable"
+        addrs = {info[4][0] for info in infos}
+        if not addrs:
+            return "unresolvable"
+        for addr in addrs:
+            if not _ip_is_public(ipaddress.ip_address(str(addr).split("%", 1)[0])):
+                return "skip"
+        return "probe"
+    except Exception:
+        return "skip"
+
+
 def browser_url_allowed(url: str, *, navigation: bool, check_public=None) -> bool:
     """
     May the audit browser load *url*? data:, blob: and about: never touch the

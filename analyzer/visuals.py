@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 from PIL import Image
 
 import config
-from security_utils import UnsafeNavigationError, browser_url_allowed
+from security_utils import UnsafeNavigationError, browser_url_allowed, link_probe_verdict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "data", "screenshots")
@@ -2183,9 +2183,21 @@ async def _check_broken_assets(page, context) -> tuple[list, int]:
 
         assets = [a for a in assets if not _is_bot_hostile(a["url"])]
         # context.request is not covered by the browser's route guard: never
-        # probe a link that points at this server's own network.
-        assets = [a for a in assets if await asyncio.to_thread(browser_url_allowed, a["url"], navigation=True)]
-        
+        # probe a link that points at this server's own network. A link whose
+        # domain does not exist is NOT skipped: it is a dead link, reported as
+        # unreachable without being probed (see link_probe_verdict).
+        verdicts = [await asyncio.to_thread(link_probe_verdict, a["url"]) for a in assets]
+        for asset, verdict in zip(assets, verdicts):
+            if verdict == "unresolvable":
+                broken.append({
+                    "type": asset["type"],
+                    "url": asset["url"],
+                    "text": asset["text"],
+                    "status": "unreachable",
+                })
+        unresolvable = sum(1 for v in verdicts if v == "unresolvable")
+        assets = [a for a, v in zip(assets, verdicts) if v == "probe"]
+
         # Check each asset with a HEAD request first (fast, no body download).
         # Some servers/WAFs specifically reject or rate-limit HEAD probes from
         # automated tools while GET works fine for real visitors — live-
@@ -2217,7 +2229,7 @@ async def _check_broken_assets(page, context) -> tuple[list, int]:
                     "status": status
                 })
         
-        checked = len(assets)
+        checked = len(assets) + unresolvable
         print(f"[Links] Checked {checked} assets, found {len(broken)} broken.")
 
     except Exception as e:
