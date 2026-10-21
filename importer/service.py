@@ -1,8 +1,10 @@
 """Orchestration for the CSV import queue: upload and the status transitions."""
+import base64
+import re
 from collections import Counter
 
 import config
-from importer import compose, csv_rules
+from importer import compose, csv_rules, drafting, email_html, email_images
 from storage import import_store
 
 
@@ -83,10 +85,16 @@ def unapprove(lead_id: int) -> dict:
     return import_store.get_lead(lead_id)
 
 
+EDITABLE_STATUSES = ("drafted", "approved", "failed")
+
+
 def save_edit(lead_id: int, subject: str, body: str) -> dict:
     lead = _load(lead_id)
-    if lead["status"] not in ("drafted", "approved", "failed") or not lead.get("body"):
+    if lead["status"] not in EDITABLE_STATUSES or not lead.get("body"):
         raise FlowError(409, "Only a drafted lead can be edited.")
+    if lead.get("html_body"):
+        # The HTML is what the recipient reads; a text only edit would leave it stale.
+        raise FlowError(409, "This is a designed email; edit it with the design editor.")
     # A newline in a Subject header would be header injection; collapse it.
     subject, body = " ".join(subject.split()), body.strip()
     if not subject or not body:
@@ -103,8 +111,71 @@ def save_edit(lead_id: int, subject: str, body: str) -> dict:
     if len(subject) > compose.MAX_SUBJECT_CHARS:
         warnings.append(compose.subject_length_warning(subject))
     saved = import_store.update_lead(
-        lead_id, only_if_status=("drafted", "approved", "failed"),
+        lead_id, only_if_status=EDITABLE_STATUSES,
         status="drafted", subject=subject, body=body, review_warnings=warnings,
+    )
+    if not saved:
+        raise FlowError(409, "The lead changed while it was being edited; nothing was saved.")
+    return import_store.get_lead(lead_id)
+
+
+_SHOTS_CHANGED = (
+    "The screenshots changed since this email was drafted (the site was audited again). "
+    "Draft it again before previewing, editing or sending."
+)
+
+
+def _require_designed(lead: dict) -> dict:
+    if not lead.get("html_body"):
+        raise FlowError(409, "This lead has no designed email.")
+    if not drafting.shots_match_design(lead):
+        raise FlowError(409, _SHOTS_CHANGED)
+    return lead
+
+
+PREVIEW_FOOTER = "Footer is added when the email is sent."
+
+
+def preview_html(lead_id: int) -> str:
+    """The designed email as the recipient will see it, for an iframe: each cid
+    image is the exact JPEG the sender will attach, and the footer marker is
+    replaced by a note (the sender writes the real footer)."""
+    lead = _require_designed(_load(lead_id))
+    try:
+        images = dict(email_images.prepare_all(lead["flaw_shots"]))
+    except FileNotFoundError:
+        raise FlowError(409, "A screenshot file is missing on disk; audit this lead again and redraft it.")
+    except Exception as e:
+        raise FlowError(409, f"A screenshot could not be prepared ({type(e).__name__}); audit this lead again.")
+
+    def data_uri(match):
+        data = images.get(match.group(1))
+        if data is None:
+            raise FlowError(409, _SHOTS_CHANGED)
+        return 'src="data:image/jpeg;base64,' + base64.b64encode(data).decode("ascii") + '"'
+
+    html = re.sub(r'src="cid:(flaw\d+)"', data_uri, lead["html_body"])
+    if "cid:" in html:
+        raise FlowError(409, _SHOTS_CHANGED)
+    return html.replace(email_html.FOOTER_MARKER, PREVIEW_FOOTER)
+
+
+
+def save_design_edit(lead_id: int, subject: str, opening: str, sections: list[dict]) -> dict:
+    """The designed counterpart of save_edit, with the same status rules."""
+    lead = _load(lead_id)
+    if lead["status"] not in EDITABLE_STATUSES or not lead.get("body"):
+        raise FlowError(409, "Only a drafted lead can be edited.")
+    _require_designed(lead)
+    try:
+        out = drafting.redesign(lead, subject, opening, sections, reply_to=config.REPLY_TO_EMAIL)
+    except drafting.DesignEditError as e:
+        raise FlowError(422, str(e))
+    # An edit invalidates any earlier approval and acknowledgement.
+    saved = import_store.update_lead(
+        lead_id, only_if_status=EDITABLE_STATUSES,
+        status="drafted", subject=out["subject"], body=out["body"], html_body=out["html_body"],
+        design_json=out["design"], review_warnings=out["review_warnings"],
     )
     if not saved:
         raise FlowError(409, "The lead changed while it was being edited; nothing was saved.")

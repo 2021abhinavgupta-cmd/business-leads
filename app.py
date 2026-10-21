@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import html as _html
 import os
 import random
@@ -2083,6 +2084,16 @@ async def _import_call(fn, *args):
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+def _lead_out(lead: dict | None) -> dict | None:
+    """A lead as the UI gets it: the designed HTML (tens of KB) is replaced by
+    is_designed; GET /api/import/leads/{id}/preview is the only way to read it."""
+    if lead is None:
+        return None
+    out = {k: v for k, v in lead.items() if k != "html_body"}
+    out["is_designed"] = bool(lead.get("html_body"))
+    return out
+
+
 @app.post("/api/import/upload")
 async def import_upload(
     req: ImportUploadIn,
@@ -2119,6 +2130,7 @@ async def import_batch_leads(
             batch_id, status=status, skip_reason=skip_reason, industry=industry,
             seniority=seniority, state=state, q=q, limit=limit, offset=offset,
         )
+        page["leads"] = [_lead_out(lead) for lead in page["leads"]]
         page["facets"] = import_store.facets(batch_id)
         return page
     return await asyncio.to_thread(_load)
@@ -2130,7 +2142,7 @@ async def import_restore(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(120, 60)),
 ):
-    return {"lead": await _import_call(import_service.restore, lead_id)}
+    return {"lead": _lead_out(await _import_call(import_service.restore, lead_id))}
 
 
 @app.post("/api/import/leads/{lead_id}/skip")
@@ -2139,7 +2151,7 @@ async def import_skip(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(120, 60)),
 ):
-    return {"lead": await _import_call(import_service.skip, lead_id)}
+    return {"lead": _lead_out(await _import_call(import_service.skip, lead_id))}
 
 
 @app.post("/api/import/leads/{lead_id}/approve")
@@ -2149,7 +2161,7 @@ async def import_approve(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(120, 60)),
 ):
-    return {"lead": await _import_call(import_service.approve, lead_id, req.acknowledge_warnings)}
+    return {"lead": _lead_out(await _import_call(import_service.approve, lead_id, req.acknowledge_warnings))}
 
 
 @app.post("/api/import/leads/{lead_id}/unapprove")
@@ -2158,7 +2170,7 @@ async def import_unapprove(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(120, 60)),
 ):
-    return {"lead": await _import_call(import_service.unapprove, lead_id)}
+    return {"lead": _lead_out(await _import_call(import_service.unapprove, lead_id))}
 
 
 IMPORT_DRAFT_TIMEOUT_SECONDS = 45
@@ -2187,24 +2199,36 @@ async def import_draft(
         await asyncio.to_thread(import_store.update_lead, lead_id, error=message)
         raise HTTPException(status_code=code, detail=message)
 
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                import_drafting.draft_lead, lead, auditor,
-                your_name=os.getenv("YOUR_NAME", "Kshitij Gupta"),
-            ),
-            timeout=IMPORT_DRAFT_TIMEOUT_SECONDS,
+    your_name = os.getenv("YOUR_NAME", "Kshitij Gupta")
+    # A finished audit gets the designed email (which itself falls back to text
+    # when the shots cannot be used); any other lead gets the text email.
+    if lead.get("audit_status") == "done":
+        call = functools.partial(
+            import_drafting.draft_designed, lead, auditor,
+            your_name=your_name, reply_to=config.REPLY_TO_EMAIL,
         )
+    else:
+        call = functools.partial(import_drafting.draft_lead, lead, auditor, your_name=your_name)
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(call), timeout=IMPORT_DRAFT_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         await _fail(504, "Drafting timed out. The lead was left as it was; try again.")
     except import_drafting.DraftError as e:
         await _fail(502, str(e))
 
+    design = result.get("design")
+    if result.get("html_body") and design:
+        # The shots this email pairs its sentences with; preview, edit and send
+        # refuse the email if a re-audit changes them.
+        design = {**design, "shot_paths": [s.get("path") for s in lead.get("flaw_shots") or []]}
+    else:
+        design = None
     saved = await asyncio.to_thread(
         import_store.update_lead, lead_id,
         only_if_status=("ready", "drafted", "failed"),
         status="drafted", subject=result["subject"], body=result["body"],
         review_warnings=result["review_warnings"], source_quote=result["source_quote"],
+        html_body=result.get("html_body") if design else None, design_json=design or {},
         drafted_at=import_store.now_sql(), error=None,
     )
     if result["ai_cost"]:
@@ -2217,7 +2241,7 @@ async def import_draft(
             print(f"[Import] Could not log draft cost: {e}")
     if not saved:
         raise HTTPException(status_code=409, detail="The lead changed while drafting; nothing was saved.")
-    return {"lead": await asyncio.to_thread(import_store.get_lead, lead_id)}
+    return {"lead": _lead_out(await asyncio.to_thread(import_store.get_lead, lead_id))}
 
 
 @app.put("/api/import/leads/{lead_id}")
@@ -2227,7 +2251,40 @@ async def import_edit(
     _auth: None = Depends(require_api_key),
     _rl: None = Depends(rate_limit(120, 60)),
 ):
-    return {"lead": await _import_call(import_service.save_edit, lead_id, req.subject, req.body)}
+    return {"lead": _lead_out(await _import_call(import_service.save_edit, lead_id, req.subject, req.body))}
+
+
+@app.get("/api/import/leads/{lead_id}/preview")
+async def import_preview(
+    lead_id: int,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    return {"html": await _import_call(import_service.preview_html, lead_id)}
+
+
+class ImportDesignSectionIn(BaseModel):
+    index: int
+    sentence: str = Field(max_length=600)
+
+
+class ImportDesignEditIn(BaseModel):
+    subject: str = Field(max_length=200)
+    opening: str = Field(max_length=1000)
+    sections: list[ImportDesignSectionIn] = Field(max_length=5)
+
+
+@app.put("/api/import/leads/{lead_id}/design")
+async def import_design_edit(
+    lead_id: int,
+    req: ImportDesignEditIn,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(120, 60)),
+):
+    sections = [s.model_dump() for s in req.sections]
+    return {"lead": _lead_out(await _import_call(
+        import_service.save_design_edit, lead_id, req.subject, req.opening, sections,
+    ))}
 
 
 @app.get("/api/import/status")

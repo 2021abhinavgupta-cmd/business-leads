@@ -10,6 +10,7 @@ ROUTE_FUNCS = [
     "import_upload", "import_batches", "import_batch_leads", "import_restore",
     "import_skip", "import_approve", "import_unapprove", "import_draft", "import_edit",
     "import_status", "import_audit_start", "import_audit_progress", "import_audit_cancel",
+    "import_preview", "import_design_edit",
 ]
 
 
@@ -211,3 +212,180 @@ def test_failing_startup_reset_is_logged_and_does_not_stop_the_server(monkeypatc
         assert c.get("/api/import/audit/progress").status_code == 200
     out = capsys.readouterr().out
     assert "Could not reset stale audit state" in out and "db locked" in out
+
+
+# --- designed drafts: list, preview, design edit (designed-flaw email, Task 7) ---
+
+import base64  # noqa: E402
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+from importer import email_html, email_images  # noqa: E402
+from import_test_support import seed_designed_lead  # noqa: E402
+
+def test_leads_list_replaces_html_body_with_is_designed(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    designed = seed_designed_lead(tmp_path)
+    batch_id = import_store.get_lead(designed)["batch_id"]
+    text_batch = import_store.create_batch("t.csv", [{**make_row(email="t@t.com"), "status": "ready"}])
+    leads = client.get(f"/api/import/batches/{batch_id}/leads").json()["leads"]
+    assert len(leads) == 1 and leads[0]["is_designed"] is True and "html_body" not in leads[0]
+    assert leads[0]["design_json"]["sections"] and leads[0]["subject"] and leads[0]["body"]
+    text = client.get(f"/api/import/batches/{text_batch}/leads").json()["leads"][0]
+    assert text["is_designed"] is False and "html_body" not in text
+    for key in ("id", "status", "subject", "body", "review_warnings", "source_quote", "email", "audit_status"):
+        assert key in text
+    # every lead returned to the drawer is the same public shape
+    r = client.post(f"/api/import/leads/{designed}/approve", json={"acknowledge_warnings": True})
+    assert r.status_code == 200 and "html_body" not in r.json()["lead"] and r.json()["lead"]["is_designed"]
+
+
+def test_preview_embeds_the_exact_prepared_image_bytes(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path, 3)
+    shots = import_store.get_lead(lead_id)["flaw_shots"]
+    r = client.get(f"/api/import/leads/{lead_id}/preview")
+    assert r.status_code == 200, r.text
+    html = r.json()["html"]
+    for cid, data in email_images.prepare_all(shots):
+        uri = "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+        assert f'src="{uri}"' in html, cid
+    assert "cid:" not in html and email_html.FOOTER_MARKER not in html
+    assert "Footer is added when the email is sent" in html
+    # the stored email is unchanged: the sender still needs its cid references
+    assert import_store.get_lead(lead_id)["html_body"].count("cid:flaw") == 3
+
+
+def test_preview_errors(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    assert client.get("/api/import/leads/999/preview").status_code == 404
+    text = seed_lead(status="drafted", subject="S", body="B")
+    assert client.get(f"/api/import/leads/{text}/preview").status_code == 409
+    lead_id = seed_designed_lead(tmp_path)
+    os.remove(import_store.get_lead(lead_id)["flaw_shots"][1]["path"])
+    r = client.get(f"/api/import/leads/{lead_id}/preview")
+    assert r.status_code == 409 and "screenshot" in r.json()["detail"].lower()
+
+
+def test_preview_refuses_when_the_screenshots_changed_since_drafting(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    shots = import_store.get_lead(lead_id)["flaw_shots"]
+    import_store.update_lead(lead_id, flaw_shots=list(reversed(shots)))  # a re-audit reordered them
+    r = client.get(f"/api/import/leads/{lead_id}/preview")
+    assert r.status_code == 409 and "draft" in r.json()["detail"].lower()
+
+
+def _edit_body(n=2, **over):
+    body = {
+        "subject": "Problems on the Acme site",
+        "opening": "A visitor sees these problems first.",
+        "sections": [{"index": i, "sentence": f"Edited sentence {'ABCDE'[i]} can cost visitors."} for i in range(n)],
+    }
+    body.update(over)
+    return body
+
+
+def test_design_edit_rerenders_and_rejects_html_in_sentences(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path, status="approved", review_warnings=["Fact check: old"])
+    before = import_store.get_lead(lead_id)
+
+    r = client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())
+    assert r.status_code == 200, r.text
+    out = r.json()["lead"]
+    assert out["status"] == "drafted" and out["is_designed"] and "html_body" not in out
+    stored = import_store.get_lead(lead_id)
+    assert stored["subject"] == "Problems on the Acme site"
+    assert "Edited sentence A can cost visitors." in stored["html_body"]
+    assert "Edited sentence B can cost visitors." in stored["body"]
+    assert "A visitor sees these problems first." in stored["html_body"]
+    assert stored["html_body"].count("cid:flaw") == 2
+    design = stored["design_json"]
+    assert design["opening"] == "A visitor sees these problems first."
+    assert [s["sentence"] for s in design["sections"]] == [
+        "Edited sentence A can cost visitors.", "Edited sentence B can cost visitors."]
+    # headline and titles are not editable and are kept
+    assert design["headline"] == before["design_json"]["headline"]
+    assert [s["title"] for s in design["sections"]] == [s["title"] for s in before["design_json"]["sections"]]
+    assert design["shot_paths"] == before["design_json"]["shot_paths"]
+    assert stored["review_warnings"] == []
+
+    for bad in (
+        _edit_body(sections=[{"index": 0, "sentence": "Bad <b>bold</b>."}, {"index": 1, "sentence": "Ok."}]),
+        _edit_body(opening="<script>x</script>"),
+        _edit_body(subject="A > B"),
+    ):
+        r = client.put(f"/api/import/leads/{lead_id}/design", json=bad)
+        assert r.status_code == 422, bad
+    assert import_store.get_lead(lead_id)["html_body"] == stored["html_body"]
+
+
+@pytest.mark.parametrize("bad", [
+    _edit_body(n=1),
+    _edit_body(n=3),
+    _edit_body(sections=[{"index": 1, "sentence": "One."}, {"index": 0, "sentence": "Two."}]),
+    _edit_body(sections=[{"index": 0, "sentence": "One."}, {"index": 0, "sentence": "Two."}]),
+    _edit_body(subject="  "),
+    _edit_body(opening=""),
+    _edit_body(sections=[{"index": 0, "sentence": " "}, {"index": 1, "sentence": "Two."}]),
+])
+def test_design_edit_rejects_wrong_sections_and_empty_values(monkeypatch, tmp_path, bad):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    before = import_store.get_lead(lead_id)
+    assert client.put(f"/api/import/leads/{lead_id}/design", json=bad).status_code == 422
+    after = import_store.get_lead(lead_id)
+    assert after["html_body"] == before["html_body"] and after["subject"] == before["subject"]
+
+
+def test_design_edit_cleans_dashes_and_warns_on_digits_links_and_subject(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    body = _edit_body(
+        subject="Problems—",
+        sections=[{"index": 0, "sentence": "A first-time visitor leaves after 40 seconds."},
+                  {"index": 1, "sentence": "See www.acme.com and ask MMGA."}],
+    )
+    r = client.put(f"/api/import/leads/{lead_id}/design", json=body)
+    assert r.status_code == 200, r.text
+    stored = import_store.get_lead(lead_id)
+    assert stored["subject"] == "Problems"
+    assert stored["design_json"]["sections"][0]["sentence"] == "A first time visitor leaves after 40 seconds."
+    warnings = " ".join(stored["review_warnings"]).lower()
+    assert "number" in warnings and "link" in warnings and "mmga" in warnings and "subject" in warnings
+    assert not any(w.startswith("Fact check") for w in stored["review_warnings"])  # a human wrote it
+
+
+def test_design_edit_requires_a_designed_lead(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    assert client.put("/api/import/leads/999/design", json=_edit_body()).status_code == 404
+    text = seed_lead(status="drafted", subject="S", body="B")
+    r = client.put(f"/api/import/leads/{text}/design", json=_edit_body())
+    assert r.status_code == 409
+    for status in ("sent", "skipped", "ready"):
+        lead_id = seed_designed_lead(tmp_path, status=status)
+        assert client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body()).status_code == 409, status
+    changed = seed_designed_lead(tmp_path)
+    shots = import_store.get_lead(changed)["flaw_shots"]
+    import_store.update_lead(changed, flaw_shots=shots[:1] + shots[:1])
+    assert client.put(f"/api/import/leads/{changed}/design", json=_edit_body()).status_code == 409
+
+
+def test_text_edit_of_a_designed_lead_is_refused(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    lead_id = seed_designed_lead(tmp_path)
+    before = import_store.get_lead(lead_id)
+    r = client.put(f"/api/import/leads/{lead_id}", json={"subject": "New", "body": "Hi Jane,\n\nNew"})
+    assert r.status_code == 409 and "design" in r.json()["detail"].lower()
+    assert import_store.get_lead(lead_id)["body"] == before["body"]
