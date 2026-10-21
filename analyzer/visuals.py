@@ -308,7 +308,8 @@ def _make_ssrf_route_handler(blocked: list, *, check_public=None):
     make (see security_utils.browser_url_allowed): navigations are resolved and
     must be public, subresources must not be localhost or a private IP literal.
     Navigation verdicts are cached per host for the context's lifetime. Each
-    blocked navigation URL is appended to *blocked*. Playwright does not call a
+    blocked main frame navigation URL is appended to *blocked* (a blocked
+    iframe is only aborted). Playwright does not call a
     route handler for redirect hops, so _assert_public_navigation checks those
     after every goto.
     """
@@ -333,8 +334,15 @@ def _make_ssrf_route_handler(blocked: list, *, check_public=None):
         if ok:
             await route.continue_()
             return
+        # Only a blocked MAIN frame navigation fails the audit; a private
+        # iframe or subresource is simply not loaded. Unknown frame: fail closed.
         if navigation:
-            blocked.append(url)
+            try:
+                main_frame = request.frame.parent_frame is None
+            except Exception:
+                main_frame = True
+            if main_frame:
+                blocked.append(url)
         await route.abort("blockedbyclient")
     return handler
 

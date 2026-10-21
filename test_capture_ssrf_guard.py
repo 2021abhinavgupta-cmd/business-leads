@@ -61,18 +61,24 @@ def test_local_schemes_never_touch_the_network_and_are_allowed(url):
 
 # ---- the route handler -----------------------------------------------------
 
+class _Frame:
+    def __init__(self, main=True):
+        self.parent_frame = None if main else object()
+
+
 class _Req:
-    def __init__(self, url, nav=True):
+    def __init__(self, url, nav=True, main=True):
         self.url, self._nav = url, nav
         self.resource_type = "document" if nav else "image"
+        self.frame = _Frame(main)
 
     def is_navigation_request(self):
         return self._nav
 
 
 class _Route:
-    def __init__(self, url, nav=True):
-        self.request = _Req(url, nav)
+    def __init__(self, url, nav=True, main=True):
+        self.request = _Req(url, nav, main)
         self.outcome = None
 
     async def abort(self, code=None):
@@ -90,6 +96,14 @@ async def test_route_guard_aborts_a_private_navigation_and_continues_a_public_on
     await handler(good)
     assert bad.outcome[0] == "abort" and good.outcome == ("continue", None)
     assert blocked == ["http://169.254.169.254/latest"]
+
+
+async def test_a_private_iframe_is_aborted_without_failing_the_audit():
+    blocked = []
+    handler = visuals._make_ssrf_route_handler(blocked, check_public=_public)
+    r = _Route("http://localhost:3000/", nav=True, main=False)
+    await handler(r)
+    assert r.outcome[0] == "abort" and blocked == []
 
 
 async def test_route_guard_aborts_a_private_subresource():
