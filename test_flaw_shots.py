@@ -111,3 +111,43 @@ def test_filenames_are_distinct_per_index_and_kind():
     }
     assert len(names) == 5
     assert all(n.endswith(".jpg") for n in names)
+
+
+def test_corrupt_screenshot_skips_only_that_shot(tmp_path):
+    bad = _page("Bad", _flaw("A", impact="critical"))
+    bad["screenshot_bytes"] = b"not an image"
+    good = _page("Good", _flaw("B", impact="minor"))
+    shots = _collect([bad, good], tmp_path)
+    assert [s["page"] for s in shots] == ["Good"]
+    assert not any("_flaw0_" in f for f in os.listdir(tmp_path))
+
+
+def test_failing_save_degrades_to_empty_list_without_partial_files(tmp_path, monkeypatch):
+    def boom(img, path):
+        raise OSError("disk full")
+    monkeypatch.setattr(visuals, "_save_jpeg", boom)
+    assert _collect([_page("Homepage", _flaw("A"))], tmp_path) == []
+    assert os.listdir(tmp_path) == []
+
+
+def test_safe_wrapper_returns_empty_list_when_collection_raises(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("x")
+    monkeypatch.setattr(visuals, "collect_flaw_shots", boom)
+    assert visuals._safe_collect_flaw_shots([], None, None, "Acme", "acme.com") == []
+
+
+def test_mobile_duplicate_of_desktop_tie_keeps_desktop(tmp_path):
+    shots = _collect(
+        [_page("Homepage", _flaw("X", impact="serious"))], tmp_path,
+        mobile_flaw=_flaw("X", impact="serious"), mobile_bytes=_png(),
+    )
+    assert [s["kind"] for s in shots] == ["desktop"]
+
+
+def test_mobile_duplicate_with_higher_impact_replaces_desktop(tmp_path):
+    shots = _collect(
+        [_page("Homepage", _flaw("X", impact="minor"))], tmp_path,
+        mobile_flaw=_flaw("X", impact="critical"), mobile_bytes=_png(),
+    )
+    assert [s["kind"] for s in shots] == ["mobile"]

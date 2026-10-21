@@ -288,7 +288,26 @@ def make_flaw_shot_filename(company_name: str, url: str, index: int, kind: str) 
 
 
 def _save_jpeg(image_bytes: bytes, path: str) -> None:
-    Image.open(BytesIO(image_bytes)).convert("RGB").save(path, format="JPEG", quality=85)
+    # Decode fully BEFORE touching the filesystem so a corrupt image never
+    # leaves a half-written file behind.
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    img.save(path, format="JPEG", quality=85)
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _safe_collect_flaw_shots(*args, **kwargs) -> list[dict]:
+    """collect_flaw_shots that can never fail the audit: any error -> []."""
+    try:
+        return collect_flaw_shots(*args, **kwargs)
+    except Exception as e:
+        print(f"[Visuals] Flaw shot collection failed (non-critical): {e}")
+        return []
 
 
 def collect_flaw_shots(
@@ -323,7 +342,18 @@ def collect_flaw_shots(
             "closeup": page.get("closeup_bytes"),
         })
 
-    # Dedupe across desktop pages: keep the most severe of identical descriptions.
+    if mobile_flaw and mobile_bytes:
+        # Appended last so that on an equal-impact tie the desktop entry wins.
+        candidates.append({
+            "kind": "mobile",
+            "page": "Mobile",
+            "flaw": mobile_flaw,
+            "shot": mobile_bytes,
+            "closeup": mobile_closeup_bytes,
+        })
+
+    # Dedupe across pages and mobile: keep the most severe of identical
+    # descriptions (strictly more severe replaces; ties keep the earlier one).
     best_by_desc: dict[str, dict] = {}
     for c in candidates:
         desc = c["flaw"].get("description", "")
@@ -333,15 +363,6 @@ def collect_flaw_shots(
             best_by_desc[desc] = c
     unique = list(best_by_desc.values())
 
-    if mobile_flaw and mobile_bytes:
-        unique.append({
-            "kind": "mobile",
-            "page": "Mobile",
-            "flaw": mobile_flaw,
-            "shot": mobile_bytes,
-            "closeup": mobile_closeup_bytes,
-        })
-
     unique.sort(key=lambda c: _SEVERITY_RANK.get(c["flaw"].get("impact"), 4))
     unique = unique[:max_shots]
 
@@ -349,13 +370,24 @@ def collect_flaw_shots(
     shots: list[dict] = []
     for index, c in enumerate(unique):
         path = os.path.join(out_dir, make_flaw_shot_filename(company_name, url, index, c["kind"]))
-        _save_jpeg(c["shot"], path)
         closeup_path = None
+        try:
+            _save_jpeg(c["shot"], path)
+        except Exception as e:
+            print(f"[Visuals] Skipping flaw shot {index} (save failed): {e}")
+            _remove_quietly(path)
+            continue
         if c["closeup"]:
-            closeup_path = os.path.join(
+            closeup_candidate = os.path.join(
                 out_dir, make_flaw_shot_filename(company_name, url, index, f"{c['kind']}_closeup")
             )
-            _save_jpeg(c["closeup"], closeup_path)
+            try:
+                _save_jpeg(c["closeup"], closeup_candidate)
+                closeup_path = closeup_candidate
+            except Exception as e:
+                # The closeup is optional; keep the main shot without it.
+                print(f"[Visuals] Flaw shot {index} closeup dropped (save failed): {e}")
+                _remove_quietly(closeup_candidate)
         shots.append({
             "path": path,
             "closeup_path": closeup_path,
@@ -1347,7 +1379,7 @@ async def _generate_audit_screenshot_once(
             )
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
-        flaw_shots = collect_flaw_shots(
+        flaw_shots = _safe_collect_flaw_shots(
             pages_checked,
             mobile_visual_flaw,
             mobile_screenshot_bytes,
