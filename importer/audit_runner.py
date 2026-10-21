@@ -47,9 +47,9 @@ def _reset_for_tests() -> None:
     _prior.clear()
 
 
-def _restore_prior(lead_id: int, **guard) -> None:
+def _restore_prior(lead_id: int) -> None:
     status, error = _prior.get(lead_id, ("none", None))
-    import_store.update_lead(lead_id, **guard, audit_status=status, audit_error=error)
+    import_store.update_lead(lead_id, audit_status=status, audit_error=error)
 
 
 def _check_url(url: str) -> None:
@@ -199,7 +199,10 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
             for lead_id in lead_ids:
                 lead = import_store.get_lead(lead_id)
                 if lead and lead.get("audit_status") in ("queued", "running"):
-                    _restore_prior(lead_id, only_if_status=AUDITABLE_STATUSES)
+                    # No status guard: a lead approved or sent while it was being
+                    # captured must not keep a stale 'running'. Only the audit
+                    # fields are written; the lead's own status is untouched.
+                    _restore_prior(lead_id)
     finally:
         _progress["current"] = None
         _running = False

@@ -331,7 +331,8 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
         shots = lead.get("flaw_shots") or []
         # A done audit whose files are all there but no longer carry their audit
         # hashes was overwritten or tampered with: refuse, never a silent text email.
-        if lead.get("audit_status") == "done" and shots and _shot_files_exist(shots)                 and not shots_intact(shots):
+        tampered = shots and _shot_files_exist(shots) and not shots_intact(shots)
+        if lead.get("audit_status") == "done" and tampered:
             raise ShotsChangedError(SHOTS_CHANGED_ON_DISK)
         return _as_text(lead, auditor, your_name, fetch)
     shots = lead["flaw_shots"]

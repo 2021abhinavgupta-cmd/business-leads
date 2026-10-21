@@ -24,7 +24,9 @@ def is_plain_hostname(domain: str) -> bool:
     if not isinstance(domain, str) or not domain or len(domain) > 253:
         return False
     labels = domain.split(".")
-    if len(labels) < 2 or not all(_LABEL.match(label) for label in labels):
+    # fullmatch, not match: "$" also matches before a trailing newline, so
+    # "a.com\n" used to pass.
+    if len(labels) < 2 or not all(_LABEL.fullmatch(label) for label in labels):
         return False
     if all(label.isdigit() for label in labels):  # dotted IPv4 literal
         return False

@@ -378,6 +378,7 @@ async def test_lead_sent_during_capture_keeps_its_fields_and_late_result_is_disc
     lead = import_store.get_lead(ids[0])
     assert lead["status"] == "sent"
     assert lead["flaw_shots"] == [] and lead["audited_at"] is None and not lead["audit_error"]
+    assert lead["audit_status"] == "none"  # never left at 'running'
     assert audit_runner.progress()["done"] == 0
 
 
@@ -462,6 +463,8 @@ async def test_a_designed_lead_that_left_the_auditable_statuses_keeps_its_email(
     lead = import_store.get_lead(lead_id)
     assert lead["status"] == "approved" and lead["html_body"] == before["html_body"]
     assert lead["flaw_shots"] == before["flaw_shots"] and lead["design_json"] == before["design_json"]
+    # the discarded re-audit gives back the audit it replaced, not a stuck 'running'
+    assert lead["audit_status"] == "done" and lead["audit_error"] == before["audit_error"]
 
 
 # --- re-audit (fix wave I1) ---
