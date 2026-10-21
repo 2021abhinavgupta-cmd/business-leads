@@ -463,3 +463,27 @@ def test_leads_listing_filters_by_audit_status(monkeypatch, tmp_path):
     import_store.update_lead(leads[0]["id"], audit_status="failed")
     body = client.get(f"/api/import/batches/{batch_id}/leads", params={"audit_status": "failed"}).json()
     assert [lead["id"] for lead in body["leads"]] == [leads[0]["id"]]
+
+
+def test_re_audit_by_id_accepts_failed_no_flaws_and_done_leads(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    calls = _spy_start(monkeypatch)
+    batch_id, ids = _batch_of(3)
+    for lead_id, prior in zip(ids, ("failed", "no_flaws", "done")):
+        import_store.update_lead(lead_id, audit_status=prior)
+    for lead_id in ids:
+        r = client.post(f"/api/import/batches/{batch_id}/audit", json={"lead_ids": [lead_id]})
+        assert r.json() == {"started": True, "queued": 1}
+    assert calls == [[i] for i in ids]
+
+
+def test_stale_audit_send_message_points_to_the_re_audit_button(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_module.config, "DRAFT_STALE_DAYS", 7)
+    lead_id = seed_designed_lead(tmp_path, status="approved")
+    import_store.update_lead(lead_id, audited_at="2020-01-01 00:00:00")
+    with pytest.raises(app_module.HTTPException) as exc:
+        app_module._check_designed_import(import_store.get_lead(lead_id))
+    assert exc.value.status_code == 409 and exc.value.detail["code"] == "audit_stale"
+    assert "Re-audit in its review drawer" in exc.value.detail["message"]

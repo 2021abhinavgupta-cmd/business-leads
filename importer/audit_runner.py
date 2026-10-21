@@ -32,12 +32,23 @@ _task: asyncio.Task | None = None
 _running = False
 _cancel = False
 _progress = {"total": 0, "done": 0, "no_flaws": 0, "failed": 0, "current": None}
+# Each queued lead's audit_status and audit_error from before this run. A lead
+# that ends the run without a saved result (cancelled before its turn, changed
+# while it waited or was captured) gets them back: a re-audit that never ran
+# must not wipe an earlier 'done', whose shots and designed email are untouched.
+_prior: dict[int, tuple[str, str | None]] = {}
 
 
 def _reset_for_tests() -> None:
     global _task, _running, _cancel
     _task, _running, _cancel = None, False, False
     _progress.update(total=0, done=0, no_flaws=0, failed=0, current=None)
+    _prior.clear()
+
+
+def _restore_prior(lead_id: int, **guard) -> None:
+    status, error = _prior.get(lead_id, ("none", None))
+    import_store.update_lead(lead_id, **guard, audit_status=status, audit_error=error)
 
 
 def _check_url(url: str) -> None:
@@ -141,7 +152,7 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
                 if not lead or lead.get("audit_status") != "queued":
                     continue
                 if lead.get("status") not in AUDITABLE_STATUSES:
-                    import_store.update_lead(lead_id, audit_status="none")
+                    _restore_prior(lead_id)
                     continue
                 _progress["current"] = lead.get("organization") or lead.get("domain")
                 if not import_store.update_lead(
@@ -172,8 +183,7 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
             for lead_id in lead_ids:
                 lead = import_store.get_lead(lead_id)
                 if lead and lead.get("audit_status") in ("queued", "running"):
-                    import_store.update_lead(
-                        lead_id, only_if_status=AUDITABLE_STATUSES, audit_status="none")
+                    _restore_prior(lead_id, only_if_status=AUDITABLE_STATUSES)
     finally:
         _progress["current"] = None
         _running = False
@@ -185,11 +195,13 @@ def start_audit(lead_ids: list[int], *, capture=generate_audit_screenshot, judge
     global _task, _running, _cancel
     if _running:
         return False
-    eligible = []
+    eligible, prior = [], {}
     for lead_id in lead_ids:
         lead = import_store.get_lead(lead_id)
         if lead and lead["status"] in AUDITABLE_STATUSES:
             eligible.append(lead_id)
+            was = lead.get("audit_status") or "none"
+            prior[lead_id] = ("none", None) if was in ("queued", "running") else (was, lead.get("audit_error"))
     if not eligible:
         return False
     loop = asyncio.get_running_loop()
@@ -201,11 +213,14 @@ def start_audit(lead_ids: list[int], *, capture=generate_audit_screenshot, judge
     except Exception:
         for lead_id in marked:
             try:
-                import_store.update_lead(lead_id, audit_status="none")
+                status, error = prior[lead_id]
+                import_store.update_lead(lead_id, audit_status=status, audit_error=error)
             except Exception:
                 pass
         raise
     _running, _cancel = True, False
+    _prior.clear()
+    _prior.update(prior)
     _progress.update(total=len(eligible), done=0, no_flaws=0, failed=0, current=None)
     _task = loop.create_task(_run(eligible, capture, judge or visuals._vision_confirms_visible_defect))
     return True

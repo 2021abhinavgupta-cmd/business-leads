@@ -450,3 +450,41 @@ async def test_a_designed_lead_that_left_the_auditable_statuses_keeps_its_email(
     lead = import_store.get_lead(lead_id)
     assert lead["status"] == "approved" and lead["html_body"] == before["html_body"]
     assert lead["flaw_shots"] == before["flaw_shots"] and lead["design_json"] == before["design_json"]
+
+
+# --- re-audit (fix wave I1) ---
+
+@pytest.mark.parametrize("prior", ["failed", "no_flaws", "done"])
+async def test_a_failed_no_flaws_or_done_lead_can_be_re_audited(tmp_path, prior):
+    ids = _make_leads(["ready"])
+    import_store.update_lead(ids[0], audit_status=prior, audit_error="old reason")
+    shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
+    assert audit_runner.start_audit(ids, capture=_capture_returning(shots), judge=_yes) is True
+    await _wait()
+    lead = import_store.get_lead(ids[0])
+    assert lead["audit_status"] == "done" and lead["audit_error"] is None
+    assert [s["path"] for s in lead["flaw_shots"]] == [s["path"] for s in shots]
+
+
+async def test_cancelling_a_re_audit_restores_each_unstarted_leads_previous_audit(tmp_path):
+    (first,) = _make_leads(["ready"])
+    designed = seed_designed_lead(tmp_path)
+    (failed,) = _make_leads(["drafted"])
+    import_store.update_lead(failed, audit_status="failed", audit_error="capture failed: Timeout")
+    before = import_store.get_lead(designed)
+
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
+        audit_runner.cancel()
+        return "p", "<html/>", {"flaw_shots": []}
+
+    audit_runner.start_audit([first, designed, failed], capture=cap, judge=_yes)
+    assert import_store.get_lead(designed)["audit_status"] == "queued"
+    await _wait()
+    after = import_store.get_lead(designed)
+    assert after["audit_status"] == "done" and after["audit_error"] == before["audit_error"]
+    for key in ("status", "flaw_shots", "html_body", "design_json", "subject", "body"):
+        assert after[key] == before[key], key
+    from importer import drafting
+    assert drafting.shots_match_design(after) is True
+    lead = import_store.get_lead(failed)
+    assert lead["audit_status"] == "failed" and lead["audit_error"] == "capture failed: Timeout"

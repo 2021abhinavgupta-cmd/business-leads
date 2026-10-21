@@ -1270,7 +1270,7 @@ def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
         raise HTTPException(status_code=409, detail={
             "message": (
                 "This email's audit is out of date or undated, so it cannot be sent. "
-                "Re-audit this lead and draft it again."
+                "Un-approve it, use Re-audit in its review drawer, then draft it again."
             ),
             "warnings": [f"{too_old} Re-audit to be sure."],
             "code": "audit_stale",

@@ -23,6 +23,9 @@ const clampN = (v) => {
   return Number.isFinite(n) && String(v).trim() !== '' ? Math.min(200, Math.max(1, n)) : 25;
 };
 const FAILED_NOTE = 'Check History before retrying: a timeout can mean the email was sent.';
+// The backend audits only ready or drafted leads (audit_runner.AUDITABLE_STATUSES).
+const AUDITABLE = ['ready', 'drafted'];
+const RE_AUDITABLE_AUDITS = ['failed', 'no_flaws', 'done'];
 
 const errText = (err) => {
   const d = err?.response?.data?.detail;
@@ -150,6 +153,26 @@ export default function ImportView() {
         await pollAudit(); loadLeads();
       }
     } catch (err) { if (mountedRef.current) setMessage(errText(err)); }
+    if (mountedRef.current) setAuditStarting(false);
+  };
+  // Re-audit one lead (a failed, no flaws, done or out of date audit). A designed
+  // email is cleared by the new result, so the lead has to be drafted again after.
+  const reAudit = async (lead) => {
+    if (auditRunning || auditStarting) return;
+    const inDrawer = review?.id === lead.id;
+    setAuditStarting(true); setMessage(''); setDrawerMessage('');
+    try {
+      const r = await axios.post(`${API_BASE}/api/import/batches/${lead.batch_id || batchId}/audit`, { lead_ids: [lead.id] });
+      if (mountedRef.current) {
+        if (!r.data.started) {
+          const note = 'Re-audit not started: another audit is running, or this lead is no longer ready or drafted.';
+          if (inDrawer) setDrawerMessage(note); else setMessage(note);
+        } else if (inDrawer) {
+          closeReview();
+        }
+        await pollAudit(); loadLeads();
+      }
+    } catch (err) { if (mountedRef.current) { if (inDrawer) setDrawerMessage(errText(err)); else setMessage(errText(err)); } }
     if (mountedRef.current) setAuditStarting(false);
   };
   const cancelAudit = async () => {
@@ -514,6 +537,10 @@ export default function ImportView() {
                       {['drafted', 'approved', 'failed'].includes(l.status) && l.body && (
                         <button style={btn('#a78bfa')} onClick={() => openReview(l)}>Review</button>
                       )}{' '}
+                      {l.status === 'ready' && RE_AUDITABLE_AUDITS.includes(l.audit_status) && (
+                        <button style={btn('#a78bfa', auditRunning || auditStarting)} disabled={auditRunning || auditStarting}
+                          onClick={() => reAudit(l)}><RotateCcw size={12} /> Re-audit</button>
+                      )}{' '}
                       {l.status === 'skipped' && RESTORABLE.includes(l.skip_reason) && (
                         <button style={btn('#10b981', busy)} disabled={busy} onClick={() => act(l, 'restore')}><RotateCcw size={12} /> Restore</button>
                       )}
@@ -545,7 +572,11 @@ export default function ImportView() {
               <h3 style={{ margin: 0 }}>{review.person_name} · {review.organization}</h3>
               <button style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }} onClick={() => closeReview()}><X size={18} /></button>
             </div>
-            <div style={{ color: '#94a3b8', fontSize: 12 }}>{review.person_title} · {review.email} · status {review.status}</div>
+            <div style={{ color: '#94a3b8', fontSize: 12 }}>
+              {review.person_title} · {review.email} · status {review.status} · audit {AUDIT_LABELS[review.audit_status || 'none'] || review.audit_status}
+              {review.audited_at ? ` (${String(review.audited_at).slice(0, 10)})` : ''}
+              {review.audit_error && <div style={{ color: '#fbbf24', marginTop: 2 }}>{review.audit_error}</div>}
+            </div>
             {drawerMessage && <div style={{ ...card, borderColor: '#f87171', color: '#fca5a5' }}>{drawerMessage}</div>}
             {review.status === 'failed' && (
               <div style={{ ...card, borderColor: '#f59e0b', color: '#fbbf24', fontSize: 12 }}>
@@ -606,8 +637,18 @@ export default function ImportView() {
                   <Check size={14} /> Approve
                 </button>
               )}
+              {AUDITABLE.includes(review.status) && (
+                <button style={btn('#a78bfa', auditRunning || auditStarting)} disabled={auditRunning || auditStarting}
+                  title="Take new screenshots of this lead's website. A designed email is cleared and must be drafted again."
+                  onClick={() => reAudit(review)}>
+                  {auditStarting ? <Loader2 size={14} /> : <RotateCcw size={14} />} Re-audit
+                </button>
+              )}
               {dirty && review.status !== 'approved' && <span style={{ color: '#fbbf24', fontSize: 12, alignSelf: 'center' }}>Save your edit before approving</span>}
             </div>
+            {review.status === 'approved' && review.is_designed && (
+              <div style={{ color: '#94a3b8', fontSize: 12 }}>To take new screenshots, Un-approve this lead, then use Re-audit.</div>
+            )}
           </div>
         </div>
       )}
