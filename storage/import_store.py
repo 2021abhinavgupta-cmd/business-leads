@@ -19,7 +19,10 @@ LEAD_FIELDS = (
 _UPDATABLE = frozenset({
     "status", "skip_reason", "subject", "body", "review_warnings",
     "source_quote", "drafted_at", "sent_at", "history_id", "error",
+    "audit_status", "audit_error", "audited_at", "flaw_shots", "html_body", "design_json",
 })
+
+_JSON_FIELDS = {"flaw_shots": list, "design_json": dict}
 
 
 def now_sql() -> str:
@@ -35,11 +38,12 @@ def _connect() -> sqlite3.Connection:
 
 def _decode(row: sqlite3.Row) -> dict:
     lead = dict(row)
-    raw = lead.get("review_warnings")
-    try:
-        lead["review_warnings"] = json.loads(raw) if raw else []
-    except (TypeError, ValueError):
-        lead["review_warnings"] = []
+    for name, kind in (("review_warnings", list), *_JSON_FIELDS.items()):
+        try:
+            value = json.loads(lead[name]) if lead.get(name) else kind()
+        except (TypeError, ValueError):
+            value = kind()
+        lead[name] = value if isinstance(value, kind) else kind()
     return lead
 
 
@@ -96,12 +100,13 @@ def get_lead(lead_id: int) -> dict | None:
 
 def list_leads(
     batch_id: int, *, status=None, skip_reason=None, industry=None, seniority=None,
-    state=None, q=None, limit: int = 50, offset: int = 0,
+    state=None, q=None, audit_status=None, limit: int = 50, offset: int = 0,
 ) -> dict:
     where, params = ["batch_id = ?"], [batch_id]
     for column, value in (
         ("status", status), ("skip_reason", skip_reason), ("industry", industry),
         ("person_seniority", seniority), ("state", state),
+        ("audit_status", audit_status),
     ):
         if value:
             where.append(f"{column} = ?")
@@ -133,6 +138,7 @@ def facets(batch_id: int) -> dict:
         for key, column in (
             ("status", "status"), ("skip_reason", "skip_reason"), ("industry", "industry"),
             ("seniority", "person_seniority"), ("state", "state"),
+            ("audit_status", "audit_status"),
         ):
             rows = conn.execute(
                 f"SELECT {column} AS v, COUNT(*) AS n FROM import_leads "
@@ -156,6 +162,9 @@ def update_lead(lead_id: int, *, only_if_status: tuple | None = None, **fields) 
         return False
     if "review_warnings" in fields and not isinstance(fields["review_warnings"], str):
         fields["review_warnings"] = json.dumps(fields["review_warnings"] or [])
+    for name, kind in _JSON_FIELDS.items():
+        if name in fields and not isinstance(fields[name], str):
+            fields[name] = json.dumps(fields[name] or kind())
     # Column names come from the whitelist above, never from the caller's input.
     sets = ", ".join(f"{name} = ?" for name in fields)
     conn = _connect()

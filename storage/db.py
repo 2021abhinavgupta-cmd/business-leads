@@ -306,6 +306,18 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_import_leads_email ON import_leads(email)")
         cursor.execute("PRAGMA user_version = 14")
 
+    # Schema v15 (2026-10-21): designed-flaw email fields on import leads.
+    # audit_status defaults to 'none' and SQLite fills existing rows with that
+    # default on ADD COLUMN, so a filter on 'none' matches every pre-v15 lead.
+    # flaw_shots and design_json hold JSON (list and object respectively).
+    if schema_version < 15:
+        for column in (
+            "audit_status TEXT DEFAULT 'none'", "audit_error TEXT", "audited_at DATETIME",
+            "flaw_shots TEXT", "html_body TEXT", "design_json TEXT",
+        ):
+            cursor.execute(f"ALTER TABLE import_leads ADD COLUMN {column}")
+        cursor.execute("PRAGMA user_version = 15")
+
     conn.commit()
     conn.close()
 
