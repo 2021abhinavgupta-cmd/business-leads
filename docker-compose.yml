@@ -1,0 +1,44 @@
+# Self-hosted deployment (replaces Railway). Usage: see SELF_HOSTING.md
+#
+#   docker compose up -d --build
+#
+# Secrets come from .env (never baked into the image). VITE_API_KEY is the one
+# exception: Vite inlines it into the JS bundle at BUILD time, so it is passed
+# as a build arg from the same .env.
+x-app: &app
+  build:
+    context: .
+    args:
+      VITE_API_KEY: ${API_KEY:-}
+  env_file: .env
+  restart: unless-stopped
+  volumes:
+    # database.sqlite + screenshots/ — the only state worth keeping.
+    - ./data:/app/data
+    # Local fallback when GOOGLE_CREDENTIALS_JSON is not set in .env.
+    - ./credentials.json:/app/credentials.json:ro
+  environment:
+    TZ: Asia/Kolkata
+
+services:
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"   # only the tunnel (and you) can reach it
+
+  # Same image, scheduler role: cron sends, follow-ups, reply checks.
+  # Run exactly ONE scheduler anywhere — if Railway's is still on, two will
+  # double-send follow-ups.
+  # OFF by default via a profile, so plain `docker compose up -d` (and the
+  # auto-update script) never starts automatic sending. Turn it on deliberately:
+  #   docker compose --profile scheduler up -d scheduler
+  scheduler:
+    <<: *app
+    profiles: ["scheduler"]
+    environment:
+      TZ: Asia/Kolkata
+      SERVICE_ROLE: scheduler
+
+  # Public HTTPS comes from Tailscale Funnel running on the Windows host
+  # (`tailscale funnel --bg 8000`), which forwards to 127.0.0.1:8000 above.
+  # No container needed, no domain, no router ports. See SELF_HOSTING.md.
