@@ -160,6 +160,10 @@ export default function ImportView() {
   const reAudit = async (lead) => {
     if (auditRunning || auditStarting) return;
     const inDrawer = review?.id === lead.id;
+    // Starting closes the drawer, and the new result clears the email anyway:
+    // never throw away unsaved edits without asking. (`dirty` is read at click
+    // time, from the render that drew the button.)
+    if (inDrawer && dirty && !window.confirm('You have unsaved edits to this email. Re-audit anyway and discard them?')) return;
     setAuditStarting(true); setMessage(''); setDrawerMessage('');
     try {
       const r = await axios.post(`${API_BASE}/api/import/batches/${lead.batch_id || batchId}/audit`, { lead_ids: [lead.id] });
