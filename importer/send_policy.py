@@ -7,6 +7,9 @@ the facts.
 from importer import csv_rules
 
 IMPORT_VARIANT = "import-automation"
+IMPORT_DESIGNED_VARIANT = "import-designed"
+# Every variant this feature sends under; the bounce pause counts them together.
+IMPORT_VARIANTS = (IMPORT_VARIANT, IMPORT_DESIGNED_VARIANT)
 
 
 class SendBlocked(Exception):
@@ -18,10 +21,11 @@ class SendBlocked(Exception):
 
 
 def bounce_status(variant_rows: list[dict], min_sent: int, pause_pct: float) -> dict:
-    """Bounce rate across this feature's own sends (variant import-automation)."""
-    bucket = next((r for r in variant_rows if r.get("variant") == IMPORT_VARIANT), None)
-    sent = bucket["sent"] if bucket else 0
-    bounced = bucket["bounced"] if bucket else 0
+    """Bounce rate across this feature's own sends (every variant in IMPORT_VARIANTS,
+    so text and designed emails share one pause)."""
+    buckets = [r for r in variant_rows if r.get("variant") in IMPORT_VARIANTS]
+    sent = sum(r.get("sent") or 0 for r in buckets)
+    bounced = sum(r.get("bounced") or 0 for r in buckets)
     rate = (bounced / sent * 100) if sent else 0.0
     return {
         "sent": sent, "bounced": bounced, "rate_pct": round(rate, 2),

@@ -3,11 +3,12 @@ import functools
 import html as _html
 import os
 import random
+import re
 import time
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import quote as _urlquote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Query
@@ -46,6 +47,7 @@ from storage.sheets import SheetsStorage
 from storage import db
 from storage import import_store
 from importer import drafting as import_drafting
+from importer import email_images as import_email_images
 from importer import service as import_service
 from importer import send_policy as import_send_policy
 from importer import audit_runner
@@ -1221,8 +1223,103 @@ async def recover_audit(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def _prepare_import_send(req: SendRequest) -> dict:
-    """Load an import lead and apply every import gate; raise HTTPException on a block."""
+_CID_REFERENCE = re.compile(r"cid:([^\s\"'<>)]+)", re.IGNORECASE)
+
+
+def _is_designed_import(lead: dict) -> bool:
+    """A lead with a stored html_body is a designed email; every other lead is plain text."""
+    return bool(lead.get("html_body"))
+
+
+def _designed_audit_too_old(audited_at) -> str | None:
+    """Why the audit behind a designed email is too old (or undated) to send, else None.
+    audited_at is import_store.now_sql(): UTC, "%Y-%m-%d %H:%M:%S"."""
+    if config.DRAFT_STALE_DAYS <= 0:
+        return None
+    try:
+        audited = datetime.fromisoformat(str(audited_at).strip()) if audited_at else None
+    except ValueError:
+        audited = None
+    if audited is None:
+        return "This lead has no readable audit time, so its screenshots may be out of date."
+    if audited.tzinfo is not None:
+        audited = audited.astimezone(timezone.utc).replace(tzinfo=None)
+    age = datetime.now(timezone.utc).replace(tzinfo=None) - audited
+    if age >= timedelta(days=config.DRAFT_STALE_DAYS):
+        return (
+            f"The screenshots in this email were taken {age.days} days ago; the site may have "
+            "changed since, so they may no longer show what the email says."
+        )
+    return None
+
+
+def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
+    """
+    The guards for a designed import email, run BEFORE the lead is claimed, so
+    a blocked lead stays 'approved' and nothing is sent. Returns the prepared
+    images, (cid, jpeg bytes): the exact bytes that were fingerprinted here and
+    the only ones the sender may attach (they are never prepared a second
+    time). Raises HTTPException(409) on any problem.
+    """
+    # A stale audit is NOT an acknowledgeable warning for a designed email:
+    # the email is built around the screenshots, so an old audit means the
+    # pictures (and the sentences under them) may show a site that no longer
+    # exists. acknowledge_warnings never bypasses this; only a re-audit does.
+    too_old = _designed_audit_too_old(lead.get("audited_at"))
+    if too_old:
+        raise HTTPException(status_code=409, detail={
+            "message": (
+                "This email's audit is out of date or undated, so it cannot be sent. "
+                "Re-audit this lead and draft it again."
+            ),
+            "warnings": [f"{too_old} Re-audit to be sure."],
+            "code": "audit_stale",
+        })
+
+    shots = lead.get("flaw_shots") or []
+    if not import_drafting.MIN_DESIGN_SHOTS <= len(shots) <= import_drafting.MAX_DESIGN_SHOTS:
+        raise HTTPException(status_code=409, detail=(
+            f"A designed email needs {import_drafting.MIN_DESIGN_SHOTS} to "
+            f"{import_drafting.MAX_DESIGN_SHOTS} screenshots and this one has {len(shots)}; "
+            "audit this lead again and redraft it."
+        ))
+    try:
+        prepared = import_email_images.prepare_all(shots)
+    except Exception as e:   # missing file, unreadable image, malformed shot entry
+        print(f"[Send] Import lead {lead.get('id')}: screenshot could not be prepared: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=409,
+            detail="A screenshot file is missing on disk; audit this lead again and redraft it.",
+        )
+    if len(prepared) != len(shots):
+        raise HTTPException(status_code=409, detail=(
+            "The screenshots could not all be prepared; audit this lead again and redraft it."
+        ))
+
+    stored = (lead.get("design_json") or {}).get("shot_fingerprints")
+    if not stored or import_drafting.shot_fingerprints(shots, prepared) != stored:
+        raise HTTPException(
+            status_code=409,
+            detail="The screenshots changed after this email was drafted; draft it again.",
+        )
+
+    referenced = set(_CID_REFERENCE.findall(lead["html_body"]))
+    attached = {cid for cid, _ in prepared}
+    if referenced != attached:
+        raise HTTPException(status_code=409, detail=(
+            "The email's images do not match its screenshots "
+            f"(referenced: {', '.join(sorted(referenced)) or 'none'}; "
+            f"attached: {', '.join(sorted(attached)) or 'none'}); draft it again."
+        ))
+    return prepared
+
+
+async def _prepare_import_send(req: SendRequest) -> tuple[dict, list[tuple[str, bytes]] | None]:
+    """
+    Load an import lead and apply every import gate; raise HTTPException on a
+    block. Returns (lead, images): images is the prepared (cid, bytes) list
+    for a designed lead and None for a text lead.
+    """
     lead = await asyncio.to_thread(import_store.get_lead, req.import_lead_id)
     blockers = await asyncio.to_thread(import_store.load_blockers)
     rows = await asyncio.to_thread(db.get_variant_performance)
@@ -1240,7 +1337,11 @@ async def _prepare_import_send(req: SendRequest) -> dict:
                 import_store.update_lead, lead["id"], status="skipped", skip_reason=e.skip_reason
             )
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    return lead
+    images = None
+    if _is_designed_import(lead):
+        # After the shared import gates, before the claim in send_email.
+        images = await asyncio.to_thread(_check_designed_import, lead)
+    return lead, images
 
 
 @app.post("/api/send")
@@ -1277,10 +1378,11 @@ async def send_email(
         # screenshot for the same company would otherwise be attached to, or
         # deleted by, an import send.
         import_lead = None
+        designed_images = None   # IMPORT: the prepared (cid, bytes) for a designed lead
         send_subject, send_body = req.subject, req.body
         send_to, log_company, log_website = req.email, req.company, req.website
         if req.import_lead_id is not None:
-            import_lead = await _prepare_import_send(req)
+            import_lead, designed_images = await _prepare_import_send(req)
             send_subject, send_body = import_lead["subject"], import_lead["body"]
             # Identity also comes from the stored lead, never the client.
             send_to = import_lead["email"]
@@ -1354,6 +1456,15 @@ async def send_email(
                     else:
                         closeup_image_path = candidate_path
 
+        # IMPORT: a lead with a stored html_body goes out ONLY as the designed
+        # email, with the images prepared and checked in _prepare_import_send;
+        # every other send uses send_email exactly as before.
+        designed = import_lead is not None and _is_designed_import(import_lead)
+        if designed and not designed_images:
+            raise HTTPException(
+                status_code=500,
+                detail="The designed email's images were not prepared; nothing was sent.",
+            )
         if import_lead is not None:
             # IMPORT: claim the lead atomically BEFORE sending, so two concurrent
             # requests (or a retry after a later DB error) can never both send.
@@ -1368,11 +1479,19 @@ async def send_email(
                     detail="This lead is already being sent or changed; nothing was sent.",
                 )
         try:
-            message_id = await asyncio.to_thread(
-                ses.send_email, send_to, send_subject, send_body,   # IMPORT: stored copy for imports
-                image_path=image_path, mobile_image_path=mobile_image_path,
-                closeup_image_path=closeup_image_path,
-            )
+            if designed:
+                # The stored plain text is the text/plain part; the images are
+                # the exact bytes that were fingerprinted before the claim.
+                message_id = await asyncio.to_thread(
+                    ses.send_designed_email, send_to, send_subject, send_body,
+                    import_lead["html_body"], designed_images,
+                )
+            else:
+                message_id = await asyncio.to_thread(
+                    ses.send_email, send_to, send_subject, send_body,   # IMPORT: stored copy for imports
+                    image_path=image_path, mobile_image_path=mobile_image_path,
+                    closeup_image_path=closeup_image_path,
+                )
         except Exception as send_error:
             if import_lead is not None:   # IMPORT: keep the real transport error on the lead
                 try:
@@ -1428,7 +1547,10 @@ async def send_email(
                 else config.EMAIL_VARIANT
             )
             if import_lead is not None:   # IMPORT: its own bucket in get_variant_performance()
-                variant_sent = import_send_policy.IMPORT_VARIANT
+                variant_sent = (
+                    import_send_policy.IMPORT_DESIGNED_VARIANT if designed
+                    else import_send_policy.IMPORT_VARIANT
+                )
             await asyncio.to_thread(
                 db.log_email, log_company, log_website, send_to, config.FROM_EMAIL,
                 send_subject, send_body, message_id=message_id,   # IMPORT
