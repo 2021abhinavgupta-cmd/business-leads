@@ -1,0 +1,186 @@
+"""
+Background audit stage for imported leads.
+
+Audits each eligible lead's website (one at a time, the capture holds a single global
+Playwright slot) and verifies every flaw screenshot before it can be used in an email:
+a shot is kept only if a narrow yes/no vision check confirms the boxed image shows the
+defect. Anything doubtful is dropped (fail closed). A lead with fewer than MIN_SHOTS
+verified shots is 'no_flaws' and gets no designed email.
+"""
+import asyncio
+import re
+from pathlib import Path
+
+from analyzer import visuals
+from analyzer.visuals import generate_audit_screenshot
+from security_utils import UnsafeURLError, validate_public_url
+from storage import import_store
+
+MIN_SHOTS = 2
+AUDITABLE_STATUSES = ("ready", "drafted")
+_CHROME_SELECTOR = re.compile(
+    r"(?i)cookie|consent|gdpr|onetrust|cookiebot|chat|intercom|drift|tawk|crisp|livechat|zendesk|hubspot-messages"
+)
+_ERROR_MAX = 300
+
+_task: asyncio.Task | None = None
+_running = False
+_cancel = False
+_progress = {"total": 0, "done": 0, "no_flaws": 0, "failed": 0, "current": None}
+
+
+def _reset_for_tests() -> None:
+    global _task, _running, _cancel
+    _task, _running, _cancel = None, False, False
+    _progress.update(total=0, done=0, no_flaws=0, failed=0, current=None)
+
+
+def _check_url(url: str) -> None:
+    validate_public_url(url)
+
+
+def _read(path) -> bytes | None:
+    try:
+        data = Path(path).read_bytes() if path else b""
+    except (OSError, ValueError):
+        return None
+    return data or None
+
+
+def _err(text: str) -> str:
+    return text[:_ERROR_MAX]
+
+
+async def verify_shots(shots: list[dict], judge) -> tuple[list[dict], list[dict]]:
+    """Return (kept, dropped). Never trusts a shot on error."""
+    kept, dropped = [], []
+    for shot in shots:
+        desc = str(shot.get("description") or "")
+
+        def drop(reason: str) -> None:
+            dropped.append({"description": desc, "reason": reason})
+
+        if _CHROME_SELECTOR.search(str(shot.get("selector") or "")):
+            drop("flagged element is a consent banner or chat widget")
+            continue
+        image = await asyncio.to_thread(_read, shot.get("closeup_path"))
+        if image is None:
+            image = await asyncio.to_thread(_read, shot.get("path"))
+        if image is None:
+            drop("no readable image file")
+            continue
+        try:
+            confirmed = await asyncio.to_thread(judge, image, desc)
+        except Exception as exc:  # fail closed
+            drop(f"vision check errored ({type(exc).__name__})")
+            continue
+        if confirmed is True:
+            kept.append(shot)
+        else:
+            drop("vision check did not confirm the defect is visible in the image")
+    return kept, dropped
+
+
+async def audit_one(lead: dict, capture=generate_audit_screenshot,
+                    judge=visuals._vision_confirms_visible_defect) -> dict:
+    def result(status, shots=None, dropped=None, error=None):
+        return {"audit_status": status, "flaw_shots": shots or [],
+                "dropped_shots": dropped or [], "audit_error": error}
+
+    domain = (lead.get("domain") or "").strip()
+    if not domain:
+        return result("failed", error="lead has no domain")
+    url = f"https://{domain}"
+    try:
+        await asyncio.to_thread(_check_url, url)
+    except UnsafeURLError:
+        return result("failed", error="domain is not a public website")
+    except Exception as exc:
+        return result("failed", error=_err(f"url check failed ({type(exc).__name__})"))
+    try:
+        _path, html, extra = await capture(url, lead.get("organization") or "")
+    except Exception as exc:
+        return result("failed", error=_err(f"capture failed: {type(exc).__name__}: {exc}"))
+    if html is None or extra is None:
+        return result("failed", error="capture failed: the website could not be loaded")
+    kept, dropped = await verify_shots(list(extra.get("flaw_shots") or []), judge)
+    if len(kept) < MIN_SHOTS:
+        return result("no_flaws", kept, dropped)
+    return result("done", kept, dropped)
+
+
+async def _run(lead_ids: list[int], capture, judge) -> None:
+    global _running
+    try:
+        for lead_id in lead_ids:
+            if _cancel:
+                break
+            lead = import_store.get_lead(lead_id)
+            if not lead or lead.get("audit_status") != "queued":
+                continue
+            _progress["current"] = lead.get("organization") or lead.get("domain")
+            import_store.update_lead(lead_id, audit_status="running")
+            try:
+                res = await audit_one(lead, capture=capture, judge=judge)
+            except Exception as exc:
+                res = {"audit_status": "failed", "flaw_shots": [],
+                       "audit_error": _err(f"audit crashed: {type(exc).__name__}")}
+            status = res["audit_status"]
+            import_store.update_lead(
+                lead_id, audit_status=status, flaw_shots=res["flaw_shots"],
+                audit_error=res["audit_error"], audited_at=import_store.now_sql(),
+            )
+            _progress["done" if status == "done" else status] += 1
+    finally:
+        for lead_id in lead_ids:
+            lead = import_store.get_lead(lead_id)
+            if lead and lead.get("audit_status") in ("queued", "running"):
+                import_store.update_lead(lead_id, audit_status="none")
+        _progress["current"] = None
+        _running = False
+
+
+def start_audit(lead_ids: list[int], *, capture=generate_audit_screenshot, judge=None) -> bool:
+    """Queue eligible leads (status ready/drafted) and start the single background run.
+    Returns False if a run is already active or nothing is eligible. Call from the event loop."""
+    global _task, _running, _cancel
+    if _running:
+        return False
+    eligible = []
+    for lead_id in lead_ids:
+        lead = import_store.get_lead(lead_id)
+        if lead and lead["status"] in AUDITABLE_STATUSES:
+            eligible.append(lead_id)
+    if not eligible:
+        return False
+    loop = asyncio.get_running_loop()
+    _running, _cancel = True, False
+    _progress.update(total=len(eligible), done=0, no_flaws=0, failed=0, current=None)
+    for lead_id in eligible:
+        import_store.update_lead(lead_id, audit_status="queued", audit_error=None)
+    _task = loop.create_task(_run(eligible, capture, judge or visuals._vision_confirms_visible_defect))
+    return True
+
+
+def progress() -> dict:
+    return {"running": _running, **_progress}
+
+
+def cancel() -> None:
+    """Stop before the next lead; unstarted leads go back to 'none'."""
+    global _cancel
+    if _running:
+        _cancel = True
+
+
+def reset_stale_running() -> int:
+    """Leads left at 'running' (or 'queued') by a crashed process go back to 'none'."""
+    conn = import_store._connect()
+    try:
+        n = conn.execute(
+            "UPDATE import_leads SET audit_status = 'none' WHERE audit_status IN ('running', 'queued')"
+        ).rowcount
+        conn.commit()
+        return n
+    finally:
+        conn.close()
