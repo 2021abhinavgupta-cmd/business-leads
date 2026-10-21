@@ -104,9 +104,20 @@ class BaseSender:
         copy rule applies to everything we author); the address and URL are
         whatever the operator configured.
         """
+        lines = self._footer_lines(to_email)
+        if not lines:
+            return body
+        return f"{body.rstrip()}\n\n" + "\n".join(lines)
+
+    def _footer_lines(self, to_email: str) -> list[str]:
+        """
+        The footer as separate lines: the postal address, then the opt-out
+        line. Empty when MAILING_ADDRESS is unset. Shared by the plain text
+        footer above and the designed HTML email's footer band.
+        """
         address = (config.MAILING_ADDRESS or "").strip()
         if not address:
-            return body
+            return []
         if config.APP_BASE_URL:
             optout = (
                 "To stop receiving emails from us, unsubscribe here: "
@@ -114,7 +125,7 @@ class BaseSender:
             )
         else:
             optout = "To stop receiving emails from us, reply with the word unsubscribe."
-        return f"{body.rstrip()}\n\n{address}\n{optout}"
+        return [address, optout]
 
     def _unsubscribe_headers(self, to_email: str) -> dict:
         """
@@ -615,6 +626,76 @@ class BaseSender:
 
         return msg
 
+    _FOOTER_MARKER = "<!--FOOTER-->"
+
+    def _footer_html(self, lines: list[str]) -> str:
+        """Footer lines as small muted escaped divs; http(s) URLs also linked."""
+        style = "font-size:12px;line-height:1.5;color:#6b7280;"
+        divs = []
+        for line in lines:
+            text = html_escape(line)
+            url_at = line.find("http")
+            if url_at != -1 and line[url_at:].startswith(("http://", "https://")):
+                url = line[url_at:].strip()
+                text = (
+                    html_escape(line[:url_at])
+                    + f'<a href="{html_escape(url)}" style="color:#6b7280;">{html_escape(url)}</a>'
+                )
+            divs.append(f'<div style="{style}">{text}</div>')
+        return "".join(divs)
+
+    def _build_designed_message(
+        self, to_email: str, subject: str, text_body: str, html_body: str,
+        images: list[tuple[str, bytes]], message_id: str,
+    ) -> MIMEMultipart:
+        """
+        Build the designed first-touch email: mixed > related > alternative
+        (text/plain first, text/html second) followed by each image inline
+        under its Content-ID. No tracking pixel. The compliance footer goes
+        in both parts; it can never be silently skipped in the HTML.
+        """
+        if "\r" in to_email or "\n" in to_email:
+            raise ValueError("to_email must not contain CR or LF")
+        subject = " ".join((subject or "").split())
+
+        lines = self._footer_lines(to_email)
+        footer_html = self._footer_html(lines) if lines else ""
+        if self._FOOTER_MARKER in html_body:
+            html = html_body.replace(self._FOOTER_MARKER, footer_html)
+        elif footer_html:
+            at = html_body.lower().rfind("</body>")
+            html = (
+                html_body + footer_html if at == -1
+                else html_body[:at] + footer_html + html_body[at:]
+            )
+        else:
+            html = html_body
+
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = subject
+        msg["From"] = self.from_email
+        if self.reply_to:
+            msg["Reply-To"] = self.reply_to
+        msg["To"] = to_email
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = message_id
+        for header, value in self._unsubscribe_headers(to_email).items():
+            msg[header] = value
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(self._with_footer(text_body, to_email), "plain", "utf-8"))
+        alt.attach(MIMEText(html, "html", "utf-8"))
+
+        related = MIMEMultipart("related")
+        related.attach(alt)
+        for cid, data in images:
+            img = MIMEImage(data, _subtype="jpeg")
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline", filename=f"{cid}.jpg")
+            related.attach(img)
+        msg.attach(related)
+        return msg
+
     def _build_followup_message(
         self, to_email: str, subject: str, body: str, in_reply_to: str = ""
     ) -> MIMEMultipart:
@@ -676,13 +757,24 @@ class BaseSender:
             print(f"Skipping {to_email}: on the unsubscribe/suppression list")
             return False
 
-        for attempt in range(self._RETRIES + 1):
-            message_id = make_msgid(domain=self._msgid_domain())
-            msg = self._build_initial_message(
+        return self._send_with_retry(
+            to_email,
+            lambda message_id: self._build_initial_message(
                 to_email, subject, body, message_id,
                 image_path=image_path, mobile_image_path=mobile_image_path,
                 closeup_image_path=closeup_image_path,
-            )
+            ),
+        )
+
+    def _send_with_retry(self, to_email: str, build):
+        """
+        Shared first-touch send loop: build (fresh Message-ID per attempt),
+        hand to the transport, retry a TransientSendError, re-raise anything
+        else with the server's real error. Returns the Message-ID.
+        """
+        for attempt in range(self._RETRIES + 1):
+            message_id = make_msgid(domain=self._msgid_domain())
+            msg = build(message_id)
             try:
                 self._transport_send(msg, to_email)
                 return message_id
@@ -695,6 +787,24 @@ class BaseSender:
             except Exception as e:
                 print(f"[{self.provider_name}] Error sending email: {e}")
                 raise
+
+    def send_designed_email(
+        self, to_email: str, subject: str, text_body: str, html_body: str,
+        images: list[tuple[str, bytes]],
+    ):
+        """
+        Send the designed HTML first-touch email. Same suppression check,
+        retry and error behavior as send_email; returns the Message-ID, or
+        False for a suppressed recipient.
+        """
+        if db.is_suppressed(to_email):
+            print(f"Skipping {to_email}: on the unsubscribe/suppression list")
+            return False
+        return self._send_with_retry(
+            to_email,
+            lambda message_id: self._build_designed_message(
+                to_email, subject, text_body, html_body, images, message_id),
+        )
 
     def send_followup(
         self, to_email: str, original_subject: str, body: str, in_reply_to: str = ""
