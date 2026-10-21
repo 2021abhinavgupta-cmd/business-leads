@@ -23,11 +23,14 @@ class DesignEditError(ValueError):
     """A design edit the user must correct (the route answers 422)."""
 
 
-# Every hyphen or dash, Unicode ones included: hyphen minus, U+2010 to U+2015,
-# minus, soft hyphen, Armenian hyphen, double oblique hyphen, hyphen bullet,
-# wave dash, the two and three em dashes, and the small and fullwidth forms.
-# The one pattern for the homepage text and for the designed copy.
-_ANY_DASH = re.compile("[\\-‐-―−­֊⸗⁃〜⸺⸻﹘﹣－]")
+# Every visible hyphen or dash, Unicode ones included: hyphen minus, U+2010 to
+# U+2015, minus, Armenian hyphen, double oblique hyphen, hyphen bullet, wave
+# dash, the two and three em dashes, and the small and fullwidth forms. Each
+# becomes a space. The soft hyphen (U+00AD) is an invisible hyphenation hint
+# inside a word, so it is deleted instead ("Bank­ing" is "Banking").
+# _dashless is the one helper for the homepage text and the designed copy.
+_ANY_DASH = re.compile("[\\-‐-―−֊⸗⁃〜⸺⸻﹘﹣－]")
+_SOFT_HYPHEN = "­"
 
 
 def _dashless(text: str | None) -> str | None:
@@ -35,7 +38,7 @@ def _dashless(text: str | None) -> str | None:
     # "17 branch"; give it, and the quote check, the same dashless text.
     if not text:
         return text
-    return " ".join(_ANY_DASH.sub(" ", text).split())
+    return " ".join(_ANY_DASH.sub(" ", text.replace(_SOFT_HYPHEN, "")).split())
 
 
 def _best_attempt(generate, check):
@@ -162,11 +165,14 @@ def _clean_copy(copy: dict) -> dict:
 
 def _without_organization(text: str, organization: str | None) -> str:
     """text with the lead's own company name (as the cleaner writes it) blanked
-    out, so a name like Overstock.com, Cash App or 3M is not a rule break."""
+    out, so a name like Overstock.com, Cash App or 3M is not a rule break.
+    Only the name used as a name: never inside a larger token or a link
+    (acme.com, evil.acme.com, info@Overstock.com, Overstock.com/offer, 3M.40);
+    a sentence period after it ("We looked at Zillow.") is still a name."""
     name = _clean(organization)
     if not name:
         return text
-    return re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", " ", text, flags=re.IGNORECASE)
+    return re.sub(rf"(?<![\w.@/]){re.escape(name)}(?![\w@/]|\.\w)", " ", text, flags=re.IGNORECASE)
 
 
 def copy_issues(copy: dict, flaw_count: int, organization: str | None = None) -> list[str]:

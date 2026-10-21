@@ -807,10 +807,48 @@ def test_designed_draft_does_not_rewrite_for_the_companys_own_name(tmp_path):
     assert auditor.feedbacks == [None] and _fact_checks(out) == []
 
 
-def test_soft_hyphen_and_minus_are_dashes_for_copy_and_homepage():
-    copy = drafting._clean_copy(flaw_copy(opening="A first\u00adtime visitor waits \u2212 then leaves."))
+def test_minus_and_every_visible_dash_become_spaces_for_copy_and_homepage():
+    copy = drafting._clean_copy(flaw_copy(opening="A first-time visitor waits \u2212 then leaves."))
     assert copy["opening"] == "A first time visitor waits then leaves."
-    for ch in "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u00ad\u058a\u2e17\u2043\u301c\ufe58\ufe63\uff0d":
+    for ch in "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u058a\u2e17\u2043\u301c\ufe58\ufe63\uff0d":
         assert drafting._dashless(f"a{ch}b") == "a b", hex(ord(ch))
         assert drafting._clean(f"a{ch}b") == "a b", hex(ord(ch))
-    assert drafting._dashless("17\u00adbranch") == "17 branch"
+    assert drafting._dashless("17\u201014") == "17 14"
+    assert drafting._dashless("17-branch") == "17 branch"
+
+
+def test_a_soft_hyphen_is_deleted_not_turned_into_a_space():
+    assert drafting._dashless("Bank\u00ading") == "Banking"
+    assert drafting._clean("Bank\u00ading") == "Banking"
+    copy = drafting._clean_copy(flaw_copy(opening="Your on\u00adline bank\u00ading page is slow."))
+    assert copy["opening"] == "Your online banking page is slow."
+    # the homepage quote check sees the same joined word
+    assert drafting._dashless("We serve 17\u00adbranch-wide") == "We serve 17branch wide"
+
+
+def _issues_for(organization, sentence):
+    copy = drafting._clean_copy(flaw_copy(opening=sentence))
+    return " ".join(drafting.copy_issues(copy, 2, organization)).lower()
+
+
+@pytest.mark.parametrize("organization, sentence, rule", [
+    ("Acme", "Visit acme.com today.", "link"),
+    ("Acme", "Look at evil.acme.com today.", "link"),
+    ("Overstock.com", "Write to info@Overstock.com today.", "link"),
+    ("Overstock.com", "See Overstock.com/offer today.", "link"),
+    ("3M", "3M 40 times.", "40"),
+    ("3M", "Read 3M.40 again.", "number"),
+])
+def test_the_company_name_inside_a_link_or_larger_token_is_still_flagged(organization, sentence, rule):
+    assert rule in _issues_for(organization, sentence)
+
+
+@pytest.mark.parametrize("organization, sentence", [
+    ("Overstock.com", "Overstock.com is a retailer."),
+    ("Overstock.com", "We looked at Overstock.com."),
+    ("Zillow", "We looked at Zillow."),
+    ("Cash App", "We looked at Cash App, then left."),
+    ("3M", "We looked at 3M."),
+])
+def test_the_company_name_used_as_a_name_is_still_exempt(organization, sentence):
+    assert _issues_for(organization, sentence) == ""
