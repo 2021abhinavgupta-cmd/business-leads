@@ -1,6 +1,6 @@
 # Designed flaw emails for the Import page: design
 
-Status: Proposed, waiting for approval. Written 2026-10-21.
+Status: Implemented on branch feat/designed-flaw-email (plan tasks 1 to 11 docs, 2026-10-21). Trial gate pending, needs the user: accuracy check of the first 10 audited leads, then the 10 lead seed inbox trial (time, cost, Gmail/Outlook rendering), then the 50 to 100 lead pilot. The Import page UI hand walk-through (plan Task 10 step 3) is also unverified.
 
 ## Intent and why
 
