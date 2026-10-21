@@ -65,6 +65,15 @@ class BaseSender:
         """
         return config.REPLY_TO_EMAIL or self.from_email
 
+    @staticmethod
+    def _envelope_recipients(to_email: str) -> list[str]:
+        """The real recipient, plus the configured BCC copy as an envelope-only
+        address (no header carries it, so the lead never sees it)."""
+        bcc = config.BCC_EMAIL
+        if bcc and bcc.lower() != (to_email or "").lower():
+            return [to_email, bcc]
+        return [to_email]
+
     # --- transport hook -------------------------------------------------
 
     def _transport_send(self, msg: MIMEMultipart, to_email: str) -> None:

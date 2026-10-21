@@ -30,7 +30,7 @@ class SESSender(BaseSender):
         try:
             self.client.send_raw_email(
                 Source=self.from_email,
-                Destinations=[to_email],
+                Destinations=self._envelope_recipients(to_email),
                 RawMessage={"Data": msg.as_string()},
             )
         except ClientError as e:
