@@ -2264,12 +2264,14 @@ async def import_audit_start(
     _rl: None = Depends(rate_limit(12, 60)),
 ):
     # The audit stage runs for hours and costs money (vision calls), so selection is
-    # always capped at 200 leads per request. Explicit ids from another batch are
-    # silently dropped; `queued` reports how many were actually handed over.
+    # always capped at 200 leads per request. Explicit ids from another batch, or not in
+    # an auditable status, are silently dropped; `queued` reports how many were actually handed over.
     if not await asyncio.to_thread(import_store.batch_exists, batch_id):
         raise HTTPException(status_code=404, detail="Import batch not found")
     if req.lead_ids is not None:
-        lead_ids = await asyncio.to_thread(import_store.lead_ids_in_batch, batch_id, req.lead_ids)
+        lead_ids = await asyncio.to_thread(import_store.lead_ids_in_batch, batch_id, req.lead_ids,
+            audit_runner.AUDITABLE_STATUSES,
+        )
     else:
         lead_ids = await asyncio.to_thread(
             import_store.next_leads_to_audit, batch_id, req.limit or IMPORT_AUDIT_DEFAULT_LIMIT

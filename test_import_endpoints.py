@@ -178,15 +178,36 @@ def test_audit_progress_and_cancel_shapes(monkeypatch, tmp_path):
     assert r.status_code == 200 and r.json() == shape and cancelled == [1]
 
 
-def test_startup_resets_stale_audit_state_and_survives_failure(monkeypatch):
+def test_audit_explicit_ids_are_limited_to_auditable_statuses(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+    calls = _spy_start(monkeypatch)
+    batch_id, ids = _batch_of(5)
+    for lead_id, status in zip(ids[1:4], ("skipped", "approved", "sent")):
+        import_store.update_lead(lead_id, status=status)
+    import_store.update_lead(ids[4], status="drafted")
+    r = client.post(f"/api/import/batches/{batch_id}/audit", json={"lead_ids": ids})
+    assert calls == [[ids[0], ids[4]]]
+    assert r.json() == {"started": True, "queued": 2}
+
+
+def test_normal_startup_resets_stale_audit_state_exactly_once(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
     calls = []
     monkeypatch.setattr(app_module.audit_runner, "reset_stale_running", lambda: calls.append(1) or 3)
     with TestClient(app_module.app):
         pass
     assert calls == [1]
 
+
+def test_failing_startup_reset_is_logged_and_does_not_stop_the_server(monkeypatch, tmp_path, capsys):
+    use_temp_db(monkeypatch, tmp_path)
+    client = client_with_key(monkeypatch)
+
     def boom():
         raise RuntimeError("db locked")
     monkeypatch.setattr(app_module.audit_runner, "reset_stale_running", boom)
-    with TestClient(app_module.app) as c:   # must not raise
-        assert c.get("/api/import/audit/progress").status_code in (200, 401)
+    with TestClient(app_module.app, headers=client.headers) as c:
+        assert c.get("/api/import/audit/progress").status_code == 200
+    out = capsys.readouterr().out
+    assert "Could not reset stale audit state" in out and "db locked" in out

@@ -153,20 +153,20 @@ def next_leads_to_audit(batch_id: int, limit: int) -> list[int]:
         conn.close()
 
 
-def lead_ids_in_batch(batch_id: int, lead_ids: list[int]) -> list[int]:
-    """The given ids that belong to the batch, de-duplicated, in the order given."""
+def lead_ids_in_batch(batch_id: int, lead_ids: list[int], statuses: tuple | None = None) -> list[int]:
+    """The given ids that belong to the batch (and, if given, have one of `statuses`),
+    de-duplicated, in the order given."""
     wanted = list(dict.fromkeys(lead_ids))
     if not wanted:
         return []
     conn = _connect()
     try:
         marks = ", ".join("?" * len(wanted))
-        found = {
-            r["id"] for r in conn.execute(
-                f"SELECT id FROM import_leads WHERE batch_id = ? AND id IN ({marks})",
-                (batch_id, *wanted),
-            )
-        }
+        sql, params = f"SELECT id FROM import_leads WHERE batch_id = ? AND id IN ({marks})", [batch_id, *wanted]
+        if statuses:
+            sql += f" AND status IN ({', '.join('?' * len(statuses))})"
+            params.extend(statuses)
+        found = {r["id"] for r in conn.execute(sql, params)}
         return [i for i in wanted if i in found]
     finally:
         conn.close()

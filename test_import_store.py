@@ -216,3 +216,13 @@ def test_batch_exists_and_lead_ids_in_batch(monkeypatch, tmp_path):
     assert import_store.batch_exists(batch_id) and not import_store.batch_exists(999)
     assert import_store.lead_ids_in_batch(batch_id, [theirs, mine, mine, 999]) == [mine]
     assert import_store.lead_ids_in_batch(batch_id, []) == []
+
+
+def test_lead_ids_in_batch_filters_by_status(monkeypatch, tmp_path):
+    use_temp_db(monkeypatch, tmp_path)
+    batch_id = import_store.create_batch("f.csv", [_ready(email=f"{n}@a.com", domain="a.com") for n in "abc"])
+    ids = [l["id"] for l in import_store.list_leads(batch_id)["leads"]]
+    import_store.update_lead(ids[0], status="sent")
+    import_store.update_lead(ids[1], status="drafted")
+    got = import_store.lead_ids_in_batch(batch_id, [ids[2], ids[0], ids[1], ids[2]], ("ready", "drafted"))
+    assert got == [ids[2], ids[1]]
