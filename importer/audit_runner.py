@@ -36,7 +36,7 @@ _progress = {"total": 0, "done": 0, "no_flaws": 0, "failed": 0, "current": None}
 # Each queued lead's audit_status and audit_error from before this run. A lead
 # that ends the run without a saved result (cancelled before its turn, changed
 # while it waited or was captured) gets them back: a re-audit that never ran
-# must not wipe an earlier 'done', whose shots and designed email are untouched.
+# must not wipe an earlier 'done' whose shots are still intact (_restore_prior).
 _prior: dict[int, tuple[str, str | None]] = {}
 
 
@@ -47,8 +47,22 @@ def _reset_for_tests() -> None:
     _prior.clear()
 
 
+_STALE_SHOTS = ("the previous audit's screenshots changed while a re-audit was discarded "
+                "(cancelled or the lead changed); re-audit this lead")
+
+
 def _restore_prior(lead_id: int) -> None:
+    """Give a lead whose run ended without a saved result its earlier audit back.
+    A capture writes to the lead's own shot file names, so a discarded re-audit
+    may already have overwritten the old shots: 'done' comes back only while
+    every stored shot still has the hash it was verified with. Otherwise the
+    lead fails closed and asks for a re-audit."""
     status, error = _prior.get(lead_id, ("none", None))
+    if status == "done":
+        from importer import drafting
+        lead = import_store.get_lead(lead_id) or {}
+        if not drafting.shots_intact(lead.get("flaw_shots") or []):
+            status, error = "failed", _STALE_SHOTS
     import_store.update_lead(lead_id, audit_status=status, audit_error=error)
 
 
@@ -250,7 +264,9 @@ def progress() -> dict:
 
 
 def cancel() -> None:
-    """Stop before the next lead; unstarted leads go back to 'none'."""
+    """Stop before the next lead. Each lead that did not get a saved result goes
+    back to the audit status and error it had before this run (a previous
+    'done' only while its shots are intact, see _restore_prior)."""
     global _cancel
     if _running:
         _cancel = True

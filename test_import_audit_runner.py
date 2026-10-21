@@ -526,3 +526,62 @@ async def test_a_shot_whose_box_vanishes_at_email_size_is_dropped(tmp_path):
     assert [s["description"] for s in kept] == ["defect 1"]
     assert [d["description"] for d in dropped] == ["defect 2", "defect 3"]
     assert all("box" in d["reason"] for d in dropped)
+
+
+# --- a discarded re-audit restores 'done' only over intact shots (fix wave 2 item 4) ---
+
+def _overwrite_shot_files(lead_id):
+    """What a real re-audit capture does: the same per-lead file names, new pixels."""
+    for s in import_store.get_lead(lead_id)["flaw_shots"]:
+        with open(s["path"], "ab") as fh:
+            fh.write(b"recaptured")
+
+
+async def test_a_discarded_re_audit_that_overwrote_the_shots_fails_closed(tmp_path):
+    lead_id = seed_designed_lead(tmp_path)
+
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
+        _overwrite_shot_files(lead_id)
+        import_store.update_lead(lead_id, status="approved")  # result will be discarded
+        return "p", "<html/>", {"flaw_shots": []}
+
+    audit_runner.start_audit([lead_id], capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert lead["status"] == "approved"
+    assert lead["audit_status"] == "failed"
+    assert "re-audit" in lead["audit_error"]
+
+
+async def test_a_cancelled_re_audit_over_changed_shots_fails_closed(tmp_path):
+    (first,) = _make_leads(["ready"])
+    designed = seed_designed_lead(tmp_path)
+
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
+        _overwrite_shot_files(designed)  # e.g. a Dashboard or other process touched them
+        audit_runner.cancel()
+        return "p", "<html/>", {"flaw_shots": []}
+
+    audit_runner.start_audit([first, designed], capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(designed)
+    assert lead["audit_status"] == "failed" and "re-audit" in lead["audit_error"]
+
+
+async def test_a_discarded_re_audit_over_intact_shots_restores_done(tmp_path):
+    lead_id = seed_designed_lead(tmp_path)
+    before = import_store.get_lead(lead_id)
+
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
+        import_store.update_lead(lead_id, status="approved")
+        return "p", "<html/>", {"flaw_shots": []}
+
+    audit_runner.start_audit([lead_id], capture=cap, judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(lead_id)
+    assert lead["audit_status"] == "done" and lead["audit_error"] == before["audit_error"]
+
+
+def test_the_cancel_docstring_describes_what_cancel_does():
+    doc = audit_runner.cancel.__doc__
+    assert "'none'" not in doc and "previous" in doc
