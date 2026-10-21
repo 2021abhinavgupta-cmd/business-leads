@@ -18,7 +18,10 @@ const STATUS_COLOR = {
 };
 const AUDIT_LABELS = { none: 'none', queued: 'queued', running: 'running', done: 'done', no_flaws: 'no flaws', failed: 'failed' };
 const AUDIT_COLOR = { none: '#64748b', queued: '#94a3b8', running: '#38bdf8', done: '#10b981', no_flaws: '#a78bfa', failed: '#f87171' };
-const clampN = (v) => Math.min(200, Math.max(1, Math.floor(Number(v)) || 25));
+const clampN = (v) => {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && String(v).trim() !== '' ? Math.min(200, Math.max(1, n)) : 25;
+};
 const FAILED_NOTE = 'Check History before retrying: a timeout can mean the email was sent.';
 
 const errText = (err) => {
