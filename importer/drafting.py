@@ -284,6 +284,29 @@ def shots_intact(shots: list[dict]) -> bool:
         return False
 
 
+def read_intact(shots: list[dict]) -> list[bytes] | None:
+    """Each shot file's bytes, read once, when every one still has the sha256
+    the audit verified; None otherwise (fail closed). Prepare from these bytes
+    (email_images.prepare_all(shots, sources)) so the bytes checked are the
+    bytes fingerprinted and sent. Never raises."""
+    try:
+        if not shots:
+            return None
+        out = []
+        for s in shots:
+            want = s.get("sha256")
+            if not isinstance(want, str) or not s.get("path"):
+                return None
+            with open(s["path"], "rb") as f:
+                data = f.read()
+            if hashlib.sha256(data).hexdigest() != want:
+                return None
+            out.append(data)
+        return out
+    except Exception:
+        return None
+
+
 def _shot_files_exist(shots: list[dict]) -> bool:
     return all(isinstance(s, dict) and s.get("path") and os.path.isfile(s["path"]) for s in shots)
 
@@ -298,7 +321,8 @@ def shots_match_design(lead: dict) -> bool:
         shots = lead.get("flaw_shots") or []
         if not stored or not isinstance(stored, list) or len(stored) != len(shots):
             return False
-        return shots_intact(shots) and shot_fingerprints(shots) == stored
+        raw = read_intact(shots)
+        return raw is not None and shot_fingerprints(shots, email_images.prepare_all(shots, raw)) == stored
     except Exception:
         return False
 
@@ -336,10 +360,15 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
             raise ShotsChangedError(SHOTS_CHANGED_ON_DISK)
         return _as_text(lead, auditor, your_name, fetch)
     shots = lead["flaw_shots"]
+    # Read once: the bytes hash checked here are the bytes prepared and
+    # fingerprinted, so a file swapped after the check cannot be drafted.
+    raw = read_intact(shots)
+    if raw is None:
+        raise ShotsChangedError(SHOTS_CHANGED_ON_DISK)
     try:
         # The exact images the sender will attach; a file that cannot be
         # prepared means no designed email, found before any copy is paid for.
-        fingerprints = shot_fingerprints(shots, email_images.prepare_all(shots))
+        fingerprints = shot_fingerprints(shots, email_images.prepare_all(shots, raw))
     except Exception as e:
         return _as_text(lead, auditor, your_name, fetch,
                         reason=f"a screenshot could not be prepared ({type(e).__name__}).")

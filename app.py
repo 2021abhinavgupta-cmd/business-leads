@@ -1291,10 +1291,13 @@ def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
     # Every file must still hold the bytes the audit verified: a file overwritten
     # before the draft would otherwise be fingerprinted (and sent) as if it were
     # the verified shot.
-    if not import_drafting.shots_intact(shots):
+    # Read each file once: the bytes hash checked are the bytes prepared,
+    # fingerprinted and attached, so a swap after the check cannot be sent.
+    raw = import_drafting.read_intact(shots)
+    if raw is None:
         raise HTTPException(status_code=409, detail=import_drafting.SHOTS_CHANGED_ON_DISK)
     try:
-        prepared = import_email_images.prepare_all(shots)
+        prepared = import_email_images.prepare_all(shots, raw)
     except import_email_images.BoxNotVisibleError as e:
         print(f"[Send] Import lead {lead.get('id')}: {e}")
         raise HTTPException(status_code=409, detail=(

@@ -88,7 +88,17 @@ def prepare(path: str, *, width: int = 600, max_bytes: int = 90_000, require_box
     MIN_BOX_PIXELS magenta box pixels."""
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(path)
-    with Image.open(path) as src:
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    return prepare_bytes(raw, name=path, width=width, max_bytes=max_bytes, require_box=require_box)
+
+
+def prepare_bytes(raw: bytes, *, name: str = "", width: int = 600, max_bytes: int = 90_000,
+                  require_box: bool = True) -> bytes:
+    """prepare() for image bytes already read (and hash checked) by the caller,
+    so the bytes checked are the bytes sent. *name* only labels messages."""
+    path = name or "image"
+    with Image.open(io.BytesIO(raw)) as src:
         img = _flatten(src)
 
     data = _encode(_scaled(img, width), max_bytes)
@@ -111,6 +121,13 @@ def prepare(path: str, *, width: int = 600, max_bytes: int = 90_000, require_box
     return data
 
 
-def prepare_all(shots: list[dict]) -> list[tuple[str, bytes]]:
-    """(cid, jpeg bytes) for each shot's main image, in order. Never the closeup."""
-    return [(f"flaw{n}", prepare(shot["path"])) for n, shot in enumerate(shots, 1)]
+def prepare_all(shots: list[dict], sources: list[bytes] | None = None) -> list[tuple[str, bytes]]:
+    """(cid, jpeg bytes) for each shot's main image, in order. Never the closeup.
+    With *sources* (each shot's file bytes, as drafting.read_intact returned
+    them) the files are not read again."""
+    if sources is None:
+        return [(f"flaw{n}", prepare(shot["path"])) for n, shot in enumerate(shots, 1)]
+    if len(sources) != len(shots):
+        raise ValueError("one source per shot is required")
+    return [(f"flaw{n}", prepare_bytes(raw, name=str(shot.get("path") or "")))
+            for n, (shot, raw) in enumerate(zip(shots, sources), 1)]

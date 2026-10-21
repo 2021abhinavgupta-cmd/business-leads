@@ -521,8 +521,8 @@ def test_designed_send_passes_exactly_the_prepared_bytes(designed_env, tmp_path,
     real = email_images.prepare_all
     prepared_lists = []
 
-    def spy(shots):
-        out = real(shots)
+    def spy(shots, sources=None):
+        out = real(shots, sources)
         prepared_lists.append(out)
         return out
 
@@ -606,7 +606,7 @@ def test_a_box_that_is_not_visible_blocks_with_its_own_message(designed_env, tmp
     client, sender = designed_env
     lead_id = _designed(tmp_path)
 
-    def invisible(shots):
+    def invisible(shots, sources=None):
         raise email_images.BoxNotVisibleError("box too small")
     monkeypatch.setattr(app_module.import_email_images, "prepare_all", invisible)
     r = _post(client, lead_id)
