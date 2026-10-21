@@ -72,7 +72,7 @@ class GmailSender(BaseSender):
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
                 server.starttls()
                 server.login(self.user, self.password)
-                server.send_message(msg, from_addr=self.from_email, to_addrs=[to_email])
+                server.send_message(msg, from_addr=self.from_email, to_addrs=self._envelope_recipients(to_email))
 
         except smtplib.SMTPAuthenticationError as e:
             # Retrying a bad credential just delays the same failure.

@@ -34,6 +34,10 @@ FROM_EMAIL = os.getenv("FROM_EMAIL")
 # ordinary; pointing it at a different domain is not, and would look like a
 # phishing pattern.
 REPLY_TO_EMAIL = os.getenv("REPLY_TO_EMAIL") or FROM_EMAIL
+# Secret copy of every outgoing email, so it lands in a mailbox you can open
+# (SES never writes to a Sent folder). Added as an envelope recipient only, never
+# as a header, so the lead cannot see it. Unset -> nothing changes.
+BCC_EMAIL = (os.getenv("BCC_EMAIL") or "").strip()
 
 # Which transport actually delivers the mail: "ses" (default) or "gmail".
 # Gmail here means an authenticated Google Workspace mailbox over SMTP —
