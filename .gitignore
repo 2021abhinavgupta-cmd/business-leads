@@ -17,3 +17,6 @@ warmup_log.txt
 
 # Superpowers scratch (SDD ledgers, brainstorm mockups)
 .superpowers/
+
+# staging copy of the Railway data (contains real lead data)
+data_from_railway/
