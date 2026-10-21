@@ -421,8 +421,8 @@ def test_designed_lead_with_too_few_shots_is_blocked(designed_env, tmp_path):
     lead_id = _designed(tmp_path)
     lead = import_store.get_lead(lead_id)
     design = lead["design_json"]
-    design["shot_fingerprints"] = design["shot_fingerprints"][:1]
-    import_store.update_lead(lead_id, flaw_shots=lead["flaw_shots"][:1], design_json=design,
+    design["shot_fingerprints"] = []
+    import_store.update_lead(lead_id, flaw_shots=[], design_json=design,
                              html_body=lead["html_body"].replace("cid:flaw2", ""))
     r = _post(client, lead_id)
     assert r.status_code == 409, r.text

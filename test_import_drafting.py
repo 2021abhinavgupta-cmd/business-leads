@@ -541,7 +541,7 @@ def test_designed_draft_falls_back_to_text_when_audit_is_not_done(tmp_path, over
     assert auditor.feedbacks == []  # the flaw copy generator was never called
 
 
-@pytest.mark.parametrize("n", [1, 6])
+@pytest.mark.parametrize("n", [0, 6])
 def test_designed_draft_falls_back_to_text_with_too_few_or_too_many_shots(tmp_path, n):
     lead = _designed(tmp_path, 1)
     lead["flaw_shots"] = (lead["flaw_shots"] * 6)[:n]

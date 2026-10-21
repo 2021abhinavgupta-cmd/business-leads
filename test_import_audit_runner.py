@@ -95,9 +95,16 @@ async def test_done_when_at_least_two_flaw_shots(tmp_path):
     assert cap.calls == [("https://acme.com", "Acme Bank")]
 
 
-async def test_no_flaws_when_fewer_than_two_shots(tmp_path):
-    ids = _make_leads(["ready"])
+async def test_done_with_a_single_flaw_shot(tmp_path):
     cap = _capture_returning([_shot(tmp_path, 1)])
+    res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
+    assert res["audit_status"] == "done"
+    assert len(res["flaw_shots"]) == 1
+
+
+async def test_no_flaws_when_no_shot_is_verified(tmp_path):
+    ids = _make_leads(["ready"])
+    cap = _capture_returning([])
     res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
     assert res["audit_status"] == "no_flaws"
     assert res["flaw_shots"] == []
@@ -106,7 +113,7 @@ async def test_no_flaws_when_fewer_than_two_shots(tmp_path):
     lead = import_store.get_lead(ids[0])
     assert lead["audit_status"] == "no_flaws"
     assert lead["flaw_shots"] == []
-    assert lead["audit_error"] == "fewer than 2 flaws with a verified screenshot"
+    assert lead["audit_error"] == "no flaw with a verified screenshot"
 
 
 async def test_failed_when_capture_returns_no_html():
@@ -293,13 +300,13 @@ async def test_shot_dropped_when_the_flagged_element_is_a_cookie_banner_or_chat_
     assert len(dropped) == 1 and dropped[0]["reason"]
 
 
-async def test_dropping_shots_below_two_makes_the_lead_no_flaws_with_reasons_recorded(tmp_path):
+async def test_dropping_every_shot_makes_the_lead_no_flaws_with_reasons_recorded(tmp_path):
     ids = _make_leads(["ready"])
     cap = _capture_returning([_shot(tmp_path, 1), _shot(tmp_path, 2)])
-    judge = lambda b, d: d == "defect 1"  # noqa: E731
+    judge = lambda b, d: False  # noqa: E731
     res = await audit_runner.audit_one(_lead(), capture=cap, judge=judge)
     assert res["audit_status"] == "no_flaws"
-    assert len(res["dropped_shots"]) == 1
+    assert len(res["dropped_shots"]) == 2
     assert res["dropped_shots"][0]["reason"]
     audit_runner.start_audit(ids, capture=cap, judge=judge)
     await _wait()
@@ -519,12 +526,12 @@ def _real_shot(tmp_path, n, box):
             "impact": "serious", "selector": "div.hero", "kind": "desktop"}
 
 
-async def test_a_shot_whose_box_vanishes_at_email_size_is_dropped(tmp_path):
+async def test_a_small_box_is_zoomed_on_and_a_missing_box_is_dropped(tmp_path):
     shots = [_real_shot(tmp_path, 1, (300, 200, 800, 500)), _real_shot(tmp_path, 2, (400, 300, 419, 319)),
              _real_shot(tmp_path, 3, None)]
     kept, dropped = await audit_runner.verify_shots(shots, _yes)
-    assert [s["description"] for s in kept] == ["defect 1"]
-    assert [d["description"] for d in dropped] == ["defect 2", "defect 3"]
+    assert [s["description"] for s in kept] == ["defect 1", "defect 2"]
+    assert [d["description"] for d in dropped] == ["defect 3"]
     assert all("box" in d["reason"] for d in dropped)
 
 

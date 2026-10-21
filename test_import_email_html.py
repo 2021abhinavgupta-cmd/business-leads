@@ -359,17 +359,18 @@ def test_an_image_without_a_box_is_refused(tmp_path):
         email_images.prepare_all([{"path": p}])
 
 
-def test_a_box_too_tiny_to_see_after_the_resize_is_refused(tmp_path):
+def test_a_box_too_tiny_for_the_full_page_is_zoomed_on(tmp_path):
     p = _make_page(str(tmp_path / "t.png"), box=(400, 300, 419, 319))  # the smallest box drawn
-    with pytest.raises(email_images.BoxNotVisibleError):
-        email_images.prepare(p)
+    data = email_images.prepare(p)
+    assert email_images.magenta_pixel_count(data) >= email_images.MIN_BOX_PIXELS
 
 
-def test_a_thin_box_on_a_huge_page_is_refused(tmp_path):
-    # 1280x6000 scales to a quarter: a 4px border becomes 1px, a small box vanishes.
+def test_a_thin_box_on_a_huge_page_is_zoomed_on(tmp_path):
+    # 1280x6000 scales to a quarter, so the whole page would lose the box; the
+    # crop around it keeps full resolution.
     p = _make_page(str(tmp_path / "h.png"), size=(1280, 6000), box=(400, 300, 439, 339))
-    with pytest.raises(email_images.BoxNotVisibleError):
-        email_images.prepare(p)
+    data = email_images.prepare(p)
+    assert email_images.magenta_pixel_count(data) >= email_images.MIN_BOX_PIXELS
 
 
 def test_box_not_visible_error_is_a_value_error():

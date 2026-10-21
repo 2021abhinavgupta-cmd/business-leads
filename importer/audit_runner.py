@@ -20,13 +20,13 @@ from urllib.parse import urlparse
 from security_utils import UnsafeNavigationError, UnsafeURLError, is_plain_hostname, validate_public_url
 from storage import import_store
 
-MIN_SHOTS = 2
+MIN_SHOTS = 1
 AUDITABLE_STATUSES = ("ready", "drafted")
 _CHROME_SELECTOR = re.compile(
     r"(?i)(?:^|[^a-z])(?:chat|drift|crisp|cookie|cookies|consent|gdpr)(?:[^a-z]|$)"
     r"|onetrust|cookiebot|cookieconsent|intercom|tawk|livechat|zendesk|hubspot-messages"
 )
-_NO_VERIFIED = "fewer than 2 flaws with a verified screenshot"
+_NO_VERIFIED = "no flaw with a verified screenshot"
 _ERROR_MAX = 300
 
 _task: asyncio.Task | None = None

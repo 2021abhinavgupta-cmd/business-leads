@@ -235,6 +235,30 @@ export default function ImportView() {
       setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note });
       for (const id of ids) {
         if (stopRef.current) { note = 'Stopped.'; break; }
+        // One click: a lead that has never been audited is audited first, so the
+        // draft is the designed email with its boxed screenshots, not a text one.
+        const target = page.leads.find((l) => l.id === id);
+        if (target && (target.audit_status || 'none') === 'none' && ['ready', 'drafted'].includes(target.status)) {
+          setJobSafe({ kind: 'Drafting', done, total: ids.length, failed, note: `Auditing ${target.organization || target.domain}...` });
+          try {
+            // Another audit may be running; wait for it, then start this one.
+            for (let i = 0; i < 100; i += 1) {
+              const p = await pollAudit();
+              if (!p?.running || stopRef.current) break;
+              await sleep(3000);
+            }
+            const r = await axios.post(`${API_BASE}/api/import/batches/${target.batch_id || batchId}/audit`, { lead_ids: [id] });
+            if (r.data.started) {
+              await sleep(3000);
+              for (let i = 0; i < 200 && !stopRef.current; i += 1) {
+                const p = await pollAudit();
+                if (!p?.running) break;
+                await sleep(3000);
+              }
+            }
+          } catch { /* a failed audit just means this lead is drafted as a text email */ }
+          if (stopRef.current) { note = 'Stopped.'; break; }
+        }
         let attempt = 0;
         let abandoned = false;
         while (attempt < 2) {

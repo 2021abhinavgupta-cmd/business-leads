@@ -8,7 +8,7 @@ from importer import compose, email_html, email_images, homepage
 MAX_SUBJECT_CHARS = compose.MAX_SUBJECT_CHARS
 MAX_BODY_WORDS = 130
 MAX_ATTEMPTS = 3  # first draft plus two rewrites after a failed fact check
-MIN_DESIGN_SHOTS = 2
+MIN_DESIGN_SHOTS = 1
 MAX_DESIGN_SHOTS = email_html.MAX_SECTIONS
 MIN_SUBJECT_WORDS, MAX_SUBJECT_WORDS = 2, 6
 PROVIDERS_FAILED = "Every AI provider failed to produce a draft. Try again in a moment."

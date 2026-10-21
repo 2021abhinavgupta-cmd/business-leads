@@ -114,11 +114,44 @@ def prepare_bytes(raw: bytes, *, name: str = "", width: int = 600, max_bytes: in
     if require_box:
         found = magenta_pixel_count(data)
         if found < MIN_BOX_PIXELS:
+            # A small box vanishes when the whole page is shrunk to email width.
+            # Zoom in on it instead: crop around the box at full resolution so its
+            # border keeps its thickness. Deterministic, so drafting and sending
+            # produce the same bytes.
+            zoomed = _zoom_on_box(img, width, max_bytes)
+            if zoomed is not None and magenta_pixel_count(zoomed) >= MIN_BOX_PIXELS:
+                return zoomed
             raise BoxNotVisibleError(
                 f"{path}: the magenta box keeps {found} visible pixels at email size, "
                 f"fewer than {MIN_BOX_PIXELS}"
             )
     return data
+
+
+ZOOM_CROP_WIDTH = 640
+ZOOM_CROP_HEIGHT = 420
+
+
+def _zoom_on_box(img: Image.Image, width: int, max_bytes: int) -> bytes | None:
+    """The page cropped around its magenta box, or None if no box can be found."""
+    r, g, b = img.split()
+    mask = ImageChops.multiply(
+        ImageChops.multiply(r.point(lambda v: 255 if v >= BOX_RB_MIN else 0),
+                            b.point(lambda v: 255 if v >= BOX_RB_MIN else 0)),
+        g.point(lambda v: 255 if v <= BOX_G_MAX else 0),
+    )
+    box = mask.getbbox()
+    if box is None:
+        return None
+    left, top, right, bottom = box
+    w, h = img.size
+    if (right - left) * (bottom - top) > 0.5 * w * h:
+        return None  # stray magenta all over the page, not one marker
+    cw, ch = min(w, ZOOM_CROP_WIDTH), min(h, ZOOM_CROP_HEIGHT)
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    x0 = max(0, min(cx - cw // 2, w - cw))
+    y0 = max(0, min(cy - ch // 2, h - ch))
+    return _encode(_scaled(img.crop((x0, y0, x0 + cw, y0 + ch)), width), max_bytes)
 
 
 def prepare_all(shots: list[dict], sources: list[bytes] | None = None) -> list[tuple[str, bytes]]:
