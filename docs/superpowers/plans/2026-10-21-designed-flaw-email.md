@@ -160,7 +160,7 @@
 ### Task 9: `/api/send` for designed leads
 
 **Files:**
-- Modify: `app.py` (`_prepare_import_send` and the import branch of `send_email`)
+- Modify: `app.py` (`_prepare_import_send` and the import branch of `send_email`), `importer/send_policy.py`
 - Test: `test_import_send.py`
 
 **Interfaces:**
