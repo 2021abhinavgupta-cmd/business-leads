@@ -131,6 +131,8 @@ def _require_designed(lead: dict) -> dict:
         shots = lead.get("flaw_shots") or []
         if any(not (s.get("path") and os.path.isfile(s["path"])) for s in shots):
             raise FlowError(409, _SHOT_MISSING)
+        if not drafting.shots_intact(shots):
+            raise FlowError(409, drafting.SHOTS_CHANGED_ON_DISK)
         raise FlowError(409, _SHOTS_CHANGED)
     return lead
 

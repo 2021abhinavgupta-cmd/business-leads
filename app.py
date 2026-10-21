@@ -1295,6 +1295,11 @@ def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
         raise HTTPException(status_code=409, detail=(
             "The screenshots could not all be prepared; audit this lead again and redraft it."
         ))
+    # Every file must still hold the bytes the audit verified: a file overwritten
+    # before the draft would otherwise be fingerprinted (and sent) as if it were
+    # the verified shot.
+    if not import_drafting.shots_intact(shots):
+        raise HTTPException(status_code=409, detail=import_drafting.SHOTS_CHANGED_ON_DISK)
 
     stored = (lead.get("design_json") or {}).get("shot_fingerprints")
     if not stored or import_drafting.shot_fingerprints(shots, prepared) != stored:
@@ -2337,6 +2342,8 @@ async def import_draft(
         result = await asyncio.wait_for(asyncio.to_thread(call), timeout=IMPORT_DRAFT_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         await _fail(504, "Drafting timed out. The lead was left as it was; try again.")
+    except import_drafting.ShotsChangedError as e:
+        await _fail(409, str(e))
     except import_drafting.DraftError as e:
         await _fail(502, str(e))
 

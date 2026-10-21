@@ -46,7 +46,7 @@ def _shot(tmp_path, n: int, *, closeup=True, selector="div.hero", write_main=Tru
 def _capture_returning(shots, html="<html></html>"):
     calls = []
 
-    async def capture(url, company_name, on_queued=None, on_started=None):
+    async def capture(url, company_name, on_queued=None, on_started=None, **_kw):
         calls.append((url, company_name))
         return "p.png", html, {"flaw_shots": shots}
     capture.calls = calls
@@ -105,7 +105,7 @@ async def test_failed_when_capture_returns_no_html():
 
 
 async def test_failed_when_capture_raises():
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         raise RuntimeError("boom")
     res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
     assert res["audit_status"] == "failed"
@@ -125,7 +125,7 @@ async def test_queue_processes_leads_in_order_and_updates_store(tmp_path):
     order = []
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         order.append(url)
         # while capturing, the lead is marked running
         assert import_store.get_lead(ids[len(order) - 1])["audit_status"] == "running"
@@ -149,7 +149,7 @@ async def test_crash_in_one_lead_does_not_stop_the_loop(tmp_path):
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
     n = {"c": 0}
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         n["c"] += 1
         if n["c"] == 1:
             raise RuntimeError("crash")
@@ -167,7 +167,7 @@ async def test_start_while_running_returns_false():
     ids = _make_leads(["ready"])
     gate = asyncio.Event()
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         await gate.wait()
         return "p", "<html/>", {"flaw_shots": []}
 
@@ -186,7 +186,7 @@ async def test_cancel_stops_before_the_next_lead_and_resets_unstarted_leads(tmp_
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
     seen = []
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         seen.append(url)
         audit_runner.cancel()
         return "p", "<html/>", {"flaw_shots": shots}
@@ -339,7 +339,7 @@ async def test_queued_lead_approved_before_its_turn_is_not_captured(tmp_path):
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
     seen = []
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         seen.append(url)
         import_store.update_lead(ids[1], status="approved")  # approved while lead 2 waits
         return "p", "<html/>", {"flaw_shots": shots}
@@ -357,7 +357,7 @@ async def test_lead_sent_during_capture_keeps_its_fields_and_late_result_is_disc
     ids = _make_leads(["ready"])
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         import_store.update_lead(ids[0], status="sent")
         return "p", "<html/>", {"flaw_shots": shots}
 
@@ -417,7 +417,7 @@ async def test_a_designed_email_drafted_during_the_audit_is_cleared_too(tmp_path
     lead_id = seed_lead(status="drafted", subject="S", body="Hi Jane,\n\nText")
     shots = [_shot(tmp_path, 1), _shot(tmp_path, 2)]
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         import_store.update_lead(lead_id, html_body="<p>designed</p>", design_json={"opening": "o"})
         return "p", "<html/>", {"flaw_shots": shots}
 
@@ -441,7 +441,7 @@ async def test_a_designed_lead_that_left_the_auditable_statuses_keeps_its_email(
     lead_id = seed_designed_lead(tmp_path)
     before = import_store.get_lead(lead_id)
 
-    async def cap(url, company_name, on_queued=None, on_started=None):
+    async def cap(url, company_name, on_queued=None, on_started=None, **_kw):
         import_store.update_lead(lead_id, status="approved")
         return "p", "<html/>", {"flaw_shots": [_shot(tmp_path, 1), _shot(tmp_path, 2)]}
 

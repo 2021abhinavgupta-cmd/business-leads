@@ -23,6 +23,16 @@ class DesignEditError(ValueError):
     """A design edit the user must correct (the route answers 422)."""
 
 
+SHOTS_CHANGED_ON_DISK = (
+    "The screenshots changed on disk after the audit; re-audit this lead "
+    "(Re-audit in the review drawer) and draft it again."
+)
+
+
+class ShotsChangedError(DraftError):
+    """A shot file no longer has the hash recorded at audit time (the route answers 409)."""
+
+
 # Every visible hyphen or dash, Unicode ones included: hyphen minus, U+2010 to
 # U+2015, minus, Armenian hyphen, double oblique hyphen, hyphen bullet, wave
 # dash, the two and three em dashes, and the small and fullwidth forms. Each
@@ -252,6 +262,32 @@ def shot_fingerprints(shots: list[dict], prepared: list[tuple[str, bytes]] | Non
     ]
 
 
+def _file_sha256(path) -> str | None:
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def shots_intact(shots: list[dict]) -> bool:
+    """True when every shot file still has the sha256 the audit recorded when it
+    verified the shot. An entry without a hash (audited before hashes were
+    stored) is not intact: it fails closed and needs a re-audit. Never raises."""
+    try:
+        return bool(shots) and all(
+            isinstance(s.get("sha256"), str) and s.get("path")
+            and _file_sha256(s["path"]) == s["sha256"]
+            for s in shots
+        )
+    except Exception:
+        return False
+
+
+def _shot_files_exist(shots: list[dict]) -> bool:
+    return all(isinstance(s, dict) and s.get("path") and os.path.isfile(s["path"]) for s in shots)
+
+
 def shots_match_design(lead: dict) -> bool:
     """True while the screenshots are the ones the email was drafted with.
     Shot file names are deterministic, so a re-audit overwrites the same paths
@@ -262,7 +298,7 @@ def shots_match_design(lead: dict) -> bool:
         shots = lead.get("flaw_shots") or []
         if not stored or not isinstance(stored, list) or len(stored) != len(shots):
             return False
-        return shot_fingerprints(shots) == stored
+        return shots_intact(shots) and shot_fingerprints(shots) == stored
     except Exception:
         return False
 
@@ -272,7 +308,8 @@ def is_designable(lead: dict) -> bool:
     return (
         lead.get("audit_status") == "done"
         and MIN_DESIGN_SHOTS <= len(shots) <= MAX_DESIGN_SHOTS
-        and all(s.get("path") and os.path.isfile(s["path"]) for s in shots)
+        and _shot_files_exist(shots)
+        and shots_intact(shots)
     )
 
 
@@ -291,6 +328,11 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
     be designed falls back to draft_lead (html_body and design are then None).
     """
     if not is_designable(lead):
+        shots = lead.get("flaw_shots") or []
+        # A done audit whose files are all there but no longer carry their audit
+        # hashes was overwritten or tampered with: refuse, never a silent text email.
+        if lead.get("audit_status") == "done" and shots and _shot_files_exist(shots)                 and not shots_intact(shots):
+            raise ShotsChangedError(SHOTS_CHANGED_ON_DISK)
         return _as_text(lead, auditor, your_name, fetch)
     shots = lead["flaw_shots"]
     try:

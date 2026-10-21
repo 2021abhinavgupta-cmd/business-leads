@@ -578,6 +578,8 @@ def test_unreadable_screenshot_falls_back_to_text_and_says_why(tmp_path):
     lead = _designed(tmp_path)
     with open(lead["flaw_shots"][0]["path"], "wb") as f:
         f.write(b"not an image")
+    # unreadable as audited (the hash matches), so only the prepare step can catch it
+    lead["flaw_shots"][0]["sha256"] = hashlib.sha256(b"not an image").hexdigest()
     auditor = _FlawOrTextAuditor([flaw_copy()], [TEXT_DRAFT])
     out = _draft_designed(lead, auditor)
     assert out["html_body"] is None and out["design"] is None

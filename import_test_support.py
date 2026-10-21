@@ -70,16 +70,21 @@ FLAW_DESCRIPTIONS = (
 
 
 def make_flaw_shots(tmp_path, n: int = 2) -> list[dict]:
-    """n flaw shot dicts backed by real small PNG files under tmp_path."""
-    from PIL import Image
+    """n flaw shot dicts backed by real small PNG files under tmp_path, each with
+    a visible magenta box and the sha256 the audit records for a verified shot."""
+    import hashlib
+
+    from PIL import Image, ImageDraw
     shots = []
     for i in range(n):
         path = tmp_path / f"flaw_shot_{i}.png"
-        Image.new("RGB", (900, 600), (240, 200 - 30 * i, 220)).save(path)
+        img = Image.new("RGB", (900, 600), (240, 200 - 30 * i, 220))
+        ImageDraw.Draw(img).rectangle((200, 150, 600, 400), outline=(255, 0, 255), width=6)
+        img.save(path)
         shots.append({
             "path": str(path), "closeup_path": None, "page": f"https://acme.com/page{i}",
             "description": FLAW_DESCRIPTIONS[i], "impact": "high", "selector": f"#el{i}",
-            "kind": "desktop",
+            "kind": "desktop", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         })
     return shots
 

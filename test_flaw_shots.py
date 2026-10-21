@@ -151,3 +151,30 @@ def test_mobile_duplicate_with_higher_impact_replaces_desktop(tmp_path):
         mobile_flaw=_flaw("X", impact="critical"), mobile_bytes=_png(),
     )
     assert [s["kind"] for s in shots] == ["mobile"]
+
+
+# --- per-lead file names for import audits (fix wave C1) ---
+
+def test_file_prefix_names_every_saved_file(tmp_path):
+    prefix = visuals.import_shot_prefix(7)
+    shots = _collect([_page("Homepage", _flaw("A"))], tmp_path, file_prefix=prefix)
+    for p in (shots[0]["path"], shots[0]["closeup_path"]):
+        assert os.path.basename(p).startswith(prefix)
+
+
+def test_two_import_leads_with_the_same_company_and_url_never_share_a_file(tmp_path):
+    a = _collect([_page("Homepage", _flaw("A"))], tmp_path, file_prefix=visuals.import_shot_prefix(1))
+    b = _collect([_page("Homepage", _flaw("A"))], tmp_path, file_prefix=visuals.import_shot_prefix(2))
+    assert a[0]["path"] != b[0]["path"] and a[0]["closeup_path"] != b[0]["closeup_path"]
+
+
+def test_dashboard_names_can_never_equal_import_names():
+    # Dashboard names are slug + hex hash, and the slug turns every non
+    # alphanumeric character into "_", so they never contain "-"; the import
+    # prefix always does (and ends in "-", so lead 1 is never a prefix of lead 11).
+    for company in ("import-lead1-acme", "Acme-Co", "import lead1 acme", "x"):
+        for kind in ("desktop", "mobile", "desktop_closeup"):
+            assert "-" not in make_flaw_shot_filename(company, "acme.com", 0, kind)
+            assert "-" not in visuals.make_screenshot_filename(company, "acme.com")
+    assert visuals.import_shot_prefix(1) == "import-lead1-"
+    assert not visuals.import_shot_prefix(11).startswith(visuals.import_shot_prefix(1))

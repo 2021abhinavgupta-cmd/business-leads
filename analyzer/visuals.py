@@ -287,6 +287,20 @@ def make_flaw_shot_filename(company_name: str, url: str, index: int, kind: str) 
     )
 
 
+def import_shot_prefix(lead_id: int) -> str:
+    """
+    File name prefix for every image a CSV import audit saves for one lead.
+    The names above are company + URL only, so two import leads for the same
+    company (a second contact, the same firm in two batches), or a Dashboard
+    audit of the same site, would overwrite each other's files. With the lead
+    id in the name each lead owns its files, and because a Dashboard name never
+    contains "-" (the slug turns every non alphanumeric character into "_",
+    the hash is hex) an import name can never equal a Dashboard one. The
+    trailing "-" keeps lead 1 from being a prefix of lead 11.
+    """
+    return f"import-lead{int(lead_id)}-"
+
+
 def _save_jpeg(image_bytes: bytes, path: str) -> None:
     # Decode fully BEFORE touching the filesystem so a corrupt image never
     # leaves a half-written file behind.
@@ -320,6 +334,7 @@ def collect_flaw_shots(
     mobile_closeup_bytes: bytes | None = None,
     max_shots: int = 5,
     out_dir: str = SCREENSHOTS_DIR,
+    file_prefix: str = "",
 ) -> list[dict]:
     """
     One boxed screenshot per measured flaw, most severe first, at most
@@ -327,7 +342,8 @@ def collect_flaw_shots(
     contribute; the same description found on several pages keeps only the
     highest-impact one. The mobile capture is included only if a mobile box
     was drawn. Items carry the flaw's selector so later steps can verify the
-    box against the real element.
+    box against the real element. *file_prefix* (import_shot_prefix for a CSV
+    import lead, empty for the Dashboard) is prepended to every file name.
     """
     candidates: list[dict] = []
     for page in pages:
@@ -369,7 +385,9 @@ def collect_flaw_shots(
     os.makedirs(out_dir, exist_ok=True)
     shots: list[dict] = []
     for index, c in enumerate(unique):
-        path = os.path.join(out_dir, make_flaw_shot_filename(company_name, url, index, c["kind"]))
+        path = os.path.join(
+            out_dir, file_prefix + make_flaw_shot_filename(company_name, url, index, c["kind"])
+        )
         closeup_path = None
         try:
             _save_jpeg(c["shot"], path)
@@ -379,7 +397,8 @@ def collect_flaw_shots(
             continue
         if c["closeup"]:
             closeup_candidate = os.path.join(
-                out_dir, make_flaw_shot_filename(company_name, url, index, f"{c['kind']}_closeup")
+                out_dir,
+                file_prefix + make_flaw_shot_filename(company_name, url, index, f"{c['kind']}_closeup"),
             )
             try:
                 _save_jpeg(c["closeup"], closeup_candidate)
@@ -909,6 +928,8 @@ async def generate_audit_screenshot(
     company_name: str,
     on_queued: "Callable[[], None] | None" = None,
     on_started: "Callable[[], None] | None" = None,
+    *,
+    file_prefix: str = "",
 ) -> tuple[str | None, str | None, dict | None]:
     """
     Thin retry wrapper around _generate_audit_screenshot_once. A single
@@ -928,7 +949,9 @@ async def generate_audit_screenshot(
     """
     last_result = (None, None, None)
     for attempt in range(_AUDIT_SCREENSHOT_RETRIES):
-        last_result = await _generate_audit_screenshot_once(url, company_name, on_queued=on_queued, on_started=on_started)
+        last_result = await _generate_audit_screenshot_once(
+            url, company_name, on_queued=on_queued, on_started=on_started, file_prefix=file_prefix
+        )
         if last_result[1] is not None:  # html_content present = success
             return last_result
         if attempt < _AUDIT_SCREENSHOT_RETRIES - 1:
@@ -942,6 +965,8 @@ async def _generate_audit_screenshot_once(
     company_name: str,
     on_queued: "Callable[[], None] | None" = None,
     on_started: "Callable[[], None] | None" = None,
+    *,
+    file_prefix: str = "",
 ) -> tuple[str | None, str | None, dict | None]:
     """
     Takes a desktop screenshot of the URL, runs accessibility + broken link
@@ -971,6 +996,10 @@ async def _generate_audit_screenshot_once(
 
     Returns (None, None, None) on failure. Called by generate_audit_screenshot
     above, which retries this once before accepting a failure as real.
+
+    *file_prefix* is prepended to every image file name saved here; the CSV
+    import audit passes import_shot_prefix(lead_id) so its files never share a
+    name with another lead's or a Dashboard audit's (see import_shot_prefix).
     """
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
@@ -1356,7 +1385,7 @@ async def _generate_audit_screenshot_once(
                 f"flaw{page_note}: {best['visual_flaw']['description']}."
             )
 
-        filepath = os.path.join(SCREENSHOTS_DIR, make_screenshot_filename(company_name, url))
+        filepath = os.path.join(SCREENSHOTS_DIR, file_prefix + make_screenshot_filename(company_name, url))
         img.save(filepath, format="JPEG", quality=85)
 
         # A tight crop of just the marked element, saved separately when one
@@ -1367,7 +1396,7 @@ async def _generate_audit_screenshot_once(
         if best.get("closeup_bytes"):
             closeup_img = Image.open(BytesIO(best["closeup_bytes"])).convert("RGB")
             closeup_filepath = os.path.join(
-                SCREENSHOTS_DIR, make_closeup_screenshot_filename(company_name, url)
+                SCREENSHOTS_DIR, file_prefix + make_closeup_screenshot_filename(company_name, url)
             )
             closeup_img.save(closeup_filepath, format="JPEG", quality=85)
 
@@ -1375,7 +1404,7 @@ async def _generate_audit_screenshot_once(
         if mobile_screenshot_bytes:
             mobile_img = Image.open(BytesIO(mobile_screenshot_bytes)).convert("RGB")
             mobile_filepath = os.path.join(
-                SCREENSHOTS_DIR, make_mobile_screenshot_filename(company_name, url)
+                SCREENSHOTS_DIR, file_prefix + make_mobile_screenshot_filename(company_name, url)
             )
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
@@ -1386,6 +1415,7 @@ async def _generate_audit_screenshot_once(
             company_name,
             url,
             mobile_closeup_bytes=mobile_closeup_bytes,
+            file_prefix=file_prefix,
         )
 
         # Aggregate signals across every page audited, most severe first.

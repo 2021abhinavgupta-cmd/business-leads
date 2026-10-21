@@ -8,6 +8,7 @@ defect. Anything doubtful is dropped (fail closed). A lead with fewer than MIN_S
 verified shots is 'no_flaws' and gets no designed email.
 """
 import asyncio
+import hashlib
 import re
 from pathlib import Path
 
@@ -56,7 +57,9 @@ def _err(text: str) -> str:
 
 
 async def verify_shots(shots: list[dict], judge) -> tuple[list[dict], list[dict]]:
-    """Return (kept, dropped). Never trusts a shot on error."""
+    """Return (kept, dropped). Never trusts a shot on error. Each kept shot gets
+    "sha256", the hash of its main image file as verified: drafting and sending
+    refuse the shot once the file on disk no longer has that hash."""
     kept, dropped = [], []
     for shot in shots:
         desc = str(shot.get("description") or "")
@@ -78,10 +81,14 @@ async def verify_shots(shots: list[dict], judge) -> tuple[list[dict], list[dict]
         except Exception as exc:  # fail closed
             drop(f"vision check errored ({type(exc).__name__})")
             continue
-        if confirmed is True:
-            kept.append(shot)
-        else:
+        if confirmed is not True:
             drop("vision check did not confirm the defect is visible in the image")
+            continue
+        main = await asyncio.to_thread(_read, shot.get("path"))
+        if main is None:
+            drop("no readable image file")
+            continue
+        kept.append({**shot, "sha256": hashlib.sha256(main).hexdigest()})
     return kept, dropped
 
 
@@ -105,8 +112,13 @@ async def audit_one(lead: dict, capture=generate_audit_screenshot,
         return result("failed", error="domain is not a public website")
     except Exception as exc:
         return result("failed", error=_err(f"url check failed ({type(exc).__name__})"))
+    if lead.get("id") is None:
+        return result("failed", error="lead has no id")
     try:
-        _path, html, extra = await capture(url, lead.get("organization") or "")
+        # Per-lead file names: another lead for the same company, or a
+        # Dashboard audit of the same site, can never overwrite these shots.
+        _path, html, extra = await capture(
+            url, lead.get("organization") or "", file_prefix=visuals.import_shot_prefix(lead["id"]))
     except Exception as exc:
         return result("failed", error=_err(f"capture failed: {type(exc).__name__}"))
     if html is None or extra is None:

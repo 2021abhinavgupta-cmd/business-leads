@@ -221,7 +221,7 @@ import os  # noqa: E402
 
 import pytest  # noqa: E402
 
-from importer import email_html, email_images  # noqa: E402
+from importer import drafting as import_drafting, email_html, email_images  # noqa: E402
 from import_test_support import seed_designed_lead  # noqa: E402
 
 def test_leads_list_replaces_html_body_with_is_designed(monkeypatch, tmp_path):
@@ -413,7 +413,8 @@ def test_preview_and_design_edit_refuse_a_shot_overwritten_at_the_same_path(monk
     for r in (client.get(f"/api/import/leads/{lead_id}/preview"),
               client.put(f"/api/import/leads/{lead_id}/design", json=_edit_body())):
         assert r.status_code == 409
-        assert r.json()["detail"] == "The screenshots changed after this email was drafted; draft it again."
+        # the file no longer has the hash the audit recorded: re-audit, then redraft
+        assert r.json()["detail"] == import_drafting.SHOTS_CHANGED_ON_DISK
     assert import_store.get_lead(lead_id)["html_body"] == before["html_body"]
 
 
