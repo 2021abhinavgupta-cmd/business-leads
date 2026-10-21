@@ -173,3 +173,118 @@ async def test_import_audit_fails_with_a_clear_error_and_no_shots(monkeypatch):
     assert seen.get("raise_on_unsafe_navigation") is True
     assert res["audit_status"] == "failed" and res["flaw_shots"] == []
     assert "non-public address" in res["audit_error"]
+
+
+# ---- redirect hops the route guard never sees ---------------------------------
+
+class _EvReq:
+    def __init__(self, url, nav=True, redirected=True):
+        self.url, self._nav = url, nav
+        self.resource_type = "document" if nav else "image"
+        self.redirected_from = object() if redirected else None
+
+    def is_navigation_request(self):
+        return self._nav
+
+
+def test_the_hop_recorder_records_only_redirect_hops():
+    hops = []
+    on_request = visuals._make_redirect_hop_recorder(hops)
+    on_request(_EvReq("https://www.example.com/", redirected=False))
+    on_request(_EvReq("http://127.0.0.1/secret", nav=True))
+    on_request(_EvReq("http://10.0.0.9/a.png", nav=False))
+    assert hops == [("http://127.0.0.1/secret", True), ("http://10.0.0.9/a.png", False)]
+
+
+def test_a_request_whose_redirect_state_cannot_be_read_is_recorded():
+    class Weird(_EvReq):
+        @property
+        def redirected_from(self):
+            raise RuntimeError("gone")
+
+        @redirected_from.setter
+        def redirected_from(self, v):
+            pass
+    hops = []
+    visuals._make_redirect_hop_recorder(hops)(Weird("http://127.0.0.1/"))
+    assert hops == [("http://127.0.0.1/", True)]
+
+
+@pytest.mark.parametrize("hop", [
+    ("http://127.0.0.1/secret", True), ("http://internal.corp/", True),
+    ("http://169.254.169.254/latest", False), ("http://localhost/x.png", False),
+])
+def test_a_private_redirect_hop_is_a_violation(hop):
+    with pytest.raises(UnsafeNavigationError, match="non-public address"):
+        visuals._assert_redirect_hops_public(
+            [("https://www.example.com/a", True), hop], check_public=_public)
+
+
+def test_public_redirect_hops_pass():
+    visuals._assert_redirect_hops_public(
+        [("https://www.example.com/", True), ("https://cdn.example.com/x.png", False)],
+        check_public=_public)
+    visuals._assert_redirect_hops_public([], check_public=_public)
+
+
+def test_the_capture_checks_hops_on_both_contexts_before_closing_the_browser():
+    import inspect
+    src = inspect.getsource(visuals._generate_audit_screenshot_once)
+    assert src.count("_make_redirect_hop_recorder(redirect_hops)") == 2
+    check = src.index("_assert_redirect_hops_public, redirect_hops")
+    assert check < src.index("await browser.close()") < src.index("img.save(filepath")
+
+
+async def test_real_browser_redirect_hops_to_a_private_host_are_caught():
+    """A delayed script navigation and an iframe each go to a public URL that
+    302s to a private one: the route guard lets both through (it never sees
+    the hop), the recorder catches both."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    playwright_api = pytest.importorskip("playwright.async_api")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/redir"):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{port}/secret")
+                self.end_headers()
+                return
+            body = {
+                "/home": b"<script>setTimeout(()=>{location.href='/redir-main'},200)</script>",
+                "/iframe": b"<iframe src='/redir-iframe'></iframe>",
+            }.get(self.path, b"<h1>INTERNAL SECRET</h1>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        async with playwright_api.async_playwright() as p:
+            try:
+                browser = await p.chromium.launch(
+                    args=["--host-resolver-rules=MAP public.example.com 127.0.0.1"])
+            except Exception as e:
+                pytest.skip(f"no chromium: {e}")
+            for path in ("/home", "/iframe"):
+                ctx = await browser.new_context(service_workers="block")
+                blocked, hops = [], []
+                await ctx.route("**/*", visuals._make_ssrf_route_handler(blocked, check_public=_public))
+                ctx.on("request", visuals._make_redirect_hop_recorder(hops))
+                page = await ctx.new_page()
+                await page.goto(f"http://public.example.com:{port}{path}")
+                await page.wait_for_timeout(1000)
+                assert blocked == []  # the route guard alone misses it
+                assert (f"http://127.0.0.1:{port}/secret", True) in hops
+                with pytest.raises(UnsafeNavigationError):
+                    visuals._assert_redirect_hops_public(hops, check_public=_public)
+                await ctx.close()
+            await browser.close()
+    finally:
+        srv.shutdown()

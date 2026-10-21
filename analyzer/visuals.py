@@ -310,8 +310,8 @@ def _make_ssrf_route_handler(blocked: list, *, check_public=None):
     Navigation verdicts are cached per host for the context's lifetime. Each
     blocked main frame navigation URL is appended to *blocked* (a blocked
     iframe is only aborted). Playwright does not call a
-    route handler for redirect hops, so _assert_public_navigation checks those
-    after every goto.
+    route handler for redirect hops, so _assert_public_navigation checks the
+    goto's own chain and _make_redirect_hop_recorder records every other hop.
     """
     verdicts: dict[str, bool] = {}
 
@@ -358,6 +358,53 @@ def _assert_public_navigation(final_url: str, response, *, check_public=None) ->
         request = getattr(request, "redirected_from", None)
     for url in hops:
         if not browser_url_allowed(url, navigation=True, check_public=check_public):
+            raise UnsafeNavigationError(f"the website redirected to a non-public address ({url})")
+
+
+def _make_redirect_hop_recorder(hops: list):
+    """
+    A context "request" listener that records every redirect hop as
+    (url, is_navigation). Playwright never routes a redirect hop, and
+    _guarded_goto only sees the chain of the goto it made, so a later script
+    navigation, an iframe or a subresource that reaches a public URL which
+    then 302s to a private host would otherwise be loaded and captured.
+    Recorded hops are checked by _assert_redirect_hops_public before anything
+    leaves the browser.
+    """
+    def on_request(request):
+        try:
+            if getattr(request, "redirected_from", None) is None:
+                return
+        except Exception:
+            pass  # unknown: record it, the check fails closed
+        try:
+            navigation = bool(request.is_navigation_request()) or request.resource_type == "document"
+        except Exception:
+            navigation = True
+        try:
+            url = request.url
+        except Exception:
+            url = ""
+        hops.append((url, navigation))
+    return on_request
+
+
+def _assert_redirect_hops_public(hops: list, *, check_public=None) -> None:
+    """Raise UnsafeNavigationError if any recorded redirect hop is one the
+    route guard would have refused (same policy: navigations are resolved,
+    subresources must not be localhost or a private IP literal). Navigation
+    verdicts are cached per host."""
+    verdicts: dict[str, bool] = {}
+    for url, navigation in list(hops):
+        if navigation:
+            host = (urlparse(url).hostname or "").lower()
+            ok = verdicts.get(host)
+            if ok is None:
+                ok = browser_url_allowed(url, navigation=True, check_public=check_public)
+                verdicts[host] = ok
+        else:
+            ok = browser_url_allowed(url, navigation=False, check_public=check_public)
+        if not ok:
             raise UnsafeNavigationError(f"the website redirected to a non-public address ({url})")
 
 
@@ -1119,6 +1166,8 @@ async def _generate_audit_screenshot_once(
                 # _make_ssrf_route_handler and _guarded_goto.
                 blocked_navigations: list[str] = []
                 await context.route("**/*", _make_ssrf_route_handler(blocked_navigations))
+                redirect_hops: list[tuple[str, bool]] = []
+                context.on("request", _make_redirect_hop_recorder(redirect_hops))
 
                 # Real, in-browser Core Web Vitals (not Lighthouse's lab-
                 # simulated ones) via PerformanceObserver, same primitives
@@ -1358,6 +1407,7 @@ async def _generate_audit_screenshot_once(
                     # this cannot be fixed by resizing after navigation.
                     mobile_context = await browser.new_context(**_MOBILE_DEVICE, service_workers="block")
                     await mobile_context.route("**/*", _make_ssrf_route_handler(blocked_navigations))
+                    mobile_context.on("request", _make_redirect_hop_recorder(redirect_hops))
                     mobile_page = await mobile_context.new_page()
 
                     # Same listeners as the desktop page — the previous
@@ -1458,6 +1508,12 @@ async def _generate_audit_screenshot_once(
                             await mobile_context.close()
                         except Exception:
                             pass
+
+                # Every capture is done and nothing has been written or
+                # returned yet: a redirect hop to a private host at any point
+                # (a script navigation, an iframe, an image) fails the audit
+                # here, before its pixels or HTML can leave the browser.
+                await asyncio.to_thread(_assert_redirect_hops_public, redirect_hops)
 
                 await browser.close()
         finally:
