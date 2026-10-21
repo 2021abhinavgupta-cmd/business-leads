@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from analyzer import visuals
+from importer import email_images
 from analyzer.visuals import generate_audit_screenshot
 from urllib.parse import urlparse
 
@@ -86,6 +87,16 @@ async def verify_shots(shots: list[dict], judge) -> tuple[list[dict], list[dict]
             image = await asyncio.to_thread(_read, shot.get("path"))
         if image is None:
             drop("no readable image file")
+            continue
+        # Before the (paid) vision check: the box must still be visible once the
+        # image is scaled for the email, or the reader sees no marker at all.
+        try:
+            await asyncio.to_thread(email_images.prepare, shot.get("path"))
+        except email_images.BoxNotVisibleError:
+            drop("the magenta box is too small to see once the image is scaled for email")
+            continue
+        except Exception as exc:
+            drop(f"the image could not be prepared for email ({type(exc).__name__}), so no box can be shown")
             continue
         try:
             confirmed = await asyncio.to_thread(judge, image, desc)

@@ -31,10 +31,22 @@ def _png(tmp_path, name: str, data: bytes = b"img") -> str:
     return str(p)
 
 
+def _main_png(n: int) -> bytes:
+    """A real 1280x800 capture with a visible 4px magenta box, different per n."""
+    import io
+
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (1280, 800), (250, 250 - n, 250))
+    ImageDraw.Draw(img).rectangle((300, 200, 800, 500), outline=(255, 0, 255), width=4)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _shot(tmp_path, n: int, *, closeup=True, selector="div.hero", write_main=True) -> dict:
     main = str(tmp_path / f"m{n}.png")
     if write_main:
-        (tmp_path / f"m{n}.png").write_bytes(f"main{n}".encode())
+        (tmp_path / f"m{n}.png").write_bytes(_main_png(n))
     return {
         "path": main,
         "closeup_path": _png(tmp_path, f"c{n}.png", f"close{n}".encode()) if closeup else None,
@@ -245,7 +257,7 @@ async def test_shot_without_a_closeup_is_judged_on_its_main_image(tmp_path):
 
     kept, dropped = await audit_runner.verify_shots([with_close, no_close], judge)
     assert got["defect 1"] == b"close1"
-    assert got["defect 2"] == b"main2"
+    assert got["defect 2"] == _main_png(2)
     assert len(kept) == 2 and dropped == []
 
 
@@ -259,7 +271,7 @@ async def test_closeup_path_set_but_file_missing_falls_back_to_main(tmp_path):
         return True
 
     kept, _ = await audit_runner.verify_shots([s], judge)
-    assert got["b"] == b"main1" and len(kept) == 1
+    assert got["b"] == _main_png(1) and len(kept) == 1
 
 
 async def test_shot_with_no_image_file_is_dropped(tmp_path):
@@ -488,3 +500,26 @@ async def test_cancelling_a_re_audit_restores_each_unstarted_leads_previous_audi
     assert drafting.shots_match_design(after) is True
     lead = import_store.get_lead(failed)
     assert lead["audit_status"] == "failed" and lead["audit_error"] == "capture failed: Timeout"
+
+
+
+# --- the box must be visible at email size (fix wave I3) ---
+
+def _real_shot(tmp_path, n, box):
+    from PIL import Image, ImageDraw
+    path = tmp_path / f"real{n}.png"
+    img = Image.new("RGB", (1280, 800), (250, 250, 250))
+    if box:
+        ImageDraw.Draw(img).rectangle(box, outline=(255, 0, 255), width=4)
+    img.save(path)
+    return {"path": str(path), "closeup_path": None, "page": "/", "description": f"defect {n}",
+            "impact": "serious", "selector": "div.hero", "kind": "desktop"}
+
+
+async def test_a_shot_whose_box_vanishes_at_email_size_is_dropped(tmp_path):
+    shots = [_real_shot(tmp_path, 1, (300, 200, 800, 500)), _real_shot(tmp_path, 2, (400, 300, 419, 319)),
+             _real_shot(tmp_path, 3, None)]
+    kept, dropped = await audit_runner.verify_shots(shots, _yes)
+    assert [s["description"] for s in kept] == ["defect 1"]
+    assert [d["description"] for d in dropped] == ["defect 2", "defect 3"]
+    assert all("box" in d["reason"] for d in dropped)

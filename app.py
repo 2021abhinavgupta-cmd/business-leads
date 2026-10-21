@@ -1283,23 +1283,33 @@ def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
             f"{import_drafting.MAX_DESIGN_SHOTS} screenshots and this one has {len(shots)}; "
             "audit this lead again and redraft it."
         ))
-    try:
-        prepared = import_email_images.prepare_all(shots)
-    except Exception as e:   # missing file, unreadable image, malformed shot entry
-        print(f"[Send] Import lead {lead.get('id')}: screenshot could not be prepared: {type(e).__name__}: {e}")
+    if any(not (isinstance(s, dict) and s.get("path") and os.path.isfile(s["path"])) for s in shots):
         raise HTTPException(
             status_code=409,
             detail="A screenshot file is missing on disk; audit this lead again and redraft it.",
         )
-    if len(prepared) != len(shots):
-        raise HTTPException(status_code=409, detail=(
-            "The screenshots could not all be prepared; audit this lead again and redraft it."
-        ))
     # Every file must still hold the bytes the audit verified: a file overwritten
     # before the draft would otherwise be fingerprinted (and sent) as if it were
     # the verified shot.
     if not import_drafting.shots_intact(shots):
         raise HTTPException(status_code=409, detail=import_drafting.SHOTS_CHANGED_ON_DISK)
+    try:
+        prepared = import_email_images.prepare_all(shots)
+    except import_email_images.BoxNotVisibleError as e:
+        print(f"[Send] Import lead {lead.get('id')}: {e}")
+        raise HTTPException(status_code=409, detail=(
+            "A screenshot's magenta box is too small to see in the email; "
+            "re-audit this lead and draft it again."
+        ))
+    except Exception as e:   # unreadable image, malformed shot entry
+        print(f"[Send] Import lead {lead.get('id')}: screenshot could not be prepared: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=409, detail=(
+            "A screenshot could not be prepared; re-audit this lead and draft it again."
+        ))
+    if len(prepared) != len(shots):
+        raise HTTPException(status_code=409, detail=(
+            "The screenshots could not all be prepared; audit this lead again and redraft it."
+        ))
 
     stored = (lead.get("design_json") or {}).get("shot_fingerprints")
     if not stored or import_drafting.shot_fingerprints(shots, prepared) != stored:

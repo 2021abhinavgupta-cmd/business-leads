@@ -6,7 +6,7 @@ cropped, because the magenta box that marks the flaw could sit anywhere.
 import io
 import os
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 MAX_HEIGHT = 1500
 START_QUALITY = 70
@@ -16,6 +16,35 @@ QUALITY_STEP = 5
 
 CREAM_RGB = (255, 248, 239)  # #fff8ef, the email page color
 WIDTH_FALLBACKS = (520, 460)
+
+# The flaw is marked by a 4px #ff00ff border drawn at capture size (1280 wide
+# on desktop). Scaled for the email that border is about 1.9px at 600 wide and
+# 1.6px at 520, and resampling plus JPEG blur it further, so a small box can
+# all but vanish. A pixel counts as box when it is still strongly magenta.
+# Measured on prepared 600 wide images of a 1280 wide page (white, black, grey,
+# cream and noisy backgrounds): the smallest box the capture draws (a 20px
+# square) keeps 12 to 40 such pixels, a 40x24 box 60 to 117, a 60x30 box 61
+# to 161, a 200x60 box 220 or more, a page without a box 0; a mobile capture
+# (780 wide, 8px border) keeps over 500. Below MIN_BOX_PIXELS (about a 9px
+# square outline at email size) the box is too small to read as a marker.
+BOX_RB_MIN = 170
+BOX_G_MAX = 100
+MIN_BOX_PIXELS = 30
+
+
+class BoxNotVisibleError(ValueError):
+    """The magenta box is too small to see once the image is scaled for email."""
+
+
+def magenta_pixel_count(data: bytes) -> int:
+    """How many pixels of the (prepared) image are strongly magenta."""
+    with Image.open(io.BytesIO(data)) as im:
+        r, g, b = im.convert("RGB").split()
+    high_r = r.point(lambda v: 255 if v >= BOX_RB_MIN else 0)
+    high_b = b.point(lambda v: 255 if v >= BOX_RB_MIN else 0)
+    low_g = g.point(lambda v: 255 if v <= BOX_G_MAX else 0)
+    mask = ImageChops.multiply(ImageChops.multiply(high_r, high_b), low_g)
+    return mask.histogram()[255]
 
 
 def _flatten(img: Image.Image) -> Image.Image:
@@ -53,7 +82,10 @@ def _encode(img: Image.Image, max_bytes: int) -> bytes:
         quality -= QUALITY_STEP
 
 
-def prepare(path: str, *, width: int = 600, max_bytes: int = 90_000) -> bytes:
+def prepare(path: str, *, width: int = 600, max_bytes: int = 90_000, require_box: bool = True) -> bytes:
+    """The JPEG for the email. Raises FileNotFoundError, and BoxNotVisibleError
+    when require_box is set and the prepared image keeps fewer than
+    MIN_BOX_PIXELS magenta box pixels."""
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(path)
     with Image.open(path) as src:
@@ -69,6 +101,13 @@ def prepare(path: str, *, width: int = 600, max_bytes: int = 90_000) -> bytes:
                 break
     if len(data) > max_bytes:
         print(f"[email_images] {path} is {len(data)} bytes after compression, over {max_bytes}")
+    if require_box:
+        found = magenta_pixel_count(data)
+        if found < MIN_BOX_PIXELS:
+            raise BoxNotVisibleError(
+                f"{path}: the magenta box keeps {found} visible pixels at email size, "
+                f"fewer than {MIN_BOX_PIXELS}"
+            )
     return data
 
 

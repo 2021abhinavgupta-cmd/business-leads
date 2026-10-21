@@ -599,3 +599,16 @@ def test_all_existing_import_gates_still_apply_to_designed_leads(designed_env, t
     lead = import_store.get_lead(lead_id)
     assert lead["status"] == "skipped" and lead["skip_reason"] == "suppressed"
     assert len(sender.designed_calls) == 1
+
+
+
+def test_a_box_that_is_not_visible_blocks_with_its_own_message(designed_env, tmp_path, monkeypatch):
+    client, sender = designed_env
+    lead_id = _designed(tmp_path)
+
+    def invisible(shots):
+        raise email_images.BoxNotVisibleError("box too small")
+    monkeypatch.setattr(app_module.import_email_images, "prepare_all", invisible)
+    r = _post(client, lead_id)
+    assert r.status_code == 409 and "box" in r.text and "missing on disk" not in r.text
+    _assert_not_claimed(lead_id, sender)

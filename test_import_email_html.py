@@ -10,7 +10,10 @@ MAGENTA = (255, 0, 255)  # analyzer/visuals.py _HIGHLIGHT_COLOR
 BOX_PX = 4  # analyzer/visuals.py border:4px
 
 
-def _make_page(path, size=(1280, 800), box=None, width=BOX_PX):
+DEFAULT_BOX = (300, 200, 800, 500)
+
+
+def _make_page(path, size=(1280, 800), box=DEFAULT_BOX, width=BOX_PX):
     img = Image.new("RGB", size, (255, 248, 239))
     d = ImageDraw.Draw(img)
     for y in range(40, size[1], 60):
@@ -281,10 +284,10 @@ def test_prepare_noisy_image_falls_back_in_width_and_warns(tmp_path, capsys):
     img = Image.frombytes("RGB", (1280, 800), rnd.randbytes(1280 * 800 * 3))
     p = str(tmp_path / "noise.png")
     img.save(p)
-    data = email_images.prepare(p, max_bytes=20_000)
+    data = email_images.prepare(p, max_bytes=20_000, require_box=False)
     assert Image.open(io.BytesIO(data)).width == 460 and len(data) <= 20_000  # width fallback
     assert capsys.readouterr().out == ""
-    data = email_images.prepare(p, max_bytes=10_000)  # nothing fits: warn, return anyway
+    data = email_images.prepare(p, max_bytes=10_000, require_box=False)  # nothing fits: warn, return anyway
     out = capsys.readouterr().out
     assert len(data) > 10_000 and p in out and str(len(data)) in out
 
@@ -294,13 +297,13 @@ def test_prepare_transparency_is_composited_on_cream(tmp_path):
         img = Image.new(mode, (200, 100), (0, 0) if mode == "LA" else (0, 0, 0, 0))
         p = str(tmp_path / f"{mode}.png")
         img.save(p)
-        px = _decode(email_images.prepare(p)).getpixel((100, 50))
+        px = _decode(email_images.prepare(p, require_box=False)).getpixel((100, 50))
         assert all(abs(a - b) <= 6 for a, b in zip(px, (255, 248, 239))), (mode, px)
     pal = Image.new("P", (200, 100), 0)
     pal.putpalette([0, 0, 0] * 256)
     p = str(tmp_path / "P.png")
     pal.save(p, transparency=0)
-    px = _decode(email_images.prepare(p)).getpixel((100, 50))
+    px = _decode(email_images.prepare(p, require_box=False)).getpixel((100, 50))
     assert all(abs(a - b) <= 6 for a, b in zip(px, (255, 248, 239))), px
 
 
@@ -332,3 +335,42 @@ def test_text_order_matches_html(tmp_path):
     c = _copy(2)
     _, text = _render(tmp_path, 2, copy=c)
     assert text.index(c["headline"]) < text.index("Hi Priya,") < text.index(c["opening"])
+
+
+# ---- the box must survive the resize (fix wave I3) -------------------------
+# Measured: the 4px box of a 1280px capture is about 1.9px at 600 wide and
+# 1.6px at 520. The smallest box the capture draws (a 12px element plus the
+# 4px padding, 20px square) leaves 8 to 16 strongly magenta pixels at 600 on a
+# plain page; a 60x30 box leaves 64 to 178, and a 200x60 box over 200.
+
+
+def test_a_visible_box_passes_and_is_counted(tmp_path):
+    for box in (DEFAULT_BOX, (400, 300, 599, 359)):
+        p = _make_page(str(tmp_path / "v.png"), box=box)
+        data = email_images.prepare(p)
+        assert email_images.magenta_pixel_count(data) >= email_images.MIN_BOX_PIXELS
+
+
+def test_an_image_without_a_box_is_refused(tmp_path):
+    p = _make_page(str(tmp_path / "n.png"), box=None)
+    with pytest.raises(email_images.BoxNotVisibleError):
+        email_images.prepare(p)
+    with pytest.raises(email_images.BoxNotVisibleError):
+        email_images.prepare_all([{"path": p}])
+
+
+def test_a_box_too_tiny_to_see_after_the_resize_is_refused(tmp_path):
+    p = _make_page(str(tmp_path / "t.png"), box=(400, 300, 419, 319))  # the smallest box drawn
+    with pytest.raises(email_images.BoxNotVisibleError):
+        email_images.prepare(p)
+
+
+def test_a_thin_box_on_a_huge_page_is_refused(tmp_path):
+    # 1280x6000 scales to a quarter: a 4px border becomes 1px, a small box vanishes.
+    p = _make_page(str(tmp_path / "h.png"), size=(1280, 6000), box=(400, 300, 439, 339))
+    with pytest.raises(email_images.BoxNotVisibleError):
+        email_images.prepare(p)
+
+
+def test_box_not_visible_error_is_a_value_error():
+    assert issubclass(email_images.BoxNotVisibleError, ValueError)
