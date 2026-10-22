@@ -1190,31 +1190,7 @@ async def _generate_audit_screenshot_once(
                 # runs 5-10x higher than a real unthrottled page load. This
                 # is what produced a "hero content takes 17.5s" flaw on a
                 # site that a real visitor saw render in ~2s.
-                await context.add_init_script("""
-                    window.__webVitals = { lcp: null, clsSum: 0, tbtMs: 0 };
-                    try {
-                        new PerformanceObserver((list) => {
-                            const entries = list.getEntries();
-                            const last = entries[entries.length - 1];
-                            if (last) window.__webVitals.lcp = last.startTime;
-                        }).observe({ type: 'largest-contentful-paint', buffered: true });
-                    } catch (e) {}
-                    try {
-                        new PerformanceObserver((list) => {
-                            for (const entry of list.getEntries()) {
-                                if (!entry.hadRecentInput) window.__webVitals.clsSum += entry.value;
-                            }
-                        }).observe({ type: 'layout-shift', buffered: true });
-                    } catch (e) {}
-                    try {
-                        new PerformanceObserver((list) => {
-                            for (const entry of list.getEntries()) {
-                                const blocking = entry.duration - 50;
-                                if (blocking > 0) window.__webVitals.tbtMs += blocking;
-                            }
-                        }).observe({ type: 'longtask', buffered: true });
-                    } catch (e) {}
-                """)
+                await context.add_init_script(_web_vitals_init_script())
 
                 page = await context.new_page()
 
@@ -1676,6 +1652,56 @@ async def _get_performance_timing(page) -> dict:
     except Exception as e:
         print(f"[Perf] Failed to extract timing: {e}")
     return {}
+
+
+# How long after the page's `load` event a new largest paint still counts as
+# part of loading. The audit keeps the page open for a long time (settle wait,
+# scroll pass, axe-core, link checks) and a browser keeps reporting new
+# "largest" paints for all of it: a video player that swaps in a frame, or a
+# lazy image revealed by our own scroll pass, can register as the LCP 25+
+# seconds in. Live-caught 2026-10-22 on mmga.agency: the audit reported a 27.1s
+# LCP while Google's own measurement was 1.9s desktop / 15.1s mobile, and the
+# email told the owner his page takes 27 seconds. Chrome itself stops LCP at
+# the first user input; this does the same (scroll, wheel, key, click, touch)
+# and also stops a few seconds after load.
+_LCP_FREEZE_AFTER_LOAD_MS = 5000
+
+
+def _web_vitals_init_script(freeze_after_load_ms: int = _LCP_FREEZE_AFTER_LOAD_MS) -> str:
+    """Bare script body for context.add_init_script (NOT an arrow function, see
+    the note where it is registered)."""
+    return """
+        window.__webVitals = { lcp: null, clsSum: 0, tbtMs: 0 };
+        let __lcpFrozenAt = null;
+        const __freezeLcp = () => { if (__lcpFrozenAt === null) __lcpFrozenAt = performance.now(); };
+        ['scroll', 'wheel', 'keydown', 'pointerdown', 'touchstart', 'mousedown'].forEach((t) =>
+            window.addEventListener(t, __freezeLcp, { capture: true, passive: true, once: true }));
+        window.addEventListener('load', () => setTimeout(__freezeLcp, %d));
+        try {
+            new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    // Only paints that happened before the freeze count.
+                    if (__lcpFrozenAt !== null && entry.startTime > __lcpFrozenAt) continue;
+                    window.__webVitals.lcp = entry.startTime;
+                }
+            }).observe({ type: 'largest-contentful-paint', buffered: true });
+        } catch (e) {}
+        try {
+            new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    if (!entry.hadRecentInput) window.__webVitals.clsSum += entry.value;
+                }
+            }).observe({ type: 'layout-shift', buffered: true });
+        } catch (e) {}
+        try {
+            new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    const blocking = entry.duration - 50;
+                    if (blocking > 0) window.__webVitals.tbtMs += blocking;
+                }
+            }).observe({ type: 'longtask', buffered: true });
+        } catch (e) {}
+    """ % int(freeze_after_load_ms)
 
 
 async def _get_real_web_vitals(page) -> dict:
