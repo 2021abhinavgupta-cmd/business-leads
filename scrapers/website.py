@@ -675,6 +675,7 @@ class WebsiteScraper:
             console_errors=extra.get("console_errors", []),
             mixed_content_urls=extra.get("mixed_content_urls", []),
             mobile_horizontal_overflow=extra.get("mobile_horizontal_overflow", False),
+            presentation_findings=extra.get("presentation_findings", []),
             duplicate_title_pages=extra.get("duplicate_title_pages", []),
             duplicate_meta_pages=extra.get("duplicate_meta_pages", []),
             html_validate_result=html_validate_result,
@@ -1409,6 +1410,7 @@ class WebsiteScraper:
         console_errors: list[str] | None = None,
         mixed_content_urls: list[str] | None = None,
         mobile_horizontal_overflow: bool = False,
+        presentation_findings: list[dict] | None = None,
         duplicate_title_pages: list[str] | None = None,
         duplicate_meta_pages: list[str] | None = None,
         has_business_schema: bool = False,
@@ -1674,6 +1676,16 @@ class WebsiteScraper:
 
         if mobile_horizontal_overflow:
             flaws.append(Flaw("performance", "high", "Page requires horizontal scrolling on a mobile phone screen — some content is wider than the viewport, a jarring experience for the majority of visitors who are on mobile."))
+
+        # "What a visitor sees" findings measured in the browser
+        # (analyzer/visuals.py:_presentation_findings): a video-only first
+        # screen with no headline, project cards that leave the site. They
+        # are conversion flaws: the work exists but the visitor never gets it.
+        for finding in presentation_findings or []:
+            description = (finding.get("description") or "").strip()
+            if description:
+                severity = "high" if finding.get("impact") == "serious" else "medium"
+                flaws.append(Flaw("conversion", severity, description + "."))
 
         if duplicate_title_pages and len(set(duplicate_title_pages)) >= 2:
             pages = ", ".join(sorted(set(duplicate_title_pages)))

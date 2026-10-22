@@ -1353,6 +1353,13 @@ async def _generate_audit_screenshot_once(
                 # and the image describe different moments.
                 pages_checked = [await _audit_current_page(page, context, "/")]
 
+                # --- 4b. What a first-time visitor sees (video-only first
+                # screen, project cards that leave the site). Homepage only,
+                # before the crawl navigates away; findings with something to
+                # point at also get a boxed screenshot.
+                presentation_findings = await _probe_presentation(page)
+                presentation_shots = await _capture_presentation_shots(page, presentation_findings)
+
                 # --- 5. Crawl a few internal pages and run the same checks on them ---
                 # Sitemap.xml first (catches real pages the nav doesn't link to);
                 # falls back to scanning the homepage's own anchor tags.
@@ -1571,7 +1578,7 @@ async def _generate_audit_screenshot_once(
             mobile_img.save(mobile_filepath, format="JPEG", quality=85)
 
         flaw_shots = _safe_collect_flaw_shots(
-            pages_checked,
+            pages_checked + presentation_shots,
             mobile_visual_flaw,
             mobile_screenshot_bytes,
             company_name,
@@ -1625,6 +1632,10 @@ async def _generate_audit_screenshot_once(
             "console_errors": console_errors,
             "mixed_content_urls": sorted(mixed_content_urls)[:5],
             "mobile_horizontal_overflow": bool(mobile_horizontal_overflow),
+            "presentation_findings": [
+                {"key": f["key"], "description": f["description"], "impact": f["impact"]}
+                for f in presentation_findings
+            ],
             "duplicate_title_pages": duplicate_title_pages,
             "duplicate_meta_pages": duplicate_meta_pages,
             "final_url": final_url,
@@ -2060,6 +2071,252 @@ async def _check_stretched_images(page) -> tuple[int, list[dict]]:
     except Exception as e:
         print(f"[Visuals] Stretched image check failed (non-critical): {e}")
         return 0, []
+
+
+# --- "What a visitor sees" checks (added 2026-10-22) ---------------------
+#
+# A third-party design audit of mmga.agency found things this pipeline never
+# looked at because none of them is an accessibility or performance defect:
+# the first screen was a video player with no headline, and the portfolio
+# cards sent visitors to Google Drive and Instagram instead of a page on the
+# site. Both are measurable in the DOM, so they are measured here rather than
+# judged by a vision model (the free-form version of that was retired on
+# 2026-08-31 for inventing criticisms).
+#
+# Every rule leans towards silence. A finding that is wrong is worse than a
+# missing one, so each needs positive evidence, and "could not measure" is
+# never reported as a flaw.
+
+_PROOF_FILE_HOSTS = ("drive.google.com", "docs.google.com")
+_PROOF_PROFILE_HOSTS = ("instagram.com", "linkedin.com", "behance.net", "dribbble.com")
+# Cards big enough to be a project tile, not a footer social icon.
+_PROOF_CARD_MIN_W = 120
+_PROOF_CARD_MIN_H = 100
+_PROOF_MIN_CARDS = 3
+# The player must dominate the first screen before "no headline" is a claim
+# about the first screen rather than about a small embedded clip.
+_HERO_MEDIA_MIN_COVER = 0.35
+
+_PRESENTATION_PROBE_JS = """(cfg) => {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const shown = (el) => {
+        const s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) === 0) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+    const inFirstScreen = (r) => r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
+    const words = (t) => (t || '').trim().split(/\\s+/).filter(Boolean).length;
+    const inChrome = (el) => !!el.closest('nav, footer, [aria-hidden="true"]');
+
+    // 1. The biggest iframe/video on the first screen.
+    let media = null, mediaArea = 0;
+    for (const el of document.querySelectorAll('iframe, video')) {
+        if (!shown(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (!inFirstScreen(r)) continue;
+        const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+        const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        const area = Math.max(0, w) * Math.max(0, h);
+        if (area > mediaArea) { mediaArea = area; media = el; }
+    }
+
+    // 2. Is there a headline written as real text on the first screen?
+    let hasHeadline = false;
+    for (const el of document.querySelectorAll('h1,h2,h3,p,div,span,a,li,strong,b,em')) {
+        if (media && (el === media || media.contains(el))) continue;
+        if (inChrome(el) || !shown(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (!inFirstScreen(r)) continue;
+        const heading = /^H[1-3]$/.test(el.tagName);
+        let text = '';
+        if (heading) { text = el.textContent; }
+        else { for (const n of el.childNodes) if (n.nodeType === 3) text += n.textContent; }
+        if (words(text) < 2) continue;
+        const size = parseFloat(getComputedStyle(el).fontSize) || 0;
+        if (heading || size >= 28) { hasHeadline = true; break; }
+    }
+
+    // 3. Project cards that leave the site.
+    const hostOf = (a) => { try { return new URL(a.href, location.href).hostname.replace(/^www\\./, ''); } catch (e) { return ''; } };
+    const pathOf = (a) => { try { return new URL(a.href, location.href).pathname; } catch (e) { return ''; } };
+    const own = location.hostname.replace(/^www\\./, '');
+    // A link that exists in the layout. Opacity 0 is allowed on purpose:
+    // portfolio tiles often reveal their "open" button only on hover.
+    const present = (el) => {
+        const s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    };
+    // The project tile a link belongs to: the nearest ancestor (within 4
+    // levels) that is card sized, holds an image and carries at most two
+    // links. A row of footer social icons holds four or more links, so it is
+    // never mistaken for a tile.
+    const tileOf = (a) => {
+        let el = a;
+        for (let i = 0; i < 5 && el; i++, el = el.parentElement) {
+            if (el === document.body) return null;
+            const r = el.getBoundingClientRect();
+            if (r.width >= cfg.cardW && r.height >= cfg.cardH && el.querySelector('img')
+                && el.querySelectorAll('a[href]').length <= 2) return el;
+        }
+        return null;
+    };
+    const tiles = new Set(), tileHosts = [];
+    let firstSel = null;
+    for (const a of document.querySelectorAll('a[href]')) {
+        const host = hostOf(a);
+        if (!host || host === own) continue;
+        if (!present(a) || inChrome(a) || a.closest('header, footer')) continue;
+        const listed = cfg.fileHosts.concat(cfg.profileHosts).some(h => host === h || host.endsWith('.' + h));
+        if (!listed) continue;
+        // An Instagram post/reel link is a feed widget, not a portfolio tile.
+        if (host.endsWith('instagram.com') && /^\\/(p|reel|reels|tv)\\//.test(pathOf(a))) continue;
+        const tile = tileOf(a);
+        if (!tile || tiles.has(tile)) continue;
+        tiles.add(tile);
+        tileHosts.push(host);
+        if (!firstSel && shown(tile)) {
+            tile.setAttribute('data-mmga-flaw', 'mmga-proof-0');
+            firstSel = '[data-mmga-flaw="mmga-proof-0"]';
+        }
+    }
+    return {
+        heroMedia: !!media,
+        heroMediaCover: media ? mediaArea / (vw * vh) : 0,
+        hasHeadline: hasHeadline,
+        proofCards: tiles.size,
+        proofFileLinks: 0,
+        proofHosts: Array.from(new Set(tileHosts)).slice(0, 4),
+        proofSelector: firstSel,
+    };
+}"""
+
+_HOST_LABELS = {
+    "drive.google.com": "a Google Drive file",
+    "docs.google.com": "a Google Drive file",
+    "instagram.com": "an Instagram profile",
+    "linkedin.com": "a LinkedIn page",
+    "behance.net": "a Behance page",
+    "dribbble.com": "a Dribbble page",
+}
+
+
+def _presentation_findings(probe: dict | None) -> list[dict]:
+    """
+    Turn the raw probe measurements into findings. Pure, so the rules are
+    unit-testable without a browser. Each finding: key, description, impact
+    (axe-style: serious / moderate, so it ranks beside the other shots),
+    selector (to box, or None when there is nothing to point at) and scroll
+    (the element must be brought into view before it is boxed).
+    """
+    if not probe or not isinstance(probe, dict):
+        return []
+    findings: list[dict] = []
+
+    if not probe.get("hasHeadline"):
+        if probe.get("heroMedia") and (probe.get("heroMediaCover") or 0) >= _HERO_MEDIA_MIN_COVER:
+            findings.append({
+                "key": "hero_video_no_headline",
+                "description": (
+                    "The first screen of the home page is a video player with no headline written "
+                    "as text saying what the business does or who it helps, so a visitor has to "
+                    "watch the video to find out"
+                ),
+                "impact": "serious", "selector": None, "scroll": False,
+            })
+        elif not probe.get("heroMedia"):
+            findings.append({
+                "key": "no_headline_first_screen",
+                "description": (
+                    "The first screen of the home page has no headline written as real text "
+                    "saying what the business does, so what it offers is not readable until "
+                    "the visitor scrolls"
+                ),
+                "impact": "moderate", "selector": None, "scroll": False,
+            })
+
+    cards = int(probe.get("proofCards") or 0)
+    if cards >= _PROOF_MIN_CARDS:
+        labels = []
+        for host in probe.get("proofHosts") or []:
+            label = next((v for k, v in _HOST_LABELS.items() if host == k or host.endswith("." + k)), None)
+            if label and label not in labels:
+                labels.append(label)
+        if not labels:
+            where = "an outside website"
+        elif len(labels) == 1:
+            where = labels[0]
+        else:
+            where = ", ".join(labels[:-1]) + " or " + labels[-1]
+        findings.append({
+            "key": "proof_leaves_site",
+            "description": (
+                f"{cards} of the project cards on the home page open {where} instead of a page on "
+                f"the website itself, so a visitor looking at the work leaves the site before "
+                f"seeing any result"
+            ),
+            "impact": "serious",
+            "selector": probe.get("proofSelector"),
+            "scroll": True,
+        })
+    return findings
+
+
+async def _probe_presentation(page) -> list[dict]:
+    """Run the probe on the loaded homepage. Any failure means no findings."""
+    try:
+        probe = await page.evaluate(_PRESENTATION_PROBE_JS, {
+            "fileHosts": list(_PROOF_FILE_HOSTS),
+            "profileHosts": list(_PROOF_PROFILE_HOSTS),
+            "cardW": _PROOF_CARD_MIN_W,
+            "cardH": _PROOF_CARD_MIN_H,
+        })
+        return _presentation_findings(probe)
+    except Exception as e:
+        print(f"[Visuals] Presentation probe failed (non-critical): {e}")
+        return []
+
+
+async def _capture_presentation_shots(page, findings: list[dict]) -> list[dict]:
+    """
+    A boxed screenshot for each finding that has something to point at, as
+    page-shaped dicts collect_flaw_shots already understands. Findings with no
+    selector (an absence cannot be boxed) get no shot and stay text-only.
+    """
+    shots: list[dict] = []
+    for f in findings:
+        selector = f.get("selector")
+        if not selector:
+            continue
+        try:
+            if f.get("scroll"):
+                await page.evaluate(
+                    "(s) => { const el = document.querySelector(s); if (el) el.scrollIntoView({block: 'center'}); }",
+                    selector,
+                )
+                await page.wait_for_timeout(600)
+            flaw = await _highlight_element(
+                page, [{"selector": selector, "description": f["description"], "impact": f["impact"]}]
+            )
+            if not flaw:
+                continue
+            image = await _capture(page)
+            closeup = await _capture_closeup(page, flaw)
+            shots.append({
+                "label": "/", "visual_flaw": flaw,
+                "screenshot_bytes": image, "closeup_bytes": closeup,
+            })
+        except Exception as e:
+            print(f"[Visuals] Presentation shot skipped (non-critical): {e}")
+        finally:
+            await _remove_highlight(page)
+            try:
+                await page.evaluate("() => window.scrollTo(0, 0)")
+            except Exception:
+                pass
+    return shots
 
 
 async def _can_render_text(page) -> bool:
