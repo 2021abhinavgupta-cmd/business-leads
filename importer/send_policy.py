@@ -4,7 +4,7 @@ state that changed since approval, the CAN-SPAM address requirement, the
 bounce pause, and warning acknowledgement. Pure functions; app.py supplies
 the facts.
 """
-from importer import csv_rules
+from importer import csv_rules, presend_gate
 
 IMPORT_VARIANT = "import-automation"
 IMPORT_DESIGNED_VARIANT = "import-designed"
@@ -60,6 +60,13 @@ def check_import_send(
                 f"bounced ({bounce['rate_pct']}%, limit {bounce['pause_pct']}%)."
             ),
             "code": "import_paused", **bounce,
+        })
+    problems = presend_gate.presend_problems(lead["email"], lead.get("subject"), lead.get("body"))
+    if problems:
+        # Not bypassable with acknowledge_warnings: edit the draft and approve again.
+        raise SendBlocked(409, {
+            "message": "Blocked by the pre-send check: " + "; ".join(problems) + ".",
+            "code": "presend_gate", "problems": problems,
         })
     if lead["review_warnings"] and not acknowledge_warnings:
         raise SendBlocked(409, {
