@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore", message=".*looks like a URL.*")
 import config
 from analyzer.flaws import Flaw, rank as rank_flaws
 from analyzer import nap_check
+from analyzer import seo_probes
 from analyzer.ssl_expiry import days_until_cert_expiry
 from analyzer.agency_credit import detect_agency
 
@@ -486,6 +487,17 @@ class WebsiteScraper:
         seo_page = await self._run_pyseoanalyzer(url)
         robots_blocked, robots_checked = await self._check_robots_disallow_all(url)
         missing_alt_count = self._check_missing_alt_images(html)
+        # Deterministic search-visibility checks; any that cannot get a clean
+        # answer report nothing (no signal_status entry: not applicable is not failed).
+        try:
+            seo_probe_findings = (
+                seo_probes.html_findings(html, str(final_url))
+                + seo_probes.header_findings(extra.get("response_headers", {}))
+                + await seo_probes.probe_findings(self.client, url, str(final_url), html)
+            )
+        except Exception as e:
+            print(f"[Audit] seo probes skipped: {e}")
+            seo_probe_findings = []
 
         signal_status["tech_detection"] = "ok" if technologies else "no_data"
         signal_status["brand_context_crawl"] = "ok" if company_context else "no_data"
@@ -689,6 +701,7 @@ class WebsiteScraper:
             mixed_content_urls=extra.get("mixed_content_urls", []),
             mobile_horizontal_overflow=extra.get("mobile_horizontal_overflow", False),
             presentation_findings=extra.get("presentation_findings", []),
+            seo_probe_findings=seo_probe_findings,
             duplicate_title_pages=extra.get("duplicate_title_pages", []),
             duplicate_meta_pages=extra.get("duplicate_meta_pages", []),
             html_validate_result=html_validate_result,
@@ -1425,6 +1438,7 @@ class WebsiteScraper:
         mixed_content_urls: list[str] | None = None,
         mobile_horizontal_overflow: bool = False,
         presentation_findings: list[dict] | None = None,
+        seo_probe_findings: list[dict] | None = None,
         duplicate_title_pages: list[str] | None = None,
         duplicate_meta_pages: list[str] | None = None,
         has_business_schema: bool = False,
@@ -1700,6 +1714,13 @@ class WebsiteScraper:
             if description:
                 severity = "high" if finding.get("impact") == "serious" else "medium"
                 flaws.append(Flaw("conversion", severity, description + "."))
+
+        # Search-visibility facts from analyzer/seo_probes.py (canonical
+        # target, noindex header, duplicate head tags, redirect chain).
+        for finding in seo_probe_findings or []:
+            description = (finding.get("description") or "").strip()
+            if description:
+                flaws.append(Flaw(finding.get("category", "seo"), finding.get("severity", "low"), description + "."))
 
         if duplicate_title_pages and len(set(duplicate_title_pages)) >= 2:
             pages = ", ".join(sorted(set(duplicate_title_pages)))
