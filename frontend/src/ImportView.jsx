@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
-import { Upload, Loader2, Check, X, AlertTriangle, Send, RotateCcw, Ban, Sparkles } from 'lucide-react';
+import { Upload, Loader2, Check, X, AlertTriangle, Send, RotateCcw, Ban, Sparkles, FileText } from 'lucide-react';
+import { createPdfReport, reportErrorMessage } from './pdfReport';
 
 const API_BASE = '';
 const PAGE = 50;
@@ -66,6 +67,22 @@ export default function ImportView() {
   const [auditN, setAuditN] = useState('25');
   const [auditProg, setAuditProg] = useState(null);  // { running, total, done, no_flaws, failed, current }
   const [auditStarting, setAuditStarting] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
+
+  // The full design review as a PDF, for a lead who replied "yes". Takes about a minute.
+  const makeReport = async (lead) => {
+    setReportBusy(true);
+    setDrawerMessage('');
+    try {
+      await createPdfReport({
+        website: `https://${lead.domain}`, company: lead.organization || lead.domain, apiBase: API_BASE,
+      });
+    } catch (err) {
+      setDrawerMessage(`PDF report failed: ${reportErrorMessage(err)}`);
+    } finally {
+      setReportBusy(false);
+    }
+  };
   const [designEdit, setDesignEdit] = useState(null); // { subject, opening, sentences: [] } for designed leads
   const [previewHtml, setPreviewHtml] = useState('');
   const [previewError, setPreviewError] = useState('');
@@ -672,6 +689,11 @@ export default function ImportView() {
                   {auditStarting ? <Loader2 size={14} /> : <RotateCcw size={14} />} Re-audit
                 </button>
               )}
+              <button style={btn('#f97316', reportBusy)} disabled={reportBusy}
+                title="Visit this lead's website and make the full design review as a PDF to send when they reply. Takes about a minute."
+                onClick={() => makeReport(review)}>
+                {reportBusy ? <Loader2 size={14} /> : <FileText size={14} />} {reportBusy ? 'Making PDF...' : 'PDF report'}
+              </button>
               {dirty && review.status !== 'approved' && <span style={{ color: '#fbbf24', fontSize: 12, alignSelf: 'center' }}>Save your edit before approving</span>}
             </div>
             {review.status === 'approved' && review.is_designed && (
