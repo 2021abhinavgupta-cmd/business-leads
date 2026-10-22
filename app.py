@@ -13,7 +13,7 @@ from typing import Literal
 from urllib.parse import quote as _urlquote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,8 @@ from importer import service as import_service
 from importer import send_policy as import_send_policy
 from importer import audit_runner
 from importer import presend_gate
+from reporting import collect as reporting_collect
+from reporting import report as reporting_report
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -2513,6 +2515,98 @@ async def import_audit_cancel(
 ):
     audit_runner.cancel()
     return audit_runner.progress()
+
+
+# --- PDF design and conversion report -----------------------------------------
+# A short browser visit (reporting/collect.py) turned into a PDF
+# (reporting/report.py). Run as a background job because it takes about a
+# minute and waits for the one shared browser slot. Jobs live in memory; the
+# PDF files are kept on disk so a finished report can be downloaded again.
+
+REPORTS_DIR = os.path.join(BASE_DIR, "data", "reports")
+_report_jobs: dict[str, dict] = {}
+_report_tasks: set = set()
+_REPORT_JOB_TTL = 24 * 3600
+
+
+class ReportRequest(BaseModel):
+    website: str
+    company: str = ""
+
+
+def _report_slug(text: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in (text or "").lower()).strip("-")[:40] or "site"
+
+
+async def _run_report_job(job_id: str, website: str, company: str) -> None:
+    job = _report_jobs[job_id]
+    try:
+        collected = await reporting_collect.collect(website)
+        built = reporting_report.build_report(
+            company, website, collected,
+            contact_email=config.REPLY_TO_EMAIL or config.FROM_EMAIL or "",
+        )
+        pdf = await reporting_report.render_pdf(reporting_report.render_html(built))
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        path = os.path.join(REPORTS_DIR, f"{job_id}.pdf")
+        with open(path, "wb") as fh:
+            fh.write(pdf)
+        job.update(status="done", path=path, findings=len(built["findings"]),
+                   filename=f"MMGA-review-{_report_slug(built['company'])}.pdf")
+    except asyncio.CancelledError:
+        job.update(status="failed", error="Cancelled.")
+        raise
+    except Exception as e:
+        print(f"[Report] job {job_id} failed: {e}")
+        job.update(status="failed", error=str(e)[:300] or "The report could not be created.")
+
+
+@app.post("/api/report")
+async def create_report(
+    req: ReportRequest,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(5, 60)),
+):
+    website = (req.website or "").strip()
+    if website and "://" not in website:
+        website = "https://" + website
+    try:
+        await asyncio.to_thread(validate_public_url, website)
+    except UnsafeURLError as e:
+        raise HTTPException(status_code=400, detail=f"Refusing to build a report for this URL: {e}")
+    now = time.time()
+    for old in [k for k, v in _report_jobs.items() if now - v["created"] > _REPORT_JOB_TTL]:
+        _report_jobs.pop(old, None)
+    job_id = uuid.uuid4().hex
+    _report_jobs[job_id] = {"status": "running", "created": now}
+    task = asyncio.create_task(_run_report_job(job_id, website, req.company))
+    _report_tasks.add(task)
+    task.add_done_callback(_report_tasks.discard)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/report/{job_id}")
+async def report_status(
+    job_id: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(240, 60)),
+):
+    job = _report_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="No such report job (it may have expired).")
+    return {k: job.get(k) for k in ("status", "error", "findings", "filename")}
+
+
+@app.get("/api/report/{job_id}/pdf")
+async def report_pdf(
+    job_id: str,
+    _auth: None = Depends(require_api_key),
+    _rl: None = Depends(rate_limit(60, 60)),
+):
+    job = _report_jobs.get(job_id)
+    if not job or job.get("status") != "done" or not os.path.exists(job.get("path", "")):
+        raise HTTPException(status_code=404, detail="That report is not ready.")
+    return FileResponse(job["path"], media_type="application/pdf", filename=job.get("filename") or "report.pdf")
 
 
 # Mount screenshots folder

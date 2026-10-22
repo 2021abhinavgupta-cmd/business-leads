@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import axios from 'axios';
+import { createPdfReport, reportErrorMessage } from './pdfReport';
 import ImportView from './ImportView.jsx';
 import { Search, Zap, Send, Loader2, X, Check, Activity, BarChart, FileText, Home, Clock, DollarSign, LayoutDashboard, Calendar, FileEdit, MapPin, Eye, EyeOff, MessageSquare, MessageCircle, AlertTriangle, RefreshCw, Sprout, Shirt, HelpCircle, Bot, FileSpreadsheet } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -126,6 +127,20 @@ function App() {
   const [niche, setNiche] = useState('');
   const [city, setCity] = useState('');
   const [limit, setLimit] = useState(10);
+  // Websites whose PDF design report is being made right now.
+  const [reportBusy, setReportBusy] = useState({});
+  const handleReport = async (lead) => {
+    if (!lead.Website || reportBusy[lead.Website]) return;
+    setReportBusy((b) => ({ ...b, [lead.Website]: true }));
+    try {
+      await createPdfReport({ website: lead.Website, company: lead.Company, apiBase: API_BASE });
+    } catch (err) {
+      alert(`PDF report failed: ${reportErrorMessage(err)}`);
+    } finally {
+      setReportBusy((b) => ({ ...b, [lead.Website]: false }));
+    }
+  };
+
   const [leads, setLeads] = useState(() => {
     const saved = localStorage.getItem('leadAuditLeads');
     return saved ? JSON.parse(saved) : [];
@@ -2228,6 +2243,16 @@ function App() {
                       <span>{lead.auditData.budget_signal.label}</span>
                     </div>
                   )}
+                  <button
+                    className="budget-badge budget-badge--unclear"
+                    style={{ cursor: reportBusy[lead.Website] ? 'wait' : 'pointer', border: 'none' }}
+                    disabled={!!reportBusy[lead.Website]}
+                    title="Make the full design review as a PDF to send if they reply. Takes about a minute."
+                    onClick={() => handleReport(lead)}
+                  >
+                    {reportBusy[lead.Website] ? <Loader2 size={14} className="spin" /> : <FileText size={14} />}
+                    <span>{reportBusy[lead.Website] ? 'Making PDF...' : 'PDF report'}</span>
+                  </button>
                   {lead.auditData.built_by && (
                     <div
                       className="budget-badge budget-badge--unclear"

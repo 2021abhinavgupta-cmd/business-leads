@@ -15,6 +15,7 @@ from playwright.async_api import async_playwright
 from PIL import Image
 
 import config
+from analyzer import design_review
 from security_utils import UnsafeNavigationError, browser_url_allowed, link_probe_verdict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1336,6 +1337,12 @@ async def _generate_audit_screenshot_once(
                 presentation_findings = await _probe_presentation(page)
                 presentation_shots = await _capture_presentation_shots(page, presentation_findings)
 
+                # The designer's view (typefaces, sizes, heading order, button
+                # shapes, line length, first-screen call to action): raw
+                # measurements only, turned into observations for the PDF
+                # report by analyzer/design_review.py.
+                design_probe = await design_review.probe_design(page)
+
                 # --- 5. Crawl a few internal pages and run the same checks on them ---
                 # Sitemap.xml first (catches real pages the nav doesn't link to);
                 # falls back to scanning the homepage's own anchor tags.
@@ -1612,6 +1619,7 @@ async def _generate_audit_screenshot_once(
                 {"key": f["key"], "description": f["description"], "impact": f["impact"]}
                 for f in presentation_findings
             ],
+            "design_probe": design_probe,
             "duplicate_title_pages": duplicate_title_pages,
             "duplicate_meta_pages": duplicate_meta_pages,
             "final_url": final_url,
