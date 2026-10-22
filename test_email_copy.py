@@ -599,3 +599,49 @@ def test_the_audit_request_actually_carries_the_automation_flag():
     assert AuditRequest(
         company="X", website="https://x.example", include_automation_pitch=True
     ).include_automation_pitch is True
+
+
+# --- the opening line must not say the same thing as the first flaw paragraph ---
+
+_SLOW_OPENING = ("Your homepage's main image takes 27.1 seconds to appear, which means most people "
+                 "visiting from their phone will leave before they ever see your work.")
+_SLOW_PARAGRAPH = ("Your homepage's main image takes 27.1 seconds to appear on a desktop browser, which "
+                   "means mobile visitors will wait even longer. Google's own research shows that over "
+                   "half of mobile visitors abandon a page that takes longer than 3 seconds to load.")
+
+
+def _analysis(opening, paragraphs):
+    return {"email_subject": "S", "opening_line": opening,
+            "flaws": [{"paragraph": p} for p in paragraphs]}
+
+
+def test_an_opening_that_the_first_paragraph_restates_is_dropped(monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "short")
+    _, body = _sender().generate_email("Acme", "Priya", _analysis(_SLOW_OPENING, [_SLOW_PARAGRAPH]), "Kshitij")
+    assert body.count("27.1 seconds") == 1
+    assert "Google's own research" in body            # the fuller paragraph is the one kept
+
+
+def test_a_different_opening_is_kept(monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "short")
+    opening = "Your contact page hides the phone number, so calls from new customers never happen."
+    _, body = _sender().generate_email("Acme", "Priya", _analysis(opening, [_SLOW_PARAGRAPH]), "Kshitij")
+    assert opening in body and _SLOW_PARAGRAPH in body
+
+
+def test_the_same_words_with_a_different_number_are_not_treated_as_a_repeat(monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "short")
+    opening = _SLOW_OPENING.replace("27.1", "5.2")
+    _, body = _sender().generate_email("Acme", "Priya", _analysis(opening, [_SLOW_PARAGRAPH]), "Kshitij")
+    assert "5.2 seconds" in body and "27.1 seconds" in body
+
+
+def test_a_repeat_is_dropped_in_the_classic_variant_too(monkeypatch):
+    monkeypatch.setattr(config, "EMAIL_VARIANT", "classic")
+    _, body = _sender().generate_email(
+        "Acme", "Priya", _analysis(_SLOW_OPENING, [_SLOW_PARAGRAPH, "Your contact page hides the phone."]), "Kshitij")
+    assert body.count("27.1 seconds") == 1 and "contact page hides the phone" in body
+
+
+def test_a_short_opening_is_never_compared():
+    assert BaseSender._restates("Quick hello.", "Quick hello. And more words here.") is False

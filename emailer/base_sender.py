@@ -352,7 +352,23 @@ class BaseSender:
         # used a single-word name ("Priya"), so it never exercised this.
         greeting = f"Hi {self._first_name(contact_name)}," if self._is_a_real_person_name(contact_name, company) else "Hi there,"
 
-        body_lines = [f"{greeting}\n", f"{opening_line}\n"]
+        shown_flaws = flaws[:1] if variant == "short" else flaws
+
+        # The opening line is asked to lead with the strongest flaw, and the
+        # first flaw paragraph then covers that same flaw, so a draft could say
+        # the same thing twice in a row (live-caught 2026-10-22: "Your
+        # homepage's main image takes 27.1 seconds to appear" opened two
+        # consecutive paragraphs). When the paragraph already carries the
+        # opening's claim, the paragraph (the fuller of the two) stays and the
+        # opening is dropped.
+        for flaw in shown_flaws:
+            if self._restates(opening_line, flaw.get("paragraph", "")):
+                opening_line = ""
+                break
+
+        body_lines = [f"{greeting}\n"]
+        if opening_line.strip():
+            body_lines.append(f"{opening_line}\n")
 
         # Deliberately generic — no claim about THIS business qualifying for
         # any specific scheme, since that's unverifiable from an audit and a
@@ -374,8 +390,6 @@ class BaseSender:
         # that gets replies is typically 50-125. This is a hypothesis, not a
         # fact — which is exactly why it ships as a measurable variant rather
         # than a silent rewrite. See db.get_variant_performance().
-        shown_flaws = flaws[:1] if variant == "short" else flaws
-
         for flaw in shown_flaws:
             if "paragraph" in flaw:
                 body_lines.append(f"{flaw.get('paragraph', '')}\n")
@@ -429,6 +443,30 @@ class BaseSender:
         """
         stripped = (contact_name or "").strip()
         return stripped.split()[0] if stripped else ""
+
+    @staticmethod
+    def _restates(opening: str, paragraph: str) -> bool:
+        """True when `paragraph` already says what `opening` says: every number in
+        the opening appears in the paragraph AND either most of the opening's
+        words do, or the two share a run of six or more consecutive words (the
+        usual case: same claim, different second half)."""
+        import re
+        from difflib import SequenceMatcher
+
+        def seq(text: str) -> list[str]:
+            return re.findall(r"[a-z0-9.']+", (text or "").lower())
+
+        sa, sb = seq(opening), seq(paragraph)
+        a, b = {w for w in sa if len(w) > 2}, {w for w in sb if len(w) > 2}
+        if len(a) < 5 or not b:
+            return False
+        numbers = {w for w in a if any(c.isdigit() for c in w)}
+        if numbers and not numbers <= b:
+            return False
+        if len(a & b) / len(a) >= 0.6:
+            return True
+        run = SequenceMatcher(None, sa, sb, autojunk=False).find_longest_match(0, len(sa), 0, len(sb)).size
+        return run >= 6
 
     def _closing_lines(self, variant: str, your_name: str) -> list[str]:
         """
