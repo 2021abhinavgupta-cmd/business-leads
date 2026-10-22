@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import config
 from storage import db
+from emailer import themed_email
 from emailer.tracking import pixel_html, tracking_id_for
 
 
@@ -553,7 +554,8 @@ class BaseSender:
         the mobile view is what most of these prospects' customers actually
         see.
         """
-        body = self._with_footer(body, to_email)
+        reviewed_body = body                       # what the human approved, no footer
+        body = self._with_footer(body, to_email)   # the text/plain part carries the footer
         msg = MIMEMultipart("mixed")
         msg["Subject"] = subject
         msg["From"] = self.from_email
@@ -567,7 +569,6 @@ class BaseSender:
         for header, value in self._unsubscribe_headers(to_email).items():
             msg[header] = value
 
-        html_body = html_escape(body, quote=False).replace("\n", "<br>")
         # Only the HTML alternative carries the pixel — a text/plain part
         # can't load an image, and putting a bare URL there would just show
         # the recipient a tracking link.
@@ -590,25 +591,17 @@ class BaseSender:
             if path and os.path.exists(path)
         ]
 
+        # The warm-light theme (emailer/themed_email.py), the same look as the
+        # Import designed email. Captions come from the images really present.
+        lines = self._footer_lines(to_email)
+        themed = themed_email.render(
+            subject, reviewed_body,
+            [(cid, self._IMAGE_CAPTIONS[cid]) for cid, _ in attachments],
+            pixel=pixel,
+        ).replace(self._FOOTER_MARKER, self._footer_html(lines) if lines else "")
+
         if attachments:
-            figures = "".join(
-                f"""
-                            <p style="color: #475569; font-size: 14px; margin: 16px 0 8px;">{self._IMAGE_CAPTIONS[cid]}</p>
-                            <img src='cid:{cid}' alt='Website audit screenshot' style='max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); display: block; margin: 0 auto;'>"""
-                for cid, _ in attachments
-            )
-            html_with_img = f"""
-                    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
-                        <div style="padding: 20px;">
-                            {html_body}
-                        </div>
-                        <div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin: 20px 0; border: 1px solid #e2e8f0;">
-                            <h3 style="margin-top: 0; color: #0f172a; font-size: 16px;">Visual Audit Evidence</h3>{figures}
-                        </div>
-                        {pixel}
-                    </div>
-                    """
-            alt.attach(MIMEText(html_with_img, "html", "utf-8"))
+            alt.attach(MIMEText(themed, "html", "utf-8"))
 
             related = MIMEMultipart("related")
             related.attach(alt)
@@ -624,13 +617,7 @@ class BaseSender:
 
             msg.attach(related)
         else:
-            html_plain = f"""
-                    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a; line-height: 1.6;">
-                        {html_body}
-                        {pixel}
-                    </div>
-                    """
-            alt.attach(MIMEText(html_plain, "html", "utf-8"))
+            alt.attach(MIMEText(themed, "html", "utf-8"))
             msg.attach(alt)
 
         return msg
