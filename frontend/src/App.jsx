@@ -2228,6 +2228,14 @@ function App() {
                       <span>{lead.auditData.budget_signal.label}</span>
                     </div>
                   )}
+                  {lead.auditData.built_by && (
+                    <div
+                      className="budget-badge budget-badge--unclear"
+                      title={`Credited in the site footer (${lead.auditData.built_by.url}). For you only, never written into the email.`}
+                    >
+                      <span>Site built by: {lead.auditData.built_by.name}</span>
+                    </div>
+                  )}
                   {lead.auditData.signal_status && Object.values(lead.auditData.signal_status).some(s => s !== 'ok') && (
                     <div style={{
                       background: '#fffbeb',

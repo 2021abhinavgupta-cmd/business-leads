@@ -192,7 +192,11 @@ def _send_client_capturing_log_email(monkeypatch, draft):
         app_module.db, "log_email",
         lambda *a, **k: logged.update(k),
     )
-    client = TestClient(app_module.app, raise_server_exceptions=False)
+    # Own rate-limit bucket (keyed by API key): /api/send allows 10 per 60s
+    # process-wide, and a fast suite run would otherwise exhaust the shared one.
+    import uuid
+    client = TestClient(app_module.app, raise_server_exceptions=False,
+                        headers={"X-API-Key": uuid.uuid4().hex})
     return client, logged
 
 
