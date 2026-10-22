@@ -51,6 +51,7 @@ from importer import email_images as import_email_images
 from importer import service as import_service
 from importer import send_policy as import_send_policy
 from importer import audit_runner
+from importer import presend_gate
 from security_utils import validate_public_url, UnsafeURLError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1186,6 +1187,8 @@ async def _audit_lead_impl(req: AuditRequest, background_tasks: BackgroundTasks)
             # cannot leak into the drafted copy. See analyzer/budget_signal.py.
             # Computed once above (it also gates the audit), reused here.
             "budget_signal": budget_signal,
+            # Operator-only note: who the footer credits for building the site.
+            "built_by": getattr(web_data, "built_by", None),
         }
         if req.website:
             _audit_cache_set(req.website, result)
@@ -1332,6 +1335,18 @@ def _check_designed_import(lead: dict) -> list[tuple[str, bytes]]:
     return prepared
 
 
+def _enforce_presend_gate(to_email: str, subject: str, body: str) -> None:
+    """Hard block (409) for every non-import send route: unfilled placeholders,
+    empty fields, bad recipient, spam/generic-AI phrases. Not bypassable by
+    acknowledge_warnings. Import sends run the same check in send_policy."""
+    problems = presend_gate.presend_problems(to_email, subject, body)
+    if problems:
+        raise HTTPException(status_code=409, detail={
+            "message": "Blocked by the pre-send check: " + "; ".join(problems) + ".",
+            "code": "presend_gate", "problems": problems,
+        })
+
+
 async def _prepare_import_send(req: SendRequest) -> tuple[dict, list[tuple[str, bytes]] | None]:
     """
     Load an import lead and apply every import gate; raise HTTPException on a
@@ -1406,6 +1421,8 @@ async def send_email(
             send_to = import_lead["email"]
             log_company = import_lead.get("organization") or import_lead["domain"]
             log_website = import_lead["domain"]
+        else:
+            _enforce_presend_gate(send_to, send_subject, send_body)
 
         # The five accuracy checks in analyzer/ai_audit.py already flag a
         # draft whose copy looks fabricated, and their output has been
@@ -1820,6 +1837,8 @@ async def send_followup_route(
     if not to_email:
         raise HTTPException(status_code=400, detail="That sent email has no recipient address on record.")
 
+    _enforce_presend_gate(to_email, req.subject, req.body)
+
     try:
         success = await asyncio.to_thread(
             ses.send_followup, to_email, req.subject, req.body,
@@ -2006,6 +2025,7 @@ async def social_send(
     """Real send for a social EMAIL draft only. Thin wrapper over the
     configured sender: no screenshot, no review_warnings gate, no staleness
     check (that machinery is website-draft specific)."""
+    _enforce_presend_gate(req.target, req.subject, req.body)
     try:
         sender = get_sender()
         message_id = await asyncio.to_thread(

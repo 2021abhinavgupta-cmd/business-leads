@@ -31,6 +31,16 @@ import config
 from analyzer.flaws import Flaw, rank as rank_flaws
 from analyzer import nap_check
 from analyzer.ssl_expiry import days_until_cert_expiry
+from analyzer.agency_credit import detect_agency
+
+
+def _detect_built_by(html, final_url) -> dict | None:
+    """Footer agency credit for the operator's lead card; never raises."""
+    try:
+        host = urlparse(str(final_url) if "://" in str(final_url) else f"http://{final_url}").hostname
+        return detect_agency(html or "", host or "")
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -232,6 +242,9 @@ class WebsiteData:
     # rather than against a derived boolean — a mismatch flaw asserts a
     # specific fact about the page, and nothing downstream could see the page.
     site_phones: list[str] = field(default_factory=list)
+    # Agency credited in the footer ("Website by X"), {name, confidence, url} or
+    # None. Operator-only: shown on the lead card, never given to the AI.
+    built_by: dict | None = None
     # Already computed for flaw generation (_build_flaws) but previously
     # discarded with the rest of `parsed` once audit_website returned —
     # exposed here because analyzer/budget_signal.py needs them too, and
@@ -702,6 +715,7 @@ class WebsiteScraper:
             h1_tags=parsed["h1_tags"],
             homepage_text=parsed["homepage_text"],
             site_phones=parsed.get("site_phones") or [],
+            built_by=_detect_built_by(html, final_url),
             has_booking_widget=bool(parsed.get("has_booking_widget")),
             has_click_to_call=bool(parsed.get("has_click_to_call")),
             has_whatsapp_link=bool(parsed.get("has_whatsapp_link")),
