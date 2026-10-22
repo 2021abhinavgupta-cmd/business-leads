@@ -19,6 +19,7 @@ from PIL import Image
 
 from analyzer import design_review, seo_probes
 from analyzer import visuals
+from reporting import design_shots
 
 DESKTOP = {"width": 1440, "height": 900}
 _DESKTOP_UA = (
@@ -71,7 +72,7 @@ async def collect(website: str) -> dict:
         "desktop_image": None, "mobile_image": None, "card_image": None, "card_label": "",
         "presentation_findings": [], "design_probe": None, "real_web_vitals": {},
         "mobile_overflow": None, "mobile_scroll_width": None, "text_renderable": True,
-        "seo_findings": [],
+        "seo_findings": [], "design_shots": {},
     }
     sem = await visuals._acquire_playwright_slot()
     try:
@@ -105,6 +106,12 @@ async def collect(website: str) -> dict:
 
                 out["presentation_findings"] = await visuals._probe_presentation(page)
                 out["design_probe"] = await design_review.probe_design(page)
+
+                try:
+                    out["design_shots"] = await design_shots.capture(
+                        page, out["design_probe"], design_review.design_findings(out["design_probe"]))
+                except Exception as e:
+                    print(f"[Report] design pictures skipped (non-critical): {e}")
 
                 shots = await visuals._capture_presentation_shots(page, out["presentation_findings"])
                 if shots:
