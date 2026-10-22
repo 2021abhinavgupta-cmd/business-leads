@@ -53,6 +53,13 @@ _PRESENTATION = {
 }
 
 
+# Findings about something that is absent are shown on the first screen, where it is missing.
+_FIRST_SCREEN_PICTURE = {
+    "no_main_heading": "Home page, desktop, first screen: no line here is marked as the main heading.",
+    "no_first_screen_cta": "Home page, desktop, first screen: nothing here asks the visitor to get in touch.",
+}
+
+
 def _sentence(text: str) -> str:
     text = (text or "").strip()
     return text if text.endswith((".", "!", "?")) else text + "."
@@ -89,10 +96,15 @@ def build_report(company: str, website: str, collected: dict, *, contact_email: 
             "caption": "Home page, phone-sized screen, first screen.",
         })
 
+    shots = c.get("design_shots") or {}
     for d in design_review.design_findings(c.get("design_probe")):
+        shot = shots.get(d["key"]) or {}
+        image, caption = shot.get("image"), shot.get("caption", "")
+        if not image and d["key"] in _FIRST_SCREEN_PICTURE and c.get("desktop_image"):
+            image, caption = c["desktop_image"], _FIRST_SCREEN_PICTURE[d["key"]]
         findings.append({
             "key": d["key"], "title": d["title"], "saw": d["saw"], "advice": d["advice"],
-            "impact": d["impact"], "image": None, "caption": "",
+            "impact": d["impact"], "image": image, "caption": caption,
         })
 
     # A finding of the same key only once, then most important first (stable).
@@ -134,7 +146,7 @@ def build_report(company: str, website: str, collected: dict, *, contact_email: 
 def _img(data: bytes | None, alt: str, extra_style: str = "") -> str:
     if not data:
         return ""
-    return (f'<img alt="{escape(alt)}" style="display:block;width:100%;max-height:105mm;object-fit:cover;'
+    return (f'<img alt="{escape(alt)}" style="display:block;width:100%;max-height:150mm;object-fit:cover;'
             f'object-position:top;border-radius:6px;border:1px solid {PANEL};{extra_style}" '
             f'src="data:image/jpeg;base64,{base64.b64encode(data).decode()}">')
 
