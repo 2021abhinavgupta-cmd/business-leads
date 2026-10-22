@@ -1712,7 +1712,7 @@ class WebsiteScraper:
         for finding in presentation_findings or []:
             description = (finding.get("description") or "").strip()
             if description:
-                severity = "high" if finding.get("impact") == "serious" else "medium"
+                severity = {"serious": "high", "minor": "low"}.get(finding.get("impact"), "medium")
                 flaws.append(Flaw("conversion", severity, description + "."))
 
         # Search-visibility facts from analyzer/seo_probes.py (canonical

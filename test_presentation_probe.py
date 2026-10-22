@@ -185,3 +185,66 @@ async def test_an_instagram_post_feed_is_not_a_portfolio():
         + _cards([f"https://instagram.com/p/post{i}/" for i in range(6)]) + "</body>"
     )
     assert "proof_leaves_site" not in _keys(findings)
+
+
+# --- a contact form that never says when someone will reply -------------------
+
+def test_a_form_with_no_reply_time_is_a_low_finding():
+    out = _presentation_findings({"hasHeadline": True, "contactForms": 1, "contactFormNoPromise": 1})
+    assert _keys(out) == ["contact_form_no_reply_time"]
+    assert out[0]["impact"] == "minor" and out[0]["selector"] is None
+
+
+def test_one_form_that_does_promise_keeps_us_silent():
+    out = _presentation_findings({"hasHeadline": True, "contactForms": 2, "contactFormNoPromise": 1})
+    assert out == []
+
+
+def test_no_forms_means_no_finding():
+    assert _presentation_findings({"hasHeadline": True, "contactForms": 0, "contactFormNoPromise": 0}) == []
+
+
+def test_a_minor_finding_becomes_a_low_conversion_flaw():
+    from test_build_flaws import _build
+    flaws = _build(presentation_findings=[
+        {"key": "contact_form_no_reply_time", "description": "The form says nothing about replies", "impact": "minor"}])
+    assert [(f.category, f.severity) for f in flaws] == [("conversion", "low")]
+
+
+_FIELDS = "<input type='text' placeholder='Name'><input type='email' placeholder='Email'><input type='text' placeholder='Company'>"
+
+
+async def test_a_real_enquiry_form_with_no_reply_time_is_found():
+    findings, _ = await _probe(
+        f"<body style='margin:0'><h1>Acme studio</h1><section><form>{_FIELDS}<textarea></textarea>"
+        f"<button>Send</button></form></section></body>")
+    assert "contact_form_no_reply_time" in _keys(findings)
+
+
+@pytest.mark.parametrize("promise", [
+    "We reply within one working day.", "Expect an answer in 24 hours", "We'll get back to you soon",
+    "Our team will respond shortly", "Same day response",
+])
+async def test_a_stated_reply_time_next_to_the_form_clears_it(promise):
+    findings, _ = await _probe(
+        f"<body style='margin:0'><h1>Acme studio</h1><section><form>{_FIELDS}<textarea></textarea>"
+        f"<button>Send</button></form><p>{promise}</p></section></body>")
+    assert "contact_form_no_reply_time" not in _keys(findings)
+
+
+@pytest.mark.parametrize("form", [
+    "<form role='search'><input type='text'><button>Go</button></form>",
+    "<form><input type='search'><button>Go</button></form>",
+    "<form><input type='email' placeholder='Email'><button>Subscribe</button></form>",
+    "<form><input type='text'><input type='password'><input type='text'></form>",
+    "<form style='display:none'><input type='text'><input type='text'><input type='text'><textarea></textarea></form>",
+])
+async def test_search_login_newsletter_and_hidden_forms_are_not_enquiry_forms(form):
+    findings, _ = await _probe(f"<body style='margin:0'><h1>Acme studio</h1>{form}</body>")
+    assert "contact_form_no_reply_time" not in _keys(findings)
+
+
+async def test_a_footer_form_is_never_counted():
+    findings, _ = await _probe(
+        f"<body style='margin:0'><h1>Acme studio</h1><footer><form>{_FIELDS}<textarea></textarea></form></footer></body>")
+    assert "contact_form_no_reply_time" not in _keys(findings)

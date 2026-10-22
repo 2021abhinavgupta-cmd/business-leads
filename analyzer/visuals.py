@@ -2097,6 +2097,17 @@ _PROOF_MIN_CARDS = 3
 # about the first screen rather than about a small embedded clip.
 _HERO_MEDIA_MIN_COVER = 0.35
 
+# Wording that tells a visitor when to expect an answer. Deliberately broad:
+# any of these near the form means the site already says it.
+_REPLY_PROMISE_PATTERN = (
+    r"(within|in|under|inside)\s+(the\s+next\s+)?(\d+|one|two|three|a|an|24|48)\s*"
+    r"(-\s*)?(minutes?|mins?|hours?|hrs?|business\s+days?|working\s+days?|days?)"
+    r"|24\s*(/|x)?\s*7|\b24\s*(hours?|hrs?|h)\b|same[\s-]day|next[\s-](business|working)\s+day"
+    r"|(get|be)\s+back\s+to\s+you|hear\s+back|(we|i)(\s+will|'ll|’ll)?\s+"
+    r"(reply|respond|answer|call\s+you|be\s+in\s+touch|reach\s+out|contact\s+you)"
+    r"|(reply|response|turnaround)\s+time|quickly|shortly|as\s+soon\s+as"
+)
+
 _PRESENTATION_PROBE_JS = """(cfg) => {
     const vw = window.innerWidth, vh = window.innerHeight;
     const shown = (el) => {
@@ -2182,7 +2193,30 @@ _PRESENTATION_PROBE_JS = """(cfg) => {
             firstSel = '[data-mmga-flaw="mmga-proof-0"]';
         }
     }
+    // 4. A visible contact form with no promise about when someone replies.
+    // Only a real enquiry form counts: a textarea, or three or more text
+    // fields; never a search box, a login or a one-field newsletter signup,
+    // and nothing in the footer or nav. The promise may sit in the form or in
+    // its two nearest ancestors (a "we reply within a day" line beside it).
+    const promise = new RegExp(cfg.promise, 'i');
+    let contactForms = 0, contactFormNoPromise = 0;
+    for (const f of document.querySelectorAll('form')) {
+        if (!shown(f) || inChrome(f) || f.closest('header, footer')) continue;
+        if (f.getAttribute('role') === 'search' || f.querySelector('input[type=password], input[type=search]')) continue;
+        const fields = Array.from(f.querySelectorAll('input, textarea, select')).filter(i => {
+            const t = (i.getAttribute('type') || 'text').toLowerCase();
+            return !['hidden', 'submit', 'button', 'checkbox', 'radio', 'image', 'reset'].includes(t) && shown(i);
+        });
+        const hasTextarea = !!f.querySelector('textarea');
+        if (!(hasTextarea || fields.length >= 3)) continue;
+        contactForms++;
+        let scope = f;
+        for (let i = 0; i < 2 && scope.parentElement && scope.parentElement !== document.body; i++) scope = scope.parentElement;
+        if (!promise.test(scope.textContent || '')) contactFormNoPromise++;
+    }
     return {
+        contactForms: contactForms,
+        contactFormNoPromise: contactFormNoPromise,
         heroMedia: !!media,
         heroMediaCover: media ? mediaArea / (vw * vh) : 0,
         hasHeadline: hasHeadline,
@@ -2237,6 +2271,19 @@ def _presentation_findings(probe: dict | None) -> list[dict]:
                 "impact": "moderate", "selector": None, "scroll": False,
             })
 
+    # Only when every enquiry form found lacks a promise: one form with a reply
+    # time anywhere on the page is enough to stay silent.
+    forms = int(probe.get("contactForms") or 0)
+    if forms >= 1 and int(probe.get("contactFormNoPromise") or 0) == forms:
+        findings.append({
+            "key": "contact_form_no_reply_time",
+            "description": (
+                "The contact form on the home page does not say when to expect a reply, so a "
+                "visitor who sends it has no idea whether to wait a day or look elsewhere"
+            ),
+            "impact": "minor", "selector": None, "scroll": False,
+        })
+
     cards = int(probe.get("proofCards") or 0)
     if cards >= _PROOF_MIN_CARDS:
         labels = []
@@ -2272,6 +2319,7 @@ async def _probe_presentation(page) -> list[dict]:
             "profileHosts": list(_PROOF_PROFILE_HOSTS),
             "cardW": _PROOF_CARD_MIN_W,
             "cardH": _PROOF_CARD_MIN_H,
+            "promise": _REPLY_PROMISE_PATTERN,
         })
         return _presentation_findings(probe)
     except Exception as e:
