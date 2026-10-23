@@ -233,12 +233,13 @@ def _flaw_evidence(homepage_text: str | None, shots: list[dict]) -> str:
     return f"{homepage_text}\n{flaws}" if homepage_text else flaws
 
 
-def _design_checks(lead: dict, subject: str, body: str, flaw_count: int) -> list[str]:
+def _design_checks(lead: dict, subject: str, body: str, flaw_count: int, findings=()) -> list[str]:
     """compose.run_checks over the designed text body. The renderer numbers the
     sections and names the HTML version, so those are not hallucinated numbers
     or shouting; the evidence warnings are left out because a designed draft's
     evidence is the measured flaws, which the fact checker covers."""
-    facts = f"{compose.facts_text(lead)} {' '.join(str(n) for n in range(1, flaw_count + 1))}"
+    facts = (f"{compose.facts_text(lead)} {' '.join(str(n) for n in range(1, flaw_count + 1))} "
+             f"{' '.join(findings)}")
     return compose.run_checks(
         subject, body.replace("HTML", "Html"),
         company=lead.get("organization") or lead.get("domain") or "this lead",
@@ -246,7 +247,14 @@ def _design_checks(lead: dict, subject: str, body: str, flaw_count: int) -> list
     )
 
 
-def _render(lead: dict, copy: dict, shots: list[dict], reply_to: str) -> tuple[str, str]:
+def finding_lines(lead: dict) -> list[str]:
+    """The lead's measured text-only findings as plain sentences (at most MAX_FINDINGS)."""
+    out = [str(f.get("description") or "").strip() for f in (lead.get("text_findings") or []) if isinstance(f, dict)]
+    return [x for x in out if x][:email_html.MAX_FINDINGS]
+
+
+def _render(lead: dict, copy: dict, shots: list[dict], reply_to: str, findings=None) -> tuple[str, str]:
+    copy = {**copy, "findings": finding_lines(lead) if findings is None else findings}
     return email_html.render(
         copy, shots, first_name=compose._first_name(lead.get("person_name") or ""),
         company=lead.get("organization") or "", reply_to=reply_to,
@@ -401,12 +409,12 @@ def draft_designed(lead: dict, auditor, *, your_name: str, reply_to: str,
         return _as_text(lead, auditor, your_name, fetch, cost=total_cost,
                         reason=f"the designed email could not be built ({e}).")
 
-    warnings = _design_checks(lead, copy["subject"], text, count)
+    warnings = _design_checks(lead, copy["subject"], text, count, finding_lines(lead))
     warnings.extend(_fact_check_warnings(issues, verify, checked))
     return {
         "subject": copy["subject"], "body": text, "html_body": html,
         "design": {"opening": copy["opening"], "headline": copy["headline"], "sections": copy["sections"],
-                   "shot_fingerprints": fingerprints},
+                   "findings": finding_lines(lead), "shot_fingerprints": fingerprints},
         "review_warnings": warnings, "source_quote": "", "ai_cost": total_cost,
     }
 
@@ -441,10 +449,10 @@ def redesign(lead: dict, subject: str, opening: str, sections: list[dict], *, re
     if not all([copy["subject"], copy["opening"], *(s["sentence"] for s in copy["sections"])]):
         raise DesignEditError("Subject, opening and every sentence must be filled in.")
     try:
-        html, text = _render(lead, copy, shots, reply_to)
+        html, text = _render(lead, copy, shots, reply_to, design.get("findings") or [])
     except Exception as e:
         raise DesignEditError(f"The designed email could not be built ({e}); draft it again.") from e
-    warnings = _design_checks(lead, copy["subject"], text, len(shots))
+    warnings = _design_checks(lead, copy["subject"], text, len(shots), design.get("findings") or [])
     warnings.extend(f"Copy check: {i}" for i in copy_issues(copy, len(shots), lead.get("organization")))
     # design keeps the shot fingerprints stored at draft time: an edit changes
     # the words, never which screenshots the email was checked against.
