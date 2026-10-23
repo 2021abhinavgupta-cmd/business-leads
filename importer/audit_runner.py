@@ -12,7 +12,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from analyzer import visuals
+from analyzer import design_review, visuals
 from importer import email_images
 from analyzer.visuals import generate_audit_screenshot
 from urllib.parse import urlparse
@@ -21,6 +21,10 @@ from security_utils import UnsafeNavigationError, UnsafeURLError, is_plain_hostn
 from storage import import_store
 
 MIN_SHOTS = 1
+MAX_TEXT_FINDINGS = 6
+# One site that hangs (a never-ending page, a stuck browser) must not hold the
+# single audit slot, and every lead queued behind it, forever.
+AUDIT_TIMEOUT_S = 240
 AUDITABLE_STATUSES = ("ready", "drafted")
 _CHROME_SELECTOR = re.compile(
     r"(?i)(?:^|[^a-z])(?:chat|drift|crisp|cookie|cookies|consent|gdpr)(?:[^a-z]|$)"
@@ -128,6 +132,23 @@ async def verify_shots(shots: list[dict], judge) -> tuple[list[dict], list[dict]
     return kept, dropped
 
 
+def text_findings(extra: dict) -> list[dict]:
+    """Measured findings with nothing to box, as {"key", "description"}: the
+    visitor-view probes, the designer-view measurements (each quotes its own
+    number) and a sideways-scrolling phone page. All deterministic; none comes
+    from a model's reading of an image."""
+    out: list[dict] = []
+    for f in extra.get("presentation_findings") or []:
+        if f.get("key") and f.get("description"):
+            out.append({"key": f["key"], "description": str(f["description"])})
+    for f in design_review.design_findings(extra.get("design_probe")):
+        out.append({"key": f["key"], "description": f"{f['title']}. {f['saw']}"})
+    if extra.get("mobile_horizontal_overflow"):
+        out.append({"key": "mobile_overflow",
+                    "description": "On a phone the home page is wider than the screen, so a visitor has to scroll sideways"})
+    return out[:MAX_TEXT_FINDINGS]
+
+
 async def audit_one(lead: dict, capture=generate_audit_screenshot,
                     judge=visuals._vision_confirms_visible_defect) -> dict:
     def result(status, shots=None, dropped=None, error=None):
@@ -165,10 +186,13 @@ async def audit_one(lead: dict, capture=generate_audit_screenshot,
     if html is None or extra is None:
         return result("failed", error="capture failed: the website could not be loaded")
     kept, dropped = await verify_shots(list(extra.get("flaw_shots") or []), judge)
+    findings = text_findings(extra)
     if len(kept) < MIN_SHOTS:
         reasons = "; ".join(d["reason"] for d in dropped) or _NO_VERIFIED
-        return result("no_flaws", [], dropped, _err(reasons))
-    return result("done", kept, dropped)
+        # Measured findings need no picture: the text email can still cite them.
+        status = "text_only" if findings else "no_flaws"
+        return {**result(status, [], dropped, _err(reasons)), "text_findings": findings}
+    return {**result("done", kept, dropped), "text_findings": findings}
 
 
 async def _run(lead_ids: list[int], capture, judge) -> None:
@@ -189,13 +213,18 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
                         lead_id, only_if_status=AUDITABLE_STATUSES, audit_status="running"):
                     continue
                 try:
-                    res = await audit_one(lead, capture=capture, judge=judge)
+                    res = await asyncio.wait_for(
+                        audit_one(lead, capture=capture, judge=judge), timeout=AUDIT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    res = {"audit_status": "failed", "flaw_shots": [],
+                           "audit_error": f"the audit took longer than {AUDIT_TIMEOUT_S} seconds and was stopped"}
                 except Exception as exc:
                     res = {"audit_status": "failed", "flaw_shots": [],
                            "audit_error": _err(f"audit crashed: {type(exc).__name__}")}
                 status = res["audit_status"]
                 fields = dict(audit_status=status, flaw_shots=res["flaw_shots"],
-                              audit_error=res["audit_error"], audited_at=import_store.now_sql())
+                              audit_error=res["audit_error"], audited_at=import_store.now_sql(),
+                              text_findings=res.get("text_findings") or [])
                 # A designed email pairs its sentences with the old screenshots, so a
                 # new result makes it invalid: clear it and send the lead back to ready
                 # in the same compare and set write (the user drafts it again).
@@ -208,7 +237,7 @@ async def _run(lead_ids: list[int], capture, judge) -> None:
                         lead_id, only_if_status=AUDITABLE_STATUSES, only_if_designed=False, **fields)
                 if not saved:
                     continue  # lead changed while auditing: discard the result
-                _progress["done" if status == "done" else status] += 1
+                _progress["no_flaws" if status == "text_only" else "done" if status == "done" else status] += 1
         finally:
             for lead_id in lead_ids:
                 lead = import_store.get_lead(lead_id)

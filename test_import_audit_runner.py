@@ -592,3 +592,52 @@ async def test_a_discarded_re_audit_over_intact_shots_restores_done(tmp_path):
 def test_the_cancel_docstring_describes_what_cancel_does():
     doc = audit_runner.cancel.__doc__
     assert "'none'" not in doc and "previous" in doc
+
+
+# --- 2026-10-23: findings without a picture, and one hung site cannot jam the queue ---
+
+def _capture_with_extra(extra):
+    async def capture(url, company_name, on_queued=None, on_started=None, **_kw):
+        return "p.png", "<html></html>", {"flaw_shots": [], **extra}
+    return capture
+
+
+_HERO = {"key": "hero_video_no_headline", "description": "The first screen is a video with no headline", "impact": "serious"}
+
+
+async def test_measured_findings_without_a_picture_make_the_lead_text_only():
+    cap = _capture_with_extra({"presentation_findings": [_HERO], "mobile_horizontal_overflow": True})
+    res = await audit_runner.audit_one(_lead(), capture=cap, judge=_yes)
+    assert res["audit_status"] == "text_only" and res["flaw_shots"] == []
+    keys = [f["key"] for f in res["text_findings"]]
+    assert keys == ["hero_video_no_headline", "mobile_overflow"]
+
+
+async def test_nothing_measured_and_nothing_verified_stays_no_flaws():
+    res = await audit_runner.audit_one(_lead(), capture=_capture_with_extra({}), judge=_yes)
+    assert res["audit_status"] == "no_flaws" and res["text_findings"] == []
+
+
+async def test_text_findings_are_saved_on_the_lead(tmp_path):
+    ids = _make_leads(["ready"])
+    audit_runner.start_audit(ids, capture=_capture_with_extra({"presentation_findings": [_HERO]}), judge=_yes)
+    await _wait()
+    lead = import_store.get_lead(ids[0])
+    assert lead["audit_status"] == "text_only"
+    assert lead["text_findings"][0]["key"] == "hero_video_no_headline"
+
+
+async def test_a_hung_site_is_stopped_and_the_next_lead_still_runs(monkeypatch):
+    monkeypatch.setattr(audit_runner, "AUDIT_TIMEOUT_S", 0.2)
+    ids = _make_leads(["ready", "ready"])
+
+    async def capture(url, company_name, on_queued=None, on_started=None, **_kw):
+        if "site0" in url:
+            await asyncio.sleep(30)
+        return "p.png", "<html></html>", {"flaw_shots": [], "presentation_findings": [_HERO]}
+
+    audit_runner.start_audit(ids, capture=capture, judge=_yes)
+    await _wait()
+    first, second = (import_store.get_lead(i) for i in ids)
+    assert first["audit_status"] == "failed" and "stopped" in first["audit_error"]
+    assert second["audit_status"] == "text_only"

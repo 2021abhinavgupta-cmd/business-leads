@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 
 import pytest
 
@@ -130,7 +130,7 @@ def test_v15_adds_audit_and_design_columns(monkeypatch, tmp_path):
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     conn.close()
     assert _V15_COLUMNS <= _lead_columns()
-    assert version == 15
+    assert version == 16
 
 
 def test_v14_database_migrates_to_v15_keeping_rows(monkeypatch, tmp_path):
@@ -142,7 +142,7 @@ def test_v14_database_migrates_to_v15_keeping_rows(monkeypatch, tmp_path):
     lead = import_store.get_lead(1)
     assert (lead["email"], lead["organization"], lead["subject"]) == ("old@acme.com", "Old Co", "Old subject")
     conn = sqlite3.connect(db.DB_PATH)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 16
     conn.close()
 
 

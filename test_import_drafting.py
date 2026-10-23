@@ -854,3 +854,12 @@ def test_the_company_name_inside_a_link_or_larger_token_is_still_flagged(organiz
 ])
 def test_the_company_name_used_as_a_name_is_still_exempt(organization, sentence):
     assert _issues_for(organization, sentence) == ""
+
+
+def test_measured_findings_reach_the_prompt_and_the_checks():
+    from analyzer.ai_audit import AIAuditor
+    lead = {"organization": "Acme", "text_findings": [{"key": "k", "description": "The home page uses 6 typefaces"}]}
+    prompt = AIAuditor._build_import_prompt(object.__new__(AIAuditor), lead, "page text", "Sam")
+    assert "WHAT WAS MEASURED ON THEIR WEBSITE" in prompt and "6 typefaces" in prompt
+    plain = AIAuditor._build_import_prompt(object.__new__(AIAuditor), {"organization": "Acme"}, "page text", "Sam")
+    assert "MEASURED ON THEIR WEBSITE" not in plain

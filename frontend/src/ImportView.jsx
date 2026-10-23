@@ -17,8 +17,8 @@ const STATUS_COLOR = {
   ready: '#38bdf8', drafted: '#a78bfa', approved: '#10b981', sent: '#64748b',
   failed: '#f87171', skipped: '#f59e0b',
 };
-const AUDIT_LABELS = { none: 'none', queued: 'queued', running: 'running', done: 'done', no_flaws: 'no flaws', failed: 'failed' };
-const AUDIT_COLOR = { none: '#64748b', queued: '#94a3b8', running: '#38bdf8', done: '#10b981', no_flaws: '#a78bfa', failed: '#f87171' };
+const AUDIT_LABELS = { none: 'none', queued: 'queued', running: 'running', done: 'done', no_flaws: 'no flaws', text_only: 'text findings', failed: 'failed' };
+const AUDIT_COLOR = { none: '#64748b', queued: '#94a3b8', running: '#38bdf8', done: '#10b981', no_flaws: '#a78bfa', text_only: '#f59e0b', failed: '#f87171' };
 const clampN = (v) => {
   const n = Math.floor(Number(v));
   return Number.isFinite(n) && String(v).trim() !== '' ? Math.min(200, Math.max(1, n)) : 25;
@@ -26,7 +26,7 @@ const clampN = (v) => {
 const FAILED_NOTE = 'Check History before retrying: a timeout can mean the email was sent.';
 // The backend audits only ready or drafted leads (audit_runner.AUDITABLE_STATUSES).
 const AUDITABLE = ['ready', 'drafted'];
-const RE_AUDITABLE_AUDITS = ['failed', 'no_flaws', 'done'];
+const RE_AUDITABLE_AUDITS = ['failed', 'no_flaws', 'text_only', 'done'];
 
 const errText = (err) => {
   const d = err?.response?.data?.detail;
