@@ -386,7 +386,7 @@ def test_designed_draft_returns_html_text_and_design(tmp_path):
     assert out["body"].startswith("Acme Bank has 3 website problems") and "Hi Jane," in out["body"]
     assert out["design"] == {
         "opening": flaw_copy(3)["opening"], "headline": "Acme Bank has 3 website problems",
-        "sections": flaw_copy(3)["sections"],
+        "sections": flaw_copy(3)["sections"], "findings": [],
         "shot_fingerprints": [
             {"path": s["path"], "description": s["description"],
              "sha256": hashlib.sha256(data).hexdigest()}
@@ -863,3 +863,15 @@ def test_measured_findings_reach_the_prompt_and_the_checks():
     assert "WHAT WAS MEASURED ON THEIR WEBSITE" in prompt and "6 typefaces" in prompt
     plain = AIAuditor._build_import_prompt(object.__new__(AIAuditor), {"organization": "Acme"}, "page text", "Sam")
     assert "MEASURED ON THEIR WEBSITE" not in plain
+
+
+def test_the_designed_email_lists_the_measured_text_findings():
+    from importer import email_html
+    copy = {"subject": "Site review", "headline": "Acme has 1 website problem", "opening": "Hello there.",
+            "sections": [{"index": 0, "title": "T", "sentence": "S"}],
+            "findings": ["The home page uses 6 typefaces <b>", "", "Two", "Three", "Four"]}
+    html, text = email_html.render(copy, [{"path": None}], first_name="Jo", company="Acme", reply_to="a@b.com")
+    assert "Also measured on your site" in html and "6 typefaces &lt;b&gt;" in html and "Four" not in html
+    assert "- The home page uses 6 typefaces <b>" in text
+    plain, _ = email_html.render({**copy, "findings": []}, [{"path": None}], first_name="Jo", company="Acme", reply_to="a@b.com")
+    assert "Also measured" not in plain

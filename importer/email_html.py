@@ -12,6 +12,7 @@ FOOTER_MARKER = "<!--FOOTER-->"
 IMG_WIDTH = 520
 FALLBACK_HEIGHT = 325
 MAX_SECTIONS = 5
+MAX_FINDINGS = 3
 
 CREAM = "#fff8ef"
 INK = "#2a1f14"
@@ -57,6 +58,20 @@ def _section(n: int, section: dict, shot: dict) -> str:
         f'<img src="cid:flaw{n}" alt="{alt}" width="{IMG_WIDTH}" height="{height}" '
         f'style="display:block;border:0;">'
         f'</td></tr>'
+    )
+
+
+def _findings_row(findings: list[str]) -> str:
+    if not findings:
+        return ""
+    items = "".join(
+        f'<li style="margin:0 0 8px 0;">{_e(f)}</li>' for f in findings)
+    return (
+        f'<tr><td bgcolor="{CREAM}" style="background-color:{CREAM};padding:0 40px 24px 40px;">'
+        f'<p style="margin:0 0 8px 0;font-family:{FONT};font-size:12px;font-weight:bold;'
+        f'letter-spacing:1px;text-transform:uppercase;color:{ACCENT};">Also measured on your site</p>'
+        f'<ul style="margin:0;padding:0 0 0 20px;font-family:{FONT};font-size:15px;line-height:23px;color:{INK};">'
+        f'{items}</ul></td></tr>'
     )
 
 
@@ -111,6 +126,8 @@ def render(copy: dict, shots: list[dict], *, first_name: str, company: str,
             raise ValueError(f"section {i} has index {section.get('index')!r}, expected {i}")
 
     rows = [_section(i + 1, section, shots[i]) for i, section in enumerate(sections)]
+    findings = [str(f).strip() for f in (copy.get("findings") or []) if str(f).strip()][:MAX_FINDINGS]
+    rows.append(_findings_row(findings))
 
     html = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
@@ -150,6 +167,8 @@ def render(copy: dict, shots: list[dict], *, first_name: str, company: str,
     lines = [headline, "", greeting, "", opening, ""]
     for i, section in enumerate(sections):
         lines += [f"{i + 1}. {section.get('title') or ''}", section.get("sentence") or "", ""]
+    if findings:
+        lines += ["Also measured on your site:", *(f"- {f}" for f in findings), ""]
     lines += [
         "The screenshots are in the HTML version of this email.",
         "",
