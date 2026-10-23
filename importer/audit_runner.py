@@ -24,7 +24,7 @@ MIN_SHOTS = 1
 MAX_TEXT_FINDINGS = 6
 # One site that hangs (a never-ending page, a stuck browser) must not hold the
 # single audit slot, and every lead queued behind it, forever.
-AUDIT_TIMEOUT_S = 240
+AUDIT_TIMEOUT_S = 360
 AUDITABLE_STATUSES = ("ready", "drafted")
 _CHROME_SELECTOR = re.compile(
     r"(?i)(?:^|[^a-z])(?:chat|drift|crisp|cookie|cookies|consent|gdpr)(?:[^a-z]|$)"
