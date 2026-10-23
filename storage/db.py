@@ -318,6 +318,12 @@ def init_db():
             cursor.execute(f"ALTER TABLE import_leads ADD COLUMN {column}")
         cursor.execute("PRAGMA user_version = 15")
 
+    # Schema v16 (2026-10-23): measured findings that have no boxed screenshot
+    # (JSON list of {"key", "description"}), kept so a text draft can cite them.
+    if schema_version < 16:
+        cursor.execute("ALTER TABLE import_leads ADD COLUMN text_findings TEXT")
+        cursor.execute("PRAGMA user_version = 16")
+
     conn.commit()
     conn.close()
 

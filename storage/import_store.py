@@ -20,9 +20,10 @@ _UPDATABLE = frozenset({
     "status", "skip_reason", "subject", "body", "review_warnings",
     "source_quote", "drafted_at", "sent_at", "history_id", "error",
     "audit_status", "audit_error", "audited_at", "flaw_shots", "html_body", "design_json",
+    "text_findings",
 })
 
-_JSON_FIELDS = {"flaw_shots": list, "design_json": dict}
+_JSON_FIELDS = {"flaw_shots": list, "design_json": dict, "text_findings": list}
 
 
 def now_sql() -> str:

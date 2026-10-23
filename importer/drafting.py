@@ -102,6 +102,10 @@ def _fact_check_warnings(issues, verify, checked) -> list[str]:
 def draft_lead(lead: dict, auditor, *, your_name: str, fetch=homepage.fetch_homepage_text) -> dict:
     homepage_text = _dashless(fetch(lead.get("domain") or ""))
     verify = getattr(auditor, "verify_import_email", None)
+    measured = _dashless(" ".join(
+        str(f.get("description") or "") for f in (lead.get("text_findings") or [])[:3] if isinstance(f, dict)))
+    # The measured findings are evidence the fact checker may cite, like the page text.
+    evidence = f"{homepage_text or ''} MEASURED ON THEIR WEBSITE: {measured}" if measured else homepage_text
 
     def generate(feedback):
         if feedback:
@@ -110,7 +114,7 @@ def draft_lead(lead: dict, auditor, *, your_name: str, fetch=homepage.fetch_home
 
     def check(result):
         return _verify(
-            verify, lead, homepage_text, " ".join(result["subject"].split()),
+            verify, lead, evidence, " ".join(result["subject"].split()),
             compose.clean_paragraphs(result["paragraphs"]),
         )
 
@@ -124,7 +128,7 @@ def draft_lead(lead: dict, auditor, *, your_name: str, fetch=homepage.fetch_home
     warnings = compose.run_checks(
         subject, body,
         company=lead.get("organization") or lead.get("domain") or "this lead",
-        facts_text=compose.facts_text(lead),
+        facts_text=f"{compose.facts_text(lead)} {measured}".strip(),
         homepage_text=homepage_text, source_quote=quote,
     )
     if len(subject) > MAX_SUBJECT_CHARS:
